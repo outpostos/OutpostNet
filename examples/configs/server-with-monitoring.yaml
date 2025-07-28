@@ -1,0 +1,127 @@
+# keelnet-server 配置示例（包含监控）
+server:
+  listen_addr: "0.0.0.0:7000"
+  auth_token: "your-secret-token"
+  
+  # STCP 模式的 TLS 配置
+  tls:
+    cert_file: "/etc/ssl/certs/server.crt"
+    key_file: "/etc/ssl/private/server.key"
+    ca_file: "/etc/ssl/certs/ca.crt"
+    trust_bundle: "/etc/ssl/certs/trust-bundle.pem"
+
+# Kubernetes 兼容 API
+k8s_api:
+  enabled: true
+  port: 8080
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9090
+  prometheus_enabled: true
+  alerts_enabled: true
+  metrics_path: "/metrics"
+
+# 服务定义
+services:
+  # Web 服务 (TCP 模式)
+  - name: "web-service"
+    namespace: "default"
+    labels:
+      app: "web"
+      version: "v1"
+    selector:
+      app: "web"
+    ports:
+      - name: "http"
+        port: 80
+        target_port: 8080
+        protocol: "tcp"
+    proxy_mode: "tcp"
+    load_balancer: "round_robin"
+
+  # 数据库服务 (STCP 加密模式)
+  - name: "database-service"
+    namespace: "default"
+    labels:
+      app: "database"
+      tier: "backend"
+    selector:
+      app: "mysql"
+    ports:
+      - name: "mysql"
+        port: 3306
+        target_port: 3306
+        protocol: "tcp"
+    proxy_mode: "stcp"  # 使用加密隧道
+    load_balancer: "least_connections"
+
+  # 缓存服务 (UDP 模式)
+  - name: "cache-service"
+    namespace: "default"
+    labels:
+      app: "cache"
+    selector:
+      app: "redis"
+    ports:
+      - name: "redis"
+        port: 6379
+        target_port: 6379
+        protocol: "udp"
+    proxy_mode: "udp"
+    load_balancer: "consistent_hash"
+
+  # 微服务 API (STCP 安全模式)
+  - name: "api-service"
+    namespace: "api"
+    labels:
+      app: "api-gateway"
+      security: "high"
+    selector:
+      app: "api-gateway"
+    ports:
+      - name: "https"
+        port: 443
+        target_port: 8443
+        protocol: "tcp"
+    proxy_mode: "stcp"
+    load_balancer: "weighted_round_robin"
+    
+    # 健康检查配置
+    health_check:
+      enabled: true
+      path: "/health"
+      interval: "30s"
+      timeout: "5s"
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+
+# Phase 2: 区域服务网格配置
+region:
+  name: "region-east"
+  zone: "zone-a"
+  cluster_id: "cluster-1"
+  
+  # 区域内服务发现
+  service_discovery:
+    enabled: true
+    gossip_port: 7001
+    sync_interval: "30s"
+    
+  # 跨区域通信
+  cross_region:
+    enabled: true
+    peers:
+      - name: "region-west"
+        endpoint: "region-west.example.com:7001"
+        weight: 1
+      - name: "region-central"  
+        endpoint: "region-central.example.com:7001"
+        weight: 2
+        
+  # 区域级负载均衡
+  load_balancing:
+    algorithm: "geographic_weighted"
+    failover_enabled: true
+    health_check_interval: "60s"

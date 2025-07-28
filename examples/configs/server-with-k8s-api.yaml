@@ -1,0 +1,43 @@
+server:
+  listen_addr: "0.0.0.0:7001"
+  auth_token: "your-secret-token"
+
+# K8s 兼容 API 配置
+k8s_api:
+  enabled: true
+  port: 8080
+
+services:
+  - metadata:
+      name: "web-service"
+      namespace: "default"
+      labels:
+        app: "web"
+        env: "prod"
+    spec:
+      selector:
+        app: "web"
+      ports:
+        - name: "http"
+          port: 80
+          targetPort: 8080
+          protocol: "tcp"
+      proxy_mode: "tcp"
+      load_balancer: "round_robin"
+  
+  - metadata:
+      name: "db-service"
+      namespace: "default"
+      labels:
+        app: "database"
+        env: "prod"
+    spec:
+      selector:
+        app: "mysql"
+      ports:
+        - name: "mysql"
+          port: 3306
+          targetPort: 3306
+          protocol: "tcp"
+      proxy_mode: "stcp"  # 使用加密隧道
+      load_balancer: "round_robin"

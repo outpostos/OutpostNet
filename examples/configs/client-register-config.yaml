@@ -1,0 +1,32 @@
+# keelnet-client 注册模式配置示例 (K8s Pod 风格)
+client:
+  server_addr: "127.0.0.1:7629"
+  auth_token: "test-client-token"
+  mode: "register"
+
+# 工作负载注册配置 - 注册本地工作负载实例 (类似 K8s Pod)
+# Controller 会根据标签自动发现并分配到对应的服务
+workloads:
+  - metadata:
+      labels:
+        app: "web"              # 服务发现标签
+        version: "v1"           # 版本标签
+        tier: "frontend"        # 层级标签
+        zone: "east"            # 区域标签
+        node: "edge-node-1"     # 节点标签
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 8080
+      protocol: "tcp"
+
+  - metadata:
+      labels:
+        app: "api"              # 不同的应用标签
+        version: "v1"           
+        tier: "backend"         
+        zone: "east"            
+        node: "edge-node-1"     
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 3000
+      protocol: "tcp"

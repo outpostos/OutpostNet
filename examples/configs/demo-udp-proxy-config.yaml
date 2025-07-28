@@ -1,0 +1,36 @@
+# Keelnet Client Demo Configuration - UDP Proxy Mode
+# UDP 服务消费方配置
+
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-udp-token"
+  mode: "proxy"
+
+# UDP 代理配置
+proxies:
+  - name: "demo-udp-proxy"
+    service_name: "demo-udp-service"
+    service_namespace: "default"
+    local_port: 19998
+    proxy_mode: "udp"
+    selector:
+      app: "demo-udp"
+      protocol: "udp"
+    load_balancer: "round_robin"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "10s"
+  timeout: "5s"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-udp-proxy-node"

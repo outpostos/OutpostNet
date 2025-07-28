@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(go test:*)",
+      "Bash(go mod:*)",
+      "Bash(make:*)",
+      "Bash(go run:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(protoc:*)",
+      "Bash(sed:*)",
+      "Bash(ls:*)",
+      "Bash(./build/outpostnet-server:*)",
+      "Bash(./build/outpostnet-client:*)"
+    ],
+    "deny": []
+  }
+}

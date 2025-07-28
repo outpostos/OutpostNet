@@ -1,0 +1,25 @@
+# keelnet Client 配置 (Register 模式 - 服务提供方)
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "phase2-demo-token"
+  mode: "register"
+
+# 注册服务到 keelnet-server
+services:
+  - name: "web-service"
+    namespace: "default"
+    local_addr: "127.0.0.1"
+    local_port: 8080
+    labels:
+      app: "web"
+      version: "v1"
+      node: "backend-node-1"
+      
+  - name: "api-service"
+    namespace: "default"
+    local_addr: "127.0.0.1"
+    local_port: 8081
+    labels:
+      app: "api"
+      version: "v2"
+      node: "backend-node-1"

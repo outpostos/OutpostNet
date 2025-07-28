@@ -1,0 +1,25 @@
+# keelnet-client 代理模式配置示例
+client:
+  server_addr: "127.0.0.1:7629"
+  auth_token: "test-client-token"
+  mode: "proxy"
+
+# 代理配置 - 本地端口代理到远程服务
+proxies:
+  - name: "web-proxy"
+    service_name: "web-service"
+    service_namespace: "default"
+    local_port: 8080
+    proxy_mode: "tcp"
+    selector:
+      app: "web"
+    load_balancer: "round_robin"
+
+  - name: "api-proxy"
+    service_name: "api-service"
+    service_namespace: "default"
+    local_port: 3000
+    proxy_mode: "tcp"
+    selector:
+      app: "api"
+    load_balancer: "round_robin"

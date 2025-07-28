@@ -1,0 +1,33 @@
+# keelnet 单节点配置 (当前实现)
+server:
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "phase2-demo-token"
+
+# 服务定义
+services:
+  - name: "web-service"
+    namespace: "default"
+    type: "NodePort"
+    selector:
+      app: "web"
+    ports:
+      - name: "http"
+        port: 80
+        nodePort: 30080
+        targetPort: 8080
+        protocol: "tcp"
+    proxy_mode: "tcp"
+    load_balancer: "round_robin"
+    
+  - name: "api-service"
+    namespace: "default"
+    type: "ClusterIP"  
+    selector:
+      app: "api"
+    ports:
+      - name: "api"
+        port: 8080
+        targetPort: 8080
+        protocol: "stcp"
+    proxy_mode: "stcp"
+    load_balancer: "round_robin"

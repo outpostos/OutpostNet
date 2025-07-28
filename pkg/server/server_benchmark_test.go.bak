@@ -1,0 +1,700 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/imneov/servicekeel/keelnet/pkg/config"
+	"github.com/imneov/servicekeel/keelnet/pkg/types"
+)
+
+// BenchmarkServer_NewServer 测试服务器创建性能
+func BenchmarkServer_NewServer(b *testing.B) {
+	cfg := createTestServerConfig(1)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		server, err := NewServer(cfg)
+		if err != nil {
+			b.Fatalf("创建服务器失败: %v", err)
+		}
+		_ = server
+	}
+}
+
+// BenchmarkServer_ServiceRegistration 测试服务注册性能
+func BenchmarkServer_ServiceRegistration(b *testing.B) {
+	for _, numServices := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("Services_%d", numServices), func(b *testing.B) {
+			cfg := createTestServerConfig(numServices)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				server, err := NewServer(cfg)
+				if err != nil {
+					b.Fatalf("创建服务器失败: %v", err)
+				}
+				_ = server
+			}
+		})
+	}
+}
+
+// BenchmarkServer_ClientConnection 测试客户端连接处理性能
+func BenchmarkServer_ClientConnection(b *testing.B) {
+	cfg := createTestServerConfig(1)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 启动服务器
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("启动监听失败: %v", err)
+	}
+	defer listener.Close()
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.handleConnection(conn)
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// 建立连接
+			conn, err := net.Dial("tcp", listener.Addr().String())
+			if err != nil {
+				b.Fatalf("连接服务器失败: %v", err)
+			}
+
+			// 发送认证消息
+			authMsg := types.Message{
+				Type: types.MsgTypeAuth,
+				ID:   "test",
+				Payload: types.AuthPayload{
+					Token: "test-token",
+					Mode:  "proxy",
+				},
+				Timestamp: time.Now(),
+			}
+
+			encoder := json.NewEncoder(conn)
+			err = encoder.Encode(authMsg)
+			if err != nil {
+				b.Fatalf("发送认证消息失败: %v", err)
+			}
+
+			// 读取响应
+			decoder := json.NewDecoder(conn)
+			var response types.Message
+			err = decoder.Decode(&response)
+			if err != nil {
+				b.Fatalf("读取响应失败: %v", err)
+			}
+
+			conn.Close()
+		}
+	})
+}
+
+// BenchmarkServer_WorkloadRegistration 测试工作负载注册性能
+func BenchmarkServer_WorkloadRegistration(b *testing.B) {
+	cfg := createTestServerConfig(1)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 启动服务器
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("启动监听失败: %v", err)
+	}
+	defer listener.Close()
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.handleConnection(conn)
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// 建立连接并认证
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			b.Fatalf("连接服务器失败: %v", err)
+		}
+
+		encoder := json.NewEncoder(conn)
+		decoder := json.NewDecoder(conn)
+
+		// 认证
+		authMsg := types.Message{
+			Type: types.MsgTypeAuth,
+			ID:   "test",
+			Payload: types.AuthPayload{
+				Token: "test-token",
+				Mode:  "register",
+			},
+			Timestamp: time.Now(),
+		}
+		encoder.Encode(authMsg)
+		
+		var authResponse types.Message
+		decoder.Decode(&authResponse)
+
+		// 注册工作负载
+		workload := types.Workload{
+			Metadata: types.WorkloadMetadata{
+				ID: fmt.Sprintf("workload-%d", i),
+				Labels: map[string]string{
+					"app": "test",
+					"instance": fmt.Sprintf("instance-%d", i),
+				},
+			},
+			Spec: types.WorkloadSpec{
+				LocalAddr: "127.0.0.1",
+				LocalPort: 8080 + i,
+				Protocol:  "tcp",
+			},
+		}
+
+		registerMsg := types.Message{
+			Type: types.MsgTypeRegisterWorkload,
+			ID:   "test",
+			Payload: types.RegisterWorkloadPayload{
+				Workload: workload,
+			},
+			Timestamp: time.Now(),
+		}
+
+		err = encoder.Encode(registerMsg)
+		if err != nil {
+			b.Fatalf("发送注册消息失败: %v", err)
+		}
+
+		var registerResponse types.Message
+		err = decoder.Decode(&registerResponse)
+		if err != nil {
+			b.Fatalf("读取注册响应失败: %v", err)
+		}
+
+		conn.Close()
+	}
+}
+
+// BenchmarkServer_ServiceQuery 测试服务查询性能
+func BenchmarkServer_ServiceQuery(b *testing.B) {
+	cfg := createTestServerConfig(10) // 创建10个服务
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 注册一些工作负载端点
+	for i := 0; i < 50; i++ {
+		workload := types.Workload{
+			Metadata: types.WorkloadMetadata{
+				ID: fmt.Sprintf("workload-%d", i),
+				Labels: map[string]string{
+					"app": fmt.Sprintf("test-app-%d", i%10),
+				},
+			},
+			Spec: types.WorkloadSpec{
+				LocalAddr: "127.0.0.1",
+				LocalPort: 8080 + i,
+				Protocol:  "tcp",
+			},
+			Status: types.WorkloadStatus{
+				RegisterIP: "127.0.0.1",
+			},
+		}
+		server.registry.RegisterWorkload(&workload)
+	}
+
+	// 启动服务器
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("启动监听失败: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.handleConnection(conn)
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// 建立连接并认证
+			conn, err := net.Dial("tcp", listener.Addr().String())
+			if err != nil {
+				b.Fatalf("连接服务器失败: %v", err)
+			}
+
+			encoder := json.NewEncoder(conn)
+			decoder := json.NewDecoder(conn)
+
+			// 认证
+			authMsg := types.Message{
+				Type: types.MsgTypeAuth,
+				ID:   "test",
+				Payload: types.AuthPayload{
+					Token: "test-token",
+					Mode:  "proxy",
+				},
+				Timestamp: time.Now(),
+			}
+			encoder.Encode(authMsg)
+			
+			var authResponse types.Message
+			decoder.Decode(&authResponse)
+
+			// 查询服务
+			queryMsg := types.Message{
+				Type: types.MsgTypeQueryService,
+				ID:   "test",
+				Payload: types.QueryServicePayload{
+					ServiceName:      "test-service-1",
+					ServiceNamespace: "default",
+					Selector: map[string]string{
+						"app": "test-app-1",
+					},
+				},
+				Timestamp: time.Now(),
+			}
+
+			err = encoder.Encode(queryMsg)
+			if err != nil {
+				b.Fatalf("发送查询消息失败: %v", err)
+			}
+
+			var queryResponse types.Message
+			err = decoder.Decode(&queryResponse)
+			if err != nil {
+				b.Fatalf("读取查询响应失败: %v", err)
+			}
+
+			conn.Close()
+		}
+	})
+}
+
+// BenchmarkServer_LoadBalancing 测试负载均衡性能
+func BenchmarkServer_LoadBalancing(b *testing.B) {
+	cfg := createTestServerConfig(1)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 创建测试服务
+	service := &types.Service{
+		Metadata: types.ServiceMetadata{
+			Name:      "load-balance-test",
+			Namespace: "default",
+		},
+		Spec: types.ServiceSpec{
+			LoadBalancer: "round_robin",
+		},
+	}
+
+	// 创建多个端点
+	endpoints := make([]*types.Endpoint, 10)
+	for i := 0; i < 10; i++ {
+		endpoints[i] = &types.Endpoint{
+			ID:   fmt.Sprintf("endpoint-%d", i),
+			IP:   fmt.Sprintf("10.0.0.%d", i+1),
+			Port: 8080,
+			Labels: map[string]string{
+				"app": "test",
+			},
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			endpoint := server.selectEndpoint(service, endpoints, "test-client")
+			_ = endpoint
+		}
+	})
+}
+
+// BenchmarkServer_STCPTunnel 测试STCP隧道性能
+func BenchmarkServer_STCPTunnel(b *testing.B) {
+	cfg := createTestServerConfig(1)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 注册测试服务端点
+	workload := types.Workload{
+		Metadata: types.WorkloadMetadata{
+			ID: "tunnel-workload",
+			Labels: map[string]string{
+				"app": "test-app-0",
+			},
+		},
+		Spec: types.WorkloadSpec{
+			LocalAddr: "127.0.0.1",
+			LocalPort: 18080,
+			Protocol:  "tcp",
+		},
+		Status: types.WorkloadStatus{
+			RegisterIP: "127.0.0.1",
+		},
+	}
+	server.registry.RegisterWorkload(&workload)
+
+	// 启动目标服务
+	targetListener, err := net.Listen("tcp", "127.0.0.1:18080")
+	if err != nil {
+		b.Fatalf("启动目标服务失败: %v", err)
+	}
+	defer targetListener.Close()
+
+	go func() {
+		for {
+			conn, err := targetListener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buffer := make([]byte, 1024)
+				n, _ := c.Read(buffer)
+				c.Write(buffer[:n]) // 回显
+			}(conn)
+		}
+	}()
+
+	// 启动服务器
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("启动监听失败: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.handleConnection(conn)
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// 建立连接并认证
+		conn, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			b.Fatalf("连接服务器失败: %v", err)
+		}
+
+		encoder := json.NewEncoder(conn)
+		decoder := json.NewDecoder(conn)
+
+		// 认证
+		authMsg := types.Message{
+			Type: types.MsgTypeAuth,
+			ID:   "test",
+			Payload: types.AuthPayload{
+				Token: "test-token",
+				Mode:  "stcp",
+			},
+			Timestamp: time.Now(),
+		}
+		encoder.Encode(authMsg)
+		
+		var authResponse types.Message
+		decoder.Decode(&authResponse)
+
+		// 请求STCP隧道
+		tunnelMsg := types.Message{
+			Type: types.MsgTypeSTCPTunnelRequest,
+			ID:   "test",
+			Payload: types.STCPTunnelRequestPayload{
+				ServiceName: "test-service-0",
+				TargetAddr:  "127.0.0.1:18080",
+			},
+			Timestamp: time.Now(),
+		}
+
+		err = encoder.Encode(tunnelMsg)
+		if err != nil {
+			b.Fatalf("发送隧道请求失败: %v", err)
+		}
+
+		var tunnelResponse types.Message
+		err = decoder.Decode(&tunnelResponse)
+		if err != nil {
+			b.Fatalf("读取隧道响应失败: %v", err)
+		}
+
+		// 发送测试数据
+		testData := []byte("hello stcp")
+		conn.Write(testData)
+
+		// 读取响应
+		buffer := make([]byte, len(testData))
+		conn.Read(buffer)
+
+		conn.Close()
+	}
+}
+
+// BenchmarkServer_ConcurrentClients 测试并发客户端性能
+func BenchmarkServer_ConcurrentClients(b *testing.B) {
+	cfg := createTestServerConfig(5)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 启动服务器
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("启动监听失败: %v", err)
+	}
+	defer listener.Close()
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.handleConnection(conn)
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			var wg sync.WaitGroup
+			numClients := 10
+
+			for i := 0; i < numClients; i++ {
+				wg.Add(1)
+				go func(clientID int) {
+					defer wg.Done()
+
+					// 建立连接
+					conn, err := net.Dial("tcp", listener.Addr().String())
+					if err != nil {
+						b.Errorf("客户端%d连接失败: %v", clientID, err)
+						return
+					}
+					defer conn.Close()
+
+					encoder := json.NewEncoder(conn)
+					decoder := json.NewDecoder(conn)
+
+					// 认证
+					authMsg := types.Message{
+						Type: types.MsgTypeAuth,
+						ID:   fmt.Sprintf("client-%d", clientID),
+						Payload: types.AuthPayload{
+							Token: "test-token",
+							Mode:  "proxy",
+						},
+						Timestamp: time.Now(),
+					}
+					encoder.Encode(authMsg)
+					
+					var authResponse types.Message
+					decoder.Decode(&authResponse)
+
+					// 执行一些操作
+					queryMsg := types.Message{
+						Type: types.MsgTypeQueryService,
+						ID:   fmt.Sprintf("query-%d", clientID),
+						Payload: types.QueryServicePayload{
+							ServiceName:      "test-service-1",
+							ServiceNamespace: "default",
+						},
+						Timestamp: time.Now(),
+					}
+					encoder.Encode(queryMsg)
+
+					var queryResponse types.Message
+					decoder.Decode(&queryResponse)
+				}(i)
+			}
+
+			wg.Wait()
+		}
+	})
+}
+
+// BenchmarkServer_MemoryUsage 测试内存使用情况
+func BenchmarkServer_MemoryUsage(b *testing.B) {
+	for _, numServices := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("Services_%d", numServices), func(b *testing.B) {
+			cfg := createTestServerConfig(numServices)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				server, err := NewServer(cfg)
+				if err != nil {
+					b.Fatalf("创建服务器失败: %v", err)
+				}
+
+				// 模拟注册大量工作负载
+				for j := 0; j < numServices*5; j++ {
+					workload := types.Workload{
+						Metadata: types.WorkloadMetadata{
+							ID: fmt.Sprintf("workload-%d-%d", i, j),
+							Labels: map[string]string{
+								"app": fmt.Sprintf("test-app-%d", j%numServices),
+							},
+						},
+						Spec: types.WorkloadSpec{
+							LocalAddr: "127.0.0.1",
+							LocalPort: 8080 + j,
+							Protocol:  "tcp",
+						},
+						Status: types.WorkloadStatus{
+							RegisterIP: "127.0.0.1",
+						},
+					}
+					server.registry.RegisterWorkload(&workload)
+				}
+
+				// 测试查询性能
+				endpoints, err := server.registry.GetEndpoints("test-service-1", "default", nil)
+				if err == nil {
+					_ = endpoints
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkServer_HealthCheck 测试健康检查性能
+func BenchmarkServer_HealthCheck(b *testing.B) {
+	cfg := createTestServerConfig(1)
+	server, err := NewServer(cfg)
+	if err != nil {
+		b.Fatalf("创建服务器失败: %v", err)
+	}
+
+	// 创建测试端点
+	endpoints := make([]*types.Endpoint, 100)
+	for i := 0; i < 100; i++ {
+		endpoint := &types.Endpoint{
+			ID:   fmt.Sprintf("endpoint-%d", i),
+			IP:   fmt.Sprintf("10.0.0.%d", (i%254)+1),
+			Port: 8080,
+			Labels: map[string]string{
+				"app": "test",
+			},
+		}
+		endpoints[i] = endpoint
+		server.healthChecker.AddEndpoint(endpoint)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		healthyEndpoints := server.healthChecker.GetHealthyEndpoints(endpoints)
+		_ = healthyEndpoints
+	}
+}
+
+// 辅助函数：创建测试服务器配置
+func createTestServerConfig(numServices int) *config.ServerConfig {
+	services := make([]types.Service, numServices)
+	for i := 0; i < numServices; i++ {
+		services[i] = types.Service{
+			Metadata: types.ServiceMetadata{
+				Name:      fmt.Sprintf("test-service-%d", i),
+				Namespace: "default",
+				Labels: map[string]string{
+					"app": fmt.Sprintf("test-app-%d", i),
+				},
+			},
+			Spec: types.ServiceSpec{
+				Selector: map[string]string{
+					"app": fmt.Sprintf("test-app-%d", i),
+				},
+				Ports: []types.ServicePort{
+					{
+						Name:       "http",
+						Port:       80,
+						TargetPort: 8080,
+						Protocol:   "tcp",
+					},
+				},
+				ProxyMode:    "tcp",
+				LoadBalancer: "round_robin",
+			},
+		}
+	}
+
+	return &config.ServerConfig{
+		Server: config.ServerSpec{
+			ListenAddr: "127.0.0.1:0",
+			AuthToken:  "test-token",
+		},
+		Services: services,
+		K8sAPI: config.K8sAPISpec{
+			Enabled: false,
+		},
+	}
+}

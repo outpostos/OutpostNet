@@ -1,0 +1,373 @@
+syntax = "proto3";
+
+package outpostnet.protocol;
+
+option go_package = "github.com/outpostos/OutpostNet/pkg/protocol";
+
+import "google/protobuf/timestamp.proto";
+
+// 核心消息类型
+message Message {
+  string type = 1;
+  string id = 2;
+  bytes payload = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  int32 version = 5; // 协议版本
+}
+
+// 消息类型常量 (在Go代码中定义)
+// MsgTypeAuth = "auth"
+// MsgTypeAuthResponse = "auth_response"
+// MsgTypeRegisterWorkload = "register_workload"
+// MsgTypeQueryService = "query_service"
+// MsgTypeServiceInfo = "service_info"
+// MsgTypeSTCPTunnelRequest = "stcp_tunnel_request"
+// MsgTypeSTCPTunnelResponse = "stcp_tunnel_response"
+// MsgTypeHeartbeat = "heartbeat"
+// MsgTypeError = "error"
+
+// 认证消息
+message AuthPayload {
+  string token = 1;
+  string mode = 2; // "register" 或 "proxy"
+  string client_version = 3;
+  map<string, string> capabilities = 4;
+}
+
+message AuthResponse {
+  bool success = 1;
+  string message = 2;
+  string client_id = 3;
+  string server_version = 4;
+  map<string, string> server_capabilities = 5;
+}
+
+// 工作负载注册消息
+message RegisterWorkloadPayload {
+  Workload workload = 1;
+  bool replace_if_exists = 2;
+}
+
+message Workload {
+  WorkloadMetadata metadata = 1;
+  WorkloadSpec spec = 2;
+  WorkloadStatus status = 3;
+}
+
+message WorkloadMetadata {
+  string id = 1;
+  map<string, string> labels = 2;
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message WorkloadSpec {
+  string local_addr = 1;
+  int32 local_port = 2;
+  string protocol = 3;
+}
+
+message WorkloadStatus {
+  bool ready = 1;
+  string reason = 2;
+  string message = 3;
+  google.protobuf.Timestamp last_seen = 4;
+  string register_ip = 5;
+}
+
+// 服务查询消息
+message QueryServicePayload {
+  string service_name = 1;
+  string service_namespace = 2;
+  map<string, string> selector = 3;
+  int32 max_endpoints = 4; // 限制返回的端点数量
+  bool include_unhealthy = 5;
+}
+
+message ServiceInfoPayload {
+  Service service = 1;
+  repeated Endpoint endpoints = 2;
+  google.protobuf.Timestamp cache_expiry = 3;
+}
+
+message Service {
+  ServiceMetadata metadata = 1;
+  ServiceSpec spec = 2;
+}
+
+message ServiceMetadata {
+  string name = 1;
+  string namespace = 2;
+  map<string, string> labels = 3;
+  
+  // Phase 2: 丰富的地理和应用元数据
+  map<string, string> annotations = 4;
+  string application = 5;
+  string cluster = 6;
+  string version = 7;
+  string site = 8;
+  string zone = 9;
+  string region = 10;
+}
+
+message ServiceSpec {
+  map<string, string> selector = 1;
+  repeated ServicePort ports = 2;
+  string proxy_mode = 3;
+  string load_balancer = 4;
+}
+
+message ServicePort {
+  string name = 1;
+  int32 port = 2;
+  int32 target_port = 3;
+  string protocol = 4;
+}
+
+message Endpoint {
+  string id = 1;
+  string ip = 2;
+  int32 port = 3;
+  string protocol = 4;
+  map<string, string> labels = 5;
+  EndpointStatus status = 6;
+  google.protobuf.Timestamp last_seen = 7;
+  int32 weight = 8; // 负载均衡权重
+  int32 priority = 9; // 优先级
+  
+  // Phase 2: 端点元数据
+  EndpointMetadata metadata = 10;
+}
+
+// Phase 2: 端点元数据
+message EndpointMetadata {
+  string application = 1;
+  string version = 2;
+  string node_id = 3;
+  string site = 4;
+  string zone = 5;
+  string region = 6;
+  string public_ip = 7;
+  string internal_ip = 8;
+  int32 max_conn = 9;
+  int64 uptime = 10; // 运行时间(秒)
+  float cpu = 11; // CPU使用率
+  float memory = 12; // 内存使用率
+  string source_node = 13; // 注册源节点
+  bool is_remote = 14; // 是否为远程端点
+}
+
+message EndpointStatus {
+  bool ready = 1;
+  string reason = 2;
+  string message = 3;
+  int32 health_score = 4; // 健康评分 0-100
+}
+
+// STCP隧道消息
+message STCPTunnelRequest {
+  string service_name = 1;
+  string target_addr = 2;
+  map<string, string> headers = 3;
+  int32 timeout_seconds = 4;
+  string preferred_endpoint_id = 5; // 指定首选端点
+}
+
+message STCPTunnelResponse {
+  bool success = 1;
+  string message = 2;
+  string tunnel_id = 3;
+  string selected_endpoint_id = 4; // 实际选择的端点
+  map<string, string> tunnel_info = 5;
+}
+
+// SUDP隧道消息
+message SUDPTunnelRequest {
+  string service_name = 1;
+  string target_addr = 2;
+  int32 local_port = 3;
+  int32 timeout_seconds = 4;
+  int32 buffer_size = 5;
+}
+
+message SUDPTunnelResponse {
+  bool success = 1;
+  string message = 2;
+  string tunnel_id = 3;
+  int32 server_port = 4;
+  string server_addr = 5;
+}
+
+// 心跳消息
+message HeartbeatPayload {
+  string status = 1;
+  map<string, string> metrics = 2;
+  int32 active_connections = 3;
+  int32 cpu_usage = 4;
+  int32 memory_usage = 5;
+}
+
+message PongPayload {
+  string status = 1;
+  google.protobuf.Timestamp server_time = 2;
+}
+
+// 错误消息
+message ErrorPayload {
+  int32 code = 1;
+  string message = 2;
+  string details = 3;
+  map<string, string> metadata = 4;
+}
+
+// 性能优化：批量操作消息
+message BatchMessage {
+  repeated Message messages = 1;
+  bool ordered = 2; // 是否需要按顺序处理
+}
+
+// 连接池相关消息
+message ConnectionPoolStats {
+  int32 active_connections = 1;
+  int32 idle_connections = 2;
+  int32 max_connections = 3;
+  int32 total_created = 4;
+  int32 total_closed = 5;
+  map<string, int32> connections_per_target = 6;
+}
+
+// 节点互联消息（为未来的分布式功能准备）
+message NodeInfo {
+  string node_id = 1;
+  string node_addr = 2;
+  map<string, string> labels = 3;
+  repeated string capabilities = 4;
+  google.protobuf.Timestamp last_seen = 5;
+}
+
+message NodeHeartbeat {
+  string node_id = 1;
+  NodeInfo node_info = 2;
+  repeated Service services = 3;
+  ConnectionPoolStats pool_stats = 4;
+}
+
+message ServiceSync {
+  repeated Service services = 1;
+  repeated Endpoint endpoints = 2;
+  int32 version = 3;
+  google.protobuf.Timestamp sync_time = 4;
+  
+  // Phase 2: 区域同步增强
+  string source_node_id = 5;
+  string region_id = 6;
+  string sync_scope = 7; // "region", "site", "zone"
+}
+
+// Phase 2: 区域发现和管理消息
+
+// 邻居节点信息
+message NeighborNode {
+  string node_id = 1;
+  string address = 2;
+  int32 weight = 3;
+  string zone = 4;
+  google.protobuf.Timestamp last_seen = 5;
+  string status = 6; // "online", "offline", "unknown"
+}
+
+// 区域配置
+message RegionConfig {
+  bool enabled = 1;
+  string region_id = 2;
+  string node_id = 3;
+  repeated NeighborNode neighbors = 4;
+  ServiceSyncConfig service_sync = 5;
+}
+
+// 服务同步配置
+message ServiceSyncConfig {
+  int64 sync_interval = 1; // 纳秒
+  int32 retry_count = 2;
+  bool health_check = 3;
+  int64 cache_timeout = 4; // 纳秒
+}
+
+// 区域服务查询
+message RegionServiceQuery {
+  string service_name = 1;
+  string service_namespace = 2;
+  map<string, string> selector = 3;
+  string region_id = 4;
+  string site_id = 5;
+  string zone_id = 6;
+  string query_scope = 7; // "local", "region", "site", "zone", "global"
+  int32 max_endpoints = 8;
+  bool include_unhealthy = 9;
+}
+
+// 区域服务响应
+message RegionServiceResponse {
+  repeated Service services = 1;
+  repeated Endpoint endpoints = 2;
+  string source_region = 3;
+  string source_node = 4;
+  google.protobuf.Timestamp cache_expiry = 5;
+  int32 total_endpoints = 6;
+  bool has_more = 7; // 是否有更多端点
+}
+
+// 节点健康检查
+message NodeHealthCheck {
+  string node_id = 1;
+  string region_id = 2;
+  google.protobuf.Timestamp check_time = 3;
+  map<string, string> health_metrics = 4;
+}
+
+// 节点健康响应
+message NodeHealthResponse {
+  string node_id = 1;
+  bool healthy = 2;
+  string status = 3;
+  map<string, string> metrics = 4;
+  google.protobuf.Timestamp response_time = 5;
+}
+
+// 服务故障通知
+message ServiceFailureNotification {
+  string service_name = 1;
+  string service_namespace = 2;
+  string endpoint_id = 3;
+  string failure_reason = 4;
+  string reporter_node = 5;
+  google.protobuf.Timestamp failure_time = 6;
+  string severity = 7; // "low", "medium", "high", "critical"
+}
+
+// 服务恢复通知
+message ServiceRecoveryNotification {
+  string service_name = 1;
+  string service_namespace = 2;
+  string endpoint_id = 3;
+  string recovery_reason = 4;
+  string reporter_node = 5;
+  google.protobuf.Timestamp recovery_time = 6;
+}
+
+// 区域拓扑发现
+message RegionTopologyQuery {
+  string region_id = 1;
+  bool include_services = 2;
+  bool include_endpoints = 3;
+  bool include_metrics = 4;
+}
+
+// 区域拓扑响应
+message RegionTopologyResponse {
+  string region_id = 1;
+  repeated NodeInfo nodes = 2;
+  repeated Service services = 3;
+  repeated Endpoint endpoints = 4;
+  map<string, string> region_metrics = 5;
+  google.protobuf.Timestamp topology_time = 6;
+}

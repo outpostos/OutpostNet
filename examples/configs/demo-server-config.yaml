@@ -1,0 +1,75 @@
+# Keelnet Server Demo Configuration
+# 用于端到端测试的服务器配置
+
+server:
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "demo-test-token"
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9090
+
+# 预定义服务配置
+services:
+  - metadata:
+      name: "demo-web-service"
+      namespace: "default"
+      labels:
+        app: "demo-web"
+        version: "v1"
+    spec:
+      selector:
+        app: "demo-web"
+      ports:
+        - name: "http"
+          port: 80
+          targetPort: 18000
+          protocol: "tcp"
+      proxy_mode: "tcp"
+      load_balancer: "round_robin"
+
+  - metadata:
+      name: "demo-stcp-service"
+      namespace: "default"
+      labels:
+        app: "demo-stcp"
+        version: "v1"
+    spec:
+      selector:
+        app: "demo-stcp"
+      ports:
+        - name: "stcp"
+          port: 443
+          targetPort: 18002
+          protocol: "stcp"
+      proxy_mode: "stcp"
+      load_balancer: "round_robin"
+
+  - metadata:
+      name: "demo-udp-service"
+      namespace: "default"
+      labels:
+        app: "demo-udp"
+        version: "v1"
+    spec:
+      selector:
+        app: "demo-udp"
+      ports:
+        - name: "udp"
+          port: 53
+          targetPort: 18001
+          protocol: "udp"
+      proxy_mode: "udp"
+      load_balancer: "round_robin"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-server-node"

@@ -1,0 +1,24 @@
+# keelnet Client 配置 (Proxy 模式 - 服务消费方)
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "phase2-demo-token"
+  mode: "proxy"
+
+# 代理配置
+proxies:
+  - name: "web-proxy"
+    service_name: "web-service"
+    service_namespace: "default"
+    local_port: 9080
+    proxy_mode: "tcp"
+    selector:
+      app: "web"
+      
+  - name: "api-proxy"
+    service_name: "api-service"
+    service_namespace: "default"
+    local_port: 9081
+    proxy_mode: "stcp"
+    selector:
+      app: "api"
+      version: "v2"

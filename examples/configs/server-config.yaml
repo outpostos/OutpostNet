@@ -1,0 +1,40 @@
+# keelnet-server 配置示例
+server:
+  listen_addr: "0.0.0.0:7629"
+  auth_token: "test-server-token"
+
+# 预定义的服务配置
+services:
+  - metadata:
+      name: "web-service"
+      namespace: "default"
+      labels:
+        app: "web"
+        version: "v1"
+    spec:
+      selector:
+        app: "web"
+      ports:
+        - name: "http"
+          port: 80
+          targetPort: 8080
+          protocol: "tcp"
+      proxy_mode: "tcp"
+      load_balancer: "round_robin"
+
+  - metadata:
+      name: "api-service"
+      namespace: "default"
+      labels:
+        app: "api"
+        tier: "backend"
+    spec:
+      selector:
+        app: "api"
+      ports:
+        - name: "api"
+          port: 3000
+          targetPort: 3000
+          protocol: "tcp"
+      proxy_mode: "tcp"
+      load_balancer: "round_robin"

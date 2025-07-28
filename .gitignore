@@ -1,0 +1,70 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+*.html
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.tar.gz
+*.zip
+
+# keelnet specific
+keelnet-server
+keelnet-client
+*.log
+
+# Demo environment files
+/tmp/keelnet-*.pid
+/tmp/keelnet-*.log
+/tmp/proxy-config.yaml
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.temp
+
+# Configuration files with secrets (keep examples)
+*-secret.yaml
+*-prod.yaml
+*.key
+*.crt
+*.pem
+
+# Local development
+.env
+.env.local

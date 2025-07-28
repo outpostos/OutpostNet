@@ -1,0 +1,59 @@
+# keelnet Node-A 配置 (区域网格主节点)
+server:
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "phase2-demo-token"
+  
+  # Phase 2 区域配置
+  region:
+    enabled: true
+    region_id: "region-east"
+    node_id: "node-a"
+    site_id: "site-datacenter"
+    zone_id: "zone-1"
+    listen_addr: "0.0.0.0:18000"  # 区域网格监听端口
+    
+    # 邻居节点配置
+    neighbors:
+      - node_id: "node-b"
+        address: "127.0.0.1:18001"
+      - node_id: "node-c"  
+        address: "127.0.0.1:18002"
+    
+    # 服务同步配置
+    service_sync:
+      sync_interval: "10s"
+      cache_timeout: "60s"
+      
+    # 负载均衡配置
+    load_balancer:
+      strategy: "geographic_aware"
+      health_check_enabled: true
+
+# 服务定义
+services:
+  - name: "web-service"
+    namespace: "default"
+    type: "NodePort"
+    selector:
+      app: "web"
+    ports:
+      - name: "http"
+        port: 80
+        nodePort: 30080
+        targetPort: 8080
+        protocol: "tcp"
+    proxy_mode: "tcp"
+    load_balancer: "round_robin"
+    
+  - name: "api-service"
+    namespace: "default" 
+    type: "ClusterIP"
+    selector:
+      app: "api"
+    ports:
+      - name: "api"
+        port: 8080
+        targetPort: 8080
+        protocol: "stcp"
+    proxy_mode: "stcp"
+    load_balancer: "geographic_aware"

@@ -1,0 +1,36 @@
+# Keelnet Client Demo Configuration - Register Mode
+# 服务提供方配置，用于注册本地服务到keelnet-server
+
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-test-token"
+  mode: "register"
+
+# 工作负载配置 - 注册本地服务
+workloads:
+  - metadata:
+      labels:
+        app: "demo-web"
+        version: "v1"
+        node: "demo-register-node"
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 18000
+      protocol: "tcp"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "10s"
+  timeout: "5s"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-register-node"
