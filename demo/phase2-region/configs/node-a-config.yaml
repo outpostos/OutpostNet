@@ -1,4 +1,4 @@
-# keelnet Node-A 配置 (区域网格主节点)
+# OutpostNet Node-A 配置 (区域网格主节点)
 server:
   listen_addr: "0.0.0.0:17000"
   auth_token: "phase2-demo-token"

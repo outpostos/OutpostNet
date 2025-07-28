@@ -1,0 +1,37 @@
+# OutpostNet Phase 2: Multi-Service Registration Configuration  
+#
+# This configuration shows how to register multiple backend services
+# with a single OutpostNet client. Each service can have different
+# labels and be discovered independently by proxy clients.
+#
+# Features:
+# - Multiple service registration in one client
+# - Rich labeling for service discovery
+# - Version-aware service routing
+# - Node identification for geographic routing
+
+# Client 配置 (Register 模式 - 服务提供方)
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "phase2-demo-token"
+  mode: "register"
+
+# 注册服务到 outpostnet-server
+services:
+  - name: "web-service"
+    namespace: "default"
+    local_addr: "127.0.0.1"
+    local_port: 8080
+    labels:
+      app: "web"
+      version: "v1"
+      node: "backend-node-1"
+      
+  - name: "api-service"
+    namespace: "default"
+    local_addr: "127.0.0.1"
+    local_port: 8081
+    labels:
+      app: "api"
+      version: "v2"
+      node: "backend-node-1"

@@ -1,0 +1,44 @@
+# Keelnet Client Demo Configuration - STCP Proxy Mode  
+# STCP 服务消费方配置，用于安全隧道代理
+
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-stcp-token"
+  mode: "proxy"
+
+# STCP 代理配置
+proxies:
+  - name: "demo-stcp-proxy"
+    service_name: "demo-stcp-service"
+    service_namespace: "default"
+    local_port: 19997
+    proxy_mode: "stcp"
+    selector:
+      app: "demo-stcp"
+      security: "encrypted"
+    load_balancer: "round_robin"
+
+# 安全配置
+security:
+  tls:
+    enabled: true
+    cert_file: ""
+    key_file: ""
+    ca_file: ""
+
+# 日志配置
+logging:
+  level: "debug"
+  format: "json"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "10s"
+  timeout: "5s"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-stcp-proxy-node"

@@ -1,0 +1,36 @@
+# OutpostNet Phase 2: Multi-Service Proxy Configuration
+#
+# This configuration demonstrates how to proxy multiple services
+# with different protocols (TCP and STCP) through a single client.
+# Perfect for applications that need to access multiple backend services.
+#
+# Features:
+# - Multiple proxy configurations in one client
+# - Mixed protocol support (TCP + STCP)
+# - Service-specific selectors and routing
+# - Different local ports for each service
+
+# Client 配置 (Proxy 模式 - 服务消费方)
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "phase2-demo-token"
+  mode: "proxy"
+
+# 代理配置
+proxies:
+  - name: "web-proxy"
+    service_name: "web-service"
+    service_namespace: "default"
+    local_port: 9080
+    proxy_mode: "tcp"
+    selector:
+      app: "web"
+      
+  - name: "api-proxy"
+    service_name: "api-service"
+    service_namespace: "default"
+    local_port: 9081
+    proxy_mode: "stcp"
+    selector:
+      app: "api"
+      version: "v2"

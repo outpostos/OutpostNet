@@ -1,3 +1,7 @@
+# Example API Response from Phase 2 Multi-Service Demo
+# This shows what you should expect when accessing the api-service
+# through OutpostNet STCP encrypted tunnel.
+
 HTTP/1.1 200 OK
 Content-Type: application/json
 
@@ -6,6 +10,8 @@ Content-Type: application/json
   "service": "api-service", 
   "version": "v2",
   "phase": 2,
-  "timestamp": "Fri Jul 18 19:22:09 CST 2025"
+  "timestamp": "2024-07-18 19:22:09 CST",
+  "tunnel": "STCP encrypted",
+  "region": "region-east"
 }
 

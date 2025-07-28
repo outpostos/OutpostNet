@@ -14,7 +14,10 @@
       "Bash(sed:*)",
       "Bash(ls:*)",
       "Bash(./build/outpostnet-server:*)",
-      "Bash(./build/outpostnet-client:*)"
+      "Bash(./build/outpostnet-client:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)"
     ],
     "deny": []
   }

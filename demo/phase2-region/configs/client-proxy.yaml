@@ -1,4 +1,4 @@
-# keelnet Client 配置 (Proxy 模式 - 服务消费方)
+# outpostnet Client 配置 (Proxy 模式 - 服务消费方)
 client:
   server_addr: "127.0.0.1:17000"
   auth_token: "phase2-demo-token"

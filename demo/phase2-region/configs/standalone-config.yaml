@@ -1,4 +1,4 @@
-# keelnet 单节点配置 (当前实现)
+# outpostnet 单节点配置 (当前实现)
 server:
   listen_addr: "0.0.0.0:17000"
   auth_token: "phase2-demo-token"

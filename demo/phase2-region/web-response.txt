@@ -1,8 +1,24 @@
+# Example Web Response from Phase 2 Regional Mesh Demo
+# This shows what you should expect when accessing the web-service  
+# through OutpostNet TCP proxy with geographic routing.
+
 HTTP/1.1 200 OK
 Content-Type: text/plain
 
-Hello from Web Service (Phase 2)
-Service: web-service
-Version: v1
-Timestamp: Fri Jul 18 19:22:09 CST 2025
+🌍 Hello from OutpostNet Phase 2 Web Service!
+
+Service Details:
+- Service: web-service
+- Version: v1  
+- Protocol: TCP (NodePort)
+- Region: region-east
+- Node: backend-node-1
+- Load Balancer: Geographic-aware
+- Timestamp: 2024-07-18 19:22:09 CST
+
+Features Demonstrated:
+✅ Regional service mesh discovery
+✅ Cross-node load balancing  
+✅ Label-based service selection
+✅ TCP transparent proxy
 

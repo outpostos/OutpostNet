@@ -2,7 +2,9 @@
 
 🚀 **Cloud-native network proxy for edge computing environments**
 
-OutpostNet 是 ServiceKeel 项目的核心网络代理组件，为边缘计算环境提供轻量级的 TCP/UDP 隧道功能，采用云原生设计理念，支持分布式服务发现和负载均衡。
+OutpostNet 是 OutpostOS 项目的核心网络代理组件，为边缘计算环境提供轻量级的 TCP/UDP 隧道功能，采用云原生设计理念，支持分布式服务发现和负载均衡。
+
+> 🎯 **Getting Started?** Jump to our [Examples Directory](examples/) for hands-on configuration examples and demos!
 
 ## ✨ 特性
 
@@ -33,16 +35,15 @@ OutpostNet 是 ServiceKeel 项目的核心网络代理组件，为边缘计算�
 
 ```bash
 # 克隆代码
-git clone https://github.com/imneov/servicekeel.git
-cd servicekeel/OutpostNet
+git clone https://github.com/outpostos/OutpostNet.git
+cd OutpostNet
 
 # 构建服务端和客户端
-go build -o OutpostNet-server ./cmd/OutpostNet-server
-go build -o OutpostNet-client ./cmd/OutpostNet-client
+make build
 
 # 验证安装
-./OutpostNet-server -version
-./OutpostNet-client -version
+./build/outpostnet-server --version
+./build/outpostnet-client --version
 ```
 
 ### 运行测试
@@ -58,9 +59,26 @@ go test -run TestPhase1Complete -v
 
 ## 🚀 快速开始
 
-### 1. 启动 OutpostNet-server
+> 💡 **Recommended**: Check out our [Examples Directory](examples/) for ready-to-use configurations and complete demos!
 
-创建服务端配置文件 `server-config.yaml`:
+### 选项1: 使用示例配置 (推荐)
+
+```bash
+# 构建二进制文件
+make build
+
+# 运行完整演示
+./examples/quick-start/demo.sh
+
+# 或查看所有可用示例
+make examples
+```
+
+### 选项2: 手动配置
+
+#### 1. 启动 OutpostNet-server
+
+创建服务端配置文件 `server-config.yaml` (或使用 `examples/configs/demo-server-config.yaml`):
 
 ```yaml
 # 服务端配置

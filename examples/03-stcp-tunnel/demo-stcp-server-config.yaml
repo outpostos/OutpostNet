@@ -1,0 +1,50 @@
+# Keelnet Server Demo Configuration for STCP
+# STCP 加密隧道测试的服务器配置
+
+server:
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "demo-stcp-token"
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9090
+
+# STCP 服务配置
+services:
+  - metadata:
+      name: "demo-stcp-service"
+      namespace: "default"
+      labels:
+        app: "demo-stcp"
+        version: "v1"
+        security: "encrypted"
+    spec:
+      selector:
+        app: "demo-stcp"
+      ports:
+        - name: "https"
+          port: 443
+          targetPort: 18002
+          protocol: "stcp"
+      proxy_mode: "stcp"
+      load_balancer: "round_robin"
+
+# 安全配置
+security:
+  tls:
+    enabled: true
+    cert_file: ""
+    key_file: ""
+    ca_file: ""
+
+# 日志配置
+logging:
+  level: "debug"
+  format: "json"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-stcp-server"

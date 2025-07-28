@@ -1,0 +1,45 @@
+# Keelnet Client Demo Configuration - STCP Register Mode
+# STCP 服务提供方配置
+
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-stcp-token"
+  mode: "register"
+
+# STCP 工作负载配置
+workloads:
+  - metadata:
+      labels:
+        app: "demo-stcp"
+        version: "v1"
+        security: "encrypted"
+        node: "demo-stcp-register-node"
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 18002
+      protocol: "stcp"
+
+# 安全配置
+security:
+  tls:
+    enabled: true
+    cert_file: ""
+    key_file: ""
+    ca_file: ""
+
+# 日志配置
+logging:
+  level: "debug"
+  format: "json"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "10s"
+  timeout: "5s"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-stcp-register-node"

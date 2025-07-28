@@ -1,0 +1,42 @@
+# Keelnet Server Demo Configuration for UDP
+# UDP 代理测试的服务器配置
+
+server:
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "demo-udp-token"
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9090
+
+# UDP 服务配置
+services:
+  - metadata:
+      name: "demo-udp-service"
+      namespace: "default"
+      labels:
+        app: "demo-udp"
+        version: "v1"
+        protocol: "udp"
+    spec:
+      selector:
+        app: "demo-udp"
+      ports:
+        - name: "dns"
+          port: 53
+          targetPort: 18001
+          protocol: "udp"
+      proxy_mode: "udp"
+      load_balancer: "round_robin"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-udp-server"

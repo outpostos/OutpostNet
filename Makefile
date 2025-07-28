@@ -11,7 +11,6 @@ GOMOD=$(GOCMD) mod
 # Binary names
 SERVER_BINARY=outpostnet-server
 CLIENT_BINARY=outpostnet-client
-CONFIG_BINARY=outpostnet-config
 
 # Build directory
 BUILD_DIR=build
@@ -24,13 +23,13 @@ BUILD_TIME = $(shell date +%Y-%m-%dT%H:%M:%S%z)
 # Go build flags
 LDFLAGS = -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)"
 
-.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy demo help
+.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy demo examples help
 
 # Default target
 all: clean fmt vet test build
 
 # Build targets
-build: build-server build-client build-config
+build: build-server build-client
 
 build-server:
 	@echo "Building $(SERVER_BINARY)..."
@@ -42,17 +41,12 @@ build-client:
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(CLIENT_BINARY) ./cmd/outpostnet-client
 
-build-config:
-	@echo "Building $(CONFIG_BINARY)..."
-	@mkdir -p $(BUILD_DIR)
-	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(CONFIG_BINARY) ./cmd/outpostnet-config
 
 # Install builds binaries to project root for easy testing
 install: build
 	@echo "Installing binaries to project root..."
 	@cp $(BUILD_DIR)/$(SERVER_BINARY) ./
 	@cp $(BUILD_DIR)/$(CLIENT_BINARY) ./
-	@cp $(BUILD_DIR)/$(CONFIG_BINARY) ./
 
 # Test targets
 test:
@@ -117,36 +111,19 @@ demo-status:
 	@echo "Checking outpostnet demo environment status..."
 	@./scripts/quick-start.sh status
 
-# Configuration generation targets
-config-express: build-config
-	@echo "Generating Express Mode configuration..."
-	@./$(BUILD_DIR)/$(CONFIG_BINARY) --template express --output ./generated/express
-
-config-region-mesh: build-config
-	@echo "Generating Region Mesh configuration..."
-	@./$(BUILD_DIR)/$(CONFIG_BINARY) --template region-mesh --output ./generated/region-mesh
-
-config-production: build-config
-	@echo "Generating Production configuration..."
-	@./$(BUILD_DIR)/$(CONFIG_BINARY) --template production --output ./generated/production
-
-config-interactive: build-config
-	@echo "Starting interactive configuration wizard..."
-	@./$(BUILD_DIR)/$(CONFIG_BINARY) --interactive --output ./generated/interactive
-
-config-validate:
-	@echo "Validating configuration file..."
-	@if [ -z "$(CONFIG_FILE)" ]; then \
-		echo "Usage: make config-validate CONFIG_FILE=path/to/config.yaml"; \
-		exit 1; \
-	fi
-	@./$(BUILD_DIR)/$(CONFIG_BINARY) --validate --config $(CONFIG_FILE)
+# Configuration examples (see examples/ directory)
+examples:
+	@echo "Configuration examples are available in the examples/ directory:"
+	@echo "  examples/configs/           - Server and client configuration files"
+	@echo "  examples/quick-start/       - Quick start demo"
+	@echo "  examples/kubectl/           - Kubernetes integration examples"
+	@echo "  See examples/README.md for detailed usage instructions"
 
 # Clean targets
 clean:
 	@echo "Cleaning..."
 	$(GOCLEAN)
-	@rm -f $(SERVER_BINARY) $(CLIENT_BINARY) $(CONFIG_BINARY)
+	@rm -f $(SERVER_BINARY) $(CLIENT_BINARY)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 
@@ -209,6 +186,8 @@ help:
 	@echo "  demo-stop       - Stop demo environment"
 	@echo "  demo-test       - Test demo environment"
 	@echo "  demo-status     - Check demo environment status"
+	@echo ""
+	@echo "  examples        - Show configuration examples information"
 	@echo ""
 	@echo "  clean           - Clean build artifacts"
 	@echo "  clean-all       - Clean all generated files"

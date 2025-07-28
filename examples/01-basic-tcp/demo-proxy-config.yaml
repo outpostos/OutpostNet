@@ -1,0 +1,35 @@
+# Keelnet Client Demo Configuration - Proxy Mode
+# 服务消费方配置，用于代理访问远程服务
+
+client:
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-test-token"
+  mode: "proxy"
+
+# 代理配置
+proxies:
+  - name: "demo-web-proxy"
+    service_name: "demo-web-service"
+    service_namespace: "default"
+    local_port: 19999
+    proxy_mode: "tcp"
+    selector:
+      app: "demo-web"
+    load_balancer: "round_robin"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "10s"
+  timeout: "5s"
+
+# 区域配置 (Phase 2)
+region:
+  enabled: false
+  region_id: "demo-region"
+  node_id: "demo-proxy-node"
