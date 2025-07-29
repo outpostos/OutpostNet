@@ -1,34 +1,36 @@
-# Keelnet Server Demo Configuration for UDP
-# UDP 代理测试的服务器配置
+# OutpostNet Server Demo Configuration - UDP
+# 动态服务发现模式 - 服务端不再预定义服务
 
 server:
-  listen_addr: "0.0.0.0:17000"
+  listen_addr: "0.0.0.0:17001"
   auth_token: "demo-udp-token"
 
 # 监控配置
 monitoring:
   enabled: true
-  port: 9090
+  port: 9091
 
-# UDP 服务配置
-services:
-  - metadata:
-      name: "demo-udp-service"
-      namespace: "default"
-      labels:
-        app: "demo-udp"
-        version: "v1"
-        protocol: "udp"
-    spec:
-      selector:
-        app: "demo-udp"
-      ports:
-        - name: "dns"
-          port: 53
-          targetPort: 18001
-          protocol: "udp"
-      proxy_mode: "udp"
-      load_balancer: "round_robin"
+# 动态服务发现配置
+service_discovery:
+  mode: "dynamic"                    # 动态模式
+  auto_create_services: true         # 自动创建服务
+  default_load_balancer: "round_robin"
+  service_ttl: "24h"                 # 服务生存时间
+  cleanup_interval: "1h"             # 清理间隔
+
+# UDP特有配置
+udp_config:
+  session_timeout: "30s"             # UDP会话超时
+  max_sessions: 1000                 # 最大会话数
+  buffer_size: 65536                 # UDP缓冲区大小
+
+# 服务默认策略
+default_service_policy:
+  load_balancer: "round_robin"
+  health_check:
+    enabled: true
+    interval: "30s"
+    timeout: "5s"
 
 # 日志配置
 logging:

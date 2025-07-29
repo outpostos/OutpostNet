@@ -69,66 +69,110 @@ curl http://localhost:19999
 
 ## 🔧 工作原理
 
+### 动态服务发现架构
 ```
 ┌─────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌─────────────┐
 │  你的应用    │───▶│ OutpostNet代理   │───▶│ OutpostNet服务端 │───▶│  目标服务    │
-│             │    │  (localhost:19999)│    │ (服务发现+转发)  │    │ (localhost:18000)│
+│             │    │  (localhost:19999)│    │   (端点聚合)    │    │ (localhost:18000)│
 └─────────────┘    └──────────────────┘    └─────────────────┘    └─────────────┘
+```
+
+### Service 是动态聚合概念
+
+**核心理念：Service = Proxy 通过 selector 动态聚合 Endpoints 的结果**
+
+```
+步骤1: 端点注册
+Register Client 注册端点：
+- IP: 127.0.0.1:18000  
+- Labels: {app: "demo-web", version: "v1", zone: "local"}
+
+步骤2: 代理请求聚合  
+Proxy Client 请求：
+- endpoint_selector: {app: "demo-web"}
+- load_balancer: "round_robin"
+
+步骤3: 服务端动态聚合
+Server 实时匹配：
+1. 查找匹配 {app: "demo-web"} 的端点
+2. 形成虚拟 Service = [127.0.0.1:18000]  
+3. 应用负载均衡策略
+4. 建立代理连接
 ```
 
 ### 详细流程
 
-1. **服务端启动** - 监听端口17000，等待客户端连接
-2. **服务注册** - register客户端向服务端注册本地的18000端口服务
-3. **代理启动** - proxy客户端在本地19999端口创建代理
-4. **请求转发** - 访问19999的请求通过服务端转发到18000端口
+1. **服务端启动** - 监听端口17000，无需预定义任何服务
+2. **端点注册** - register客户端注册端点到服务端，带上标签信息
+3. **代理启动** - proxy客户端指定需要的端点标签选择器
+4. **动态聚合** - 服务端实时匹配端点，形成虚拟服务
+5. **请求转发** - 访问19999的请求动态转发到匹配的端点
 
 ## 📋 配置详解
 
-### 服务端配置 (demo-server-config.yaml)
+### 服务端配置 (demo-server-config.yaml) - 简化设计
 ```yaml
 server:
-  listen_addr: "0.0.0.0:17000"    # 服务端监听地址
-  auth_token: "demo-test-token"    # 认证令牌
+  listen_addr: "0.0.0.0:17000"
+  auth_token: "demo-test-token"
 
-services:
-  - metadata:
-      name: "demo-web-service"     # 服务名称
-      namespace: "default"        # 命名空间
-    spec:
-      selector:
-        app: "demo-web"           # 服务选择器
-      proxy_mode: "tcp"           # 代理模式
-      load_balancer: "round_robin" # 负载均衡算法
+# 动态服务发现配置 - 无需预定义服务！
+service_discovery:
+  mode: "dynamic"                    # 动态模式
+  auto_create_services: true         # 自动创建服务
+  default_load_balancer: "round_robin"
+  service_ttl: "24h"                 # 服务生存时间
+  cleanup_interval: "1h"             # 清理间隔
 ```
 
-### 注册配置 (demo-register-config.yaml)
+### 注册配置 (demo-register-config.yaml) - 注册端点
 ```yaml
 client:
   mode: "register"               # 注册模式
-  server_addr: "127.0.0.1:17000" # 服务端地址
-  auth_token: "demo-test-token"   # 认证令牌
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-test-token"
 
 workloads:
   - metadata:
+      name: "web-backend-1"               # 端点名称
       labels:
-        app: "demo-web"           # 服务标签（匹配服务端selector）
+        app: "demo-web"                   # 应用标签 (用于匹配)
+        version: "v1"                     # 版本标签
+        node: "demo-register-node"        # 节点标签
+        zone: "local"                     # 区域标签
+        tier: "frontend"                  # 层级标签
     spec:
-      local_addr: "127.0.0.1"     # 本地服务地址
-      local_port: 18000           # 本地服务端口
+      local_addr: "127.0.0.1"             # 端点IP地址
+      local_port: 18000                   # 端点端口
+      protocol: "tcp"                     # 协议类型
 ```
 
-### 代理配置 (demo-proxy-config.yaml)
+### 代理配置 (demo-proxy-config.yaml) - 端点选择器
 ```yaml
 client:
-  mode: "proxy"                  # 代理模式
-  server_addr: "127.0.0.1:17000" # 服务端地址
+  mode: "proxy"
+  server_addr: "127.0.0.1:17000"
+  auth_token: "demo-test-token"
 
 proxies:
-  - name: "demo-web-proxy"       # 代理名称
-    service_name: "demo-web-service" # 目标服务名
-    local_port: 19999            # 本地监听端口
-    proxy_mode: "tcp"            # 代理模式
+  - name: "demo-web-proxy"
+    local_port: 19999                    # 本地代理端口
+    proxy_mode: "tcp"                    # 代理模式
+    
+    # 端点选择器 - 告诉服务端我要什么样的端点
+    endpoint_selector:
+      app: "demo-web"                    # 选择 app=demo-web 的端点
+    
+    # 负载均衡策略 (可选)
+    load_balancer: "round_robin"
+    
+    # 端点过滤器 (可选)
+    endpoint_filter:
+      prefer_labels:                     # 优先选择的端点标签
+        zone: "local"
+        version: "v1"
+      exclude_labels:                    # 排除的端点标签
+        status: "maintenance"
 ```
 
 ## 🧪 测试和验证
@@ -170,18 +214,25 @@ ps aux | grep outpostnet
 
 通过这个示例，你应该理解了：
 
-1. **OutpostNet的三个核心组件**：
-   - Server：服务发现和路由中心
-   - Register Client：服务提供方，注册本地服务
-   - Proxy Client：服务消费方，创建本地代理
+1. **OutpostNet的核心设计理念**：
+   - **Service = 动态聚合概念**：不是预定义实体，而是端点的聚合结果
+   - **端点驱动**：工作负载注册端点，代理通过标签选择
+   - **实时匹配**：服务端实时查询和聚合端点
 
-2. **服务发现机制**：
-   - 通过标签(labels)和选择器(selector)匹配服务
-   - 支持动态服务注册和发现
+2. **三个核心组件的新角色**：
+   - **Server**：端点注册表 + 标签匹配引擎 + 动态聚合器
+   - **Register Client**：端点注册者，提供带标签的端点信息
+   - **Proxy Client**：端点聚合者，通过选择器获取端点列表
 
-3. **配置模式**：
-   - 声明式配置，类似 Kubernetes Service
-   - 统一的认证和安全机制
+3. **动态服务发现机制**：
+   - **标签匹配**：`endpoint.labels` 匹配 `proxy.endpoint_selector`
+   - **实时聚合**：无需预定义服务，按需聚合端点
+   - **多视角服务**：同一批端点可以形成多个不同的服务视角
+
+4. **配置模式的变化**：
+   - **服务端简化**：无需预定义服务，只需配置聚合策略
+   - **端点丰富**：register配置包含丰富的标签信息
+   - **代理灵活**：proxy通过选择器定义需要的端点特征
 
 ## ➡️ 下一步
 

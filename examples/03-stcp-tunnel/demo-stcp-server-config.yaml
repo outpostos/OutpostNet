@@ -1,46 +1,49 @@
-# Keelnet Server Demo Configuration for STCP
-# STCP 加密隧道测试的服务器配置
+# OutpostNet Server Demo Configuration - STCP
+# 动态服务发现模式 - 支持STCP加密隧道
 
 server:
-  listen_addr: "0.0.0.0:17000"
+  listen_addr: "0.0.0.0:17002"
   auth_token: "demo-stcp-token"
 
 # 监控配置
 monitoring:
   enabled: true
-  port: 9090
+  port: 9092
 
-# STCP 服务配置
-services:
-  - metadata:
-      name: "demo-stcp-service"
-      namespace: "default"
-      labels:
-        app: "demo-stcp"
-        version: "v1"
-        security: "encrypted"
-    spec:
-      selector:
-        app: "demo-stcp"
-      ports:
-        - name: "https"
-          port: 443
-          targetPort: 18002
-          protocol: "stcp"
-      proxy_mode: "stcp"
-      load_balancer: "round_robin"
+# 动态服务发现配置
+service_discovery:
+  mode: "dynamic"                    # 动态模式
+  auto_create_services: true         # 自动创建服务
+  default_load_balancer: "round_robin"  
+  service_ttl: "24h"                 # 服务生存时间
+  cleanup_interval: "1h"             # 清理间隔
 
-# 安全配置
-security:
+# STCP安全配置
+stcp_config:
+  encryption:
+    enabled: true                    # 启用加密
+    algorithm: "AES-256-GCM"         # 加密算法
+    key_rotation: "24h"              # 密钥轮换周期
   tls:
+    enabled: true                    # 启用TLS
+    auto_generate_certs: true        # 自动生成测试证书
+    cert_file: ""                    # 服务端证书 (自动生成)
+    key_file: ""                     # 服务端私钥 (自动生成)
+    ca_file: ""                      # CA证书 (自动生成)
+
+# 服务默认策略
+default_service_policy:
+  load_balancer: "round_robin"
+  health_check:
     enabled: true
-    cert_file: ""
-    key_file: ""
-    ca_file: ""
+    interval: "30s"  
+    timeout: "5s"
+  security:
+    require_encryption: true         # 要求加密
 
 # 日志配置
 logging:
-  level: "debug"
+  level: "debug"                     # STCP需要详细日志
   format: "json"
 
 # 区域配置 (Phase 2)

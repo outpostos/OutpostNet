@@ -1,22 +1,26 @@
-# Keelnet Client Demo Configuration - Register Mode
-# 服务提供方配置，用于注册本地服务到keelnet-server
+# OutpostNet Client Demo Configuration - Register Mode
+# 服务提供方配置，向服务端注册端点(Endpoint)
 
 client:
   server_addr: "127.0.0.1:17000"
   auth_token: "demo-test-token"
   mode: "register"
 
-# 工作负载配置 - 注册本地服务
+# 工作负载配置 - 注册端点信息
 workloads:
   - metadata:
+      name: "web-backend-1"               # 端点名称
       labels:
-        app: "demo-web"
-        version: "v1"
-        node: "demo-register-node"
+        app: "demo-web"                   # 应用标签 (用于Service选择)
+        version: "v1"                     # 版本标签
+        node: "demo-register-node"        # 节点标签
+        zone: "local"                     # 区域标签
+        tier: "frontend"                  # 层级标签
+        component: "web"                  # 组件标签
     spec:
-      local_addr: "127.0.0.1"
-      local_port: 18000
-      protocol: "tcp"
+      local_addr: "127.0.0.1"             # 端点IP地址
+      local_port: 18000                   # 端点端口
+      protocol: "tcp"                     # 协议类型
 
 # 日志配置
 logging:

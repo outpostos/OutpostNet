@@ -1,70 +1,116 @@
 # OutpostNet Phase 2: Region Mesh Configuration
 # 
-# This configuration demonstrates OutpostNet's advanced Phase 2 capabilities:
-# - Regional service mesh with multi-node discovery
-# - Geographic-aware load balancing
-# - Cross-cluster service synchronization  
-# - STCP encrypted tunnels for secure communication
+# 这个配置展示了 OutpostNet 的高级 Phase 2 功能：
+# - 动态服务发现与端点聚合
+# - 跨区域的分布式服务网格
+# - 地理位置感知的负载均衡
+# - 混合协议支持 (TCP + STCP)
 #
-# Use this as a template for distributed edge deployments
-# where multiple OutpostNet nodes need to collaborate across regions.
+# 使用动态服务发现，无需预定义服务
 
-# Node-A 配置 (区域网格主节点)
+# 区域网格服务端配置
 server:
-  listen_addr: "0.0.0.0:17000"
-  auth_token: "phase2-demo-token"
-  
-  # Phase 2 区域配置
-  region:
-    enabled: true
-    region_id: "region-east"
-    node_id: "node-a"
-    site_id: "site-datacenter"
-    zone_id: "zone-1"
-    listen_addr: "0.0.0.0:18000"  # 区域网格监听端口
-    
-    # 邻居节点配置
-    neighbors:
-      - node_id: "node-b"
-        address: "127.0.0.1:18001"
-      - node_id: "node-c"  
-        address: "127.0.0.1:18002"
-    
-    # 服务同步配置
-    service_sync:
-      sync_interval: "10s"
-      cache_timeout: "60s"
-      
-    # 负载均衡配置
-    load_balancer:
-      strategy: "geographic_aware"
-      health_check_enabled: true
+  listen_addr: "0.0.0.0:18000"
+  auth_token: "phase2-mesh-token"
 
-# 服务定义
-services:
-  - name: "web-service"
-    namespace: "default"
-    type: "NodePort"
-    selector:
-      app: "web"
-    ports:
-      - name: "http"
-        port: 80
-        nodePort: 30080
-        targetPort: 8080
-        protocol: "tcp"
-    proxy_mode: "tcp"
-    load_balancer: "round_robin"
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9093
+
+# 动态服务发现配置 - Phase 2 增强
+service_discovery:
+  mode: "dynamic"                    # 动态模式
+  auto_create_services: true         # 自动创建服务视图
+  default_load_balancer: "geographic_aware"  # 地理位置感知
+  service_ttl: "24h"                 # 服务视图生存时间
+  cleanup_interval: "1h"             # 清理间隔
+  
+  # Phase 2 分布式特性
+  distributed:
+    enabled: true                    # 启用分布式发现
+    sync_interval: "30s"             # 跨节点同步间隔
+    max_hops: 3                      # 最大跳数
+
+# Phase 2 区域配置
+region:
+  enabled: true
+  region_id: "region-east"           # 区域标识
+  node_id: "node-a"                  # 节点标识
+  
+  # 地理位置信息
+  geo_location:
+    latitude: 39.9042                # 北京坐标
+    longitude: 116.4074
+    city: "Beijing"
+    country: "CN"
+    zone: "east"
     
-  - name: "api-service"
-    namespace: "default" 
-    type: "ClusterIP"
-    selector:
-      app: "api"
-    ports:
-      - name: "api"
-        port: 8080
-        targetPort: 8080
-        protocol: "stcp"
-    proxy_mode: "stcp"
-    load_balancer: "geographic_aware"
+  # 邻居节点配置
+  neighbors:
+    - node_id: "node-b"
+      address: "127.0.0.1:18001"
+      region_id: "region-east"
+    - node_id: "node-c"
+      address: "127.0.0.1:18002"
+      region_id: "region-west"
+      
+  # 服务同步配置  
+  service_sync:
+    enabled: true
+    sync_interval: "30s"
+    max_hops: 3                      # 最大跳数
+    
+# 高级负载均衡
+load_balancer:
+  strategy: "geographic_aware"       # 地理位置感知
+  health_check_enabled: true
+  failover_enabled: true
+  algorithms:
+    geographic_aware:
+      prefer_local: true             # 优先本地
+      max_latency: "100ms"           # 最大延迟阈值
+    least_latency:
+      enabled: true
+      threshold: "50ms"
+
+# 服务默认策略 - 支持混合协议
+default_service_policy:
+  load_balancer: "geographic_aware"
+  health_check:
+    enabled: true
+    interval: "10s"
+    timeout: "5s"
+    retries: 3
+  
+  # 高可用配置
+  high_availability:
+    enabled: true
+    min_replicas: 1
+    max_replicas: 10
+    scale_threshold: 0.8
+    
+  # 故障转移策略
+  failover:
+    strategy: "immediate"
+    backup_regions: ["region-west", "region-central"]
+
+# 安全配置 (STCP支持)
+security:
+  tls:
+    enabled: true
+    auto_generate_certs: true
+  encryption:
+    default_algorithm: "AES-256-GCM"
+    key_rotation: "24h"
+
+# 日志配置
+logging:
+  level: "info"
+  format: "json"
+  structured: true
+  fields:
+    - "region_id"
+    - "node_id"
+    - "service_name"
+    - "routing_decision"

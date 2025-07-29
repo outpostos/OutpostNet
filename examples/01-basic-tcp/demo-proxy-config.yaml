@@ -1,5 +1,5 @@
-# Keelnet Client Demo Configuration - Proxy Mode
-# 服务消费方配置，用于代理访问远程服务
+# OutpostNet Client Demo Configuration - Proxy Mode
+# 服务消费方配置，告知服务端需要什么样的端点
 
 client:
   server_addr: "127.0.0.1:17000"
@@ -9,13 +9,23 @@ client:
 # 代理配置
 proxies:
   - name: "demo-web-proxy"
-    service_name: "demo-web-service"
-    service_namespace: "default"
-    local_port: 19999
-    proxy_mode: "tcp"
-    selector:
-      app: "demo-web"
+    local_port: 19999                    # 本地代理端口
+    proxy_mode: "tcp"                    # 代理模式
+    
+    # 端点选择器 - 告诉服务端我要什么样的端点
+    endpoint_selector:
+      app: "demo-web"                    # 选择 app=demo-web 的端点
+    
+    # 负载均衡策略 (可选)
     load_balancer: "round_robin"
+    
+    # 端点过滤器 (可选)
+    endpoint_filter:
+      prefer_labels:                     # 优先选择的端点标签
+        zone: "local"
+        version: "v1"
+      exclude_labels:                    # 排除的端点标签
+        status: "maintenance"
 
 # 日志配置
 logging:

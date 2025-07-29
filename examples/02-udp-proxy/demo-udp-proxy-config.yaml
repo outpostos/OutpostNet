@@ -1,22 +1,35 @@
-# Keelnet Client Demo Configuration - UDP Proxy Mode
-# UDP 服务消费方配置
+# OutpostNet Client Demo Configuration - UDP Proxy Mode
+# UDP 服务消费方配置，告知服务端需要什么样的UDP端点
 
 client:
-  server_addr: "127.0.0.1:17000"
+  server_addr: "127.0.0.1:17001"
   auth_token: "demo-udp-token"
   mode: "proxy"
 
 # UDP 代理配置
 proxies:
   - name: "demo-udp-proxy"
-    service_name: "demo-udp-service"
-    service_namespace: "default"
-    local_port: 19998
-    proxy_mode: "udp"
-    selector:
-      app: "demo-udp"
-      protocol: "udp"
+    local_port: 15353                    # 本地代理端口 (DNS标准端口)
+    proxy_mode: "udp"                    # UDP代理模式
+    
+    # 端点选择器 - 告诉服务端我要什么样的UDP端点
+    endpoint_selector:
+      app: "demo-udp"                    # 选择 app=demo-udp 的端点
+      protocol: "udp"                    # 选择 UDP 协议的端点
+    
+    # UDP特有配置
+    session_timeout: "30s"               # UDP会话超时
+    
+    # 负载均衡策略
     load_balancer: "round_robin"
+    
+    # 端点过滤器 (可选)
+    endpoint_filter:
+      prefer_labels:                     # 优先选择的端点标签
+        zone: "local"
+        version: "v1"
+      exclude_labels:                    # 排除的端点标签
+        status: "maintenance"
 
 # 日志配置
 logging:

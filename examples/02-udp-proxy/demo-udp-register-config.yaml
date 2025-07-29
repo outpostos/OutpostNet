@@ -1,23 +1,26 @@
-# Keelnet Client Demo Configuration - UDP Register Mode
-# UDP 服务提供方配置
+# OutpostNet Client Demo Configuration - UDP Register Mode
+# UDP 服务提供方配置，向服务端注册UDP端点
 
 client:
-  server_addr: "127.0.0.1:17000"
+  server_addr: "127.0.0.1:17001"
   auth_token: "demo-udp-token"
   mode: "register"
 
-# UDP 工作负载配置
+# UDP 工作负载配置 - 注册端点信息
 workloads:
   - metadata:
+      name: "udp-backend-1"               # 端点名称
       labels:
-        app: "demo-udp"
-        version: "v1"
-        protocol: "udp"
-        node: "demo-udp-register-node"
+        app: "demo-udp"                   # 应用标签 (用于Service选择)
+        version: "v1"                     # 版本标签
+        protocol: "udp"                   # 协议标签
+        node: "demo-udp-register-node"    # 节点标签
+        zone: "local"                     # 区域标签
+        service_type: "dns"               # 服务类型标签
     spec:
-      local_addr: "127.0.0.1"
-      local_port: 18001
-      protocol: "udp"
+      local_addr: "127.0.0.1"             # 端点IP地址
+      local_port: 18001                   # 端点端口
+      protocol: "udp"                     # 协议类型
 
 # 日志配置
 logging:

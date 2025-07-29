@@ -1,5 +1,5 @@
 # OutpostNet Server Demo Configuration
-# 用于端到端测试的服务器配置
+# 动态服务发现模式 - 服务端不再预定义服务
 
 server:
   listen_addr: "0.0.0.0:17000"
@@ -10,58 +10,22 @@ monitoring:
   enabled: true
   port: 9090
 
-# 预定义服务配置
-services:
-  - metadata:
-      name: "demo-web-service"
-      namespace: "default"
-      labels:
-        app: "demo-web"
-        version: "v1"
-    spec:
-      selector:
-        app: "demo-web"
-      ports:
-        - name: "http"
-          port: 80
-          targetPort: 18000
-          protocol: "tcp"
-      proxy_mode: "tcp"
-      load_balancer: "round_robin"
+# 动态服务发现配置
+service_discovery:
+  mode: "dynamic"                    # 动态模式
+  auto_create_services: true         # 自动创建服务
+  default_load_balancer: "round_robin"
+  service_ttl: "24h"                 # 服务生存时间
+  cleanup_interval: "1h"             # 清理间隔
 
-  - metadata:
-      name: "demo-stcp-service"
-      namespace: "default"
-      labels:
-        app: "demo-stcp"
-        version: "v1"
-    spec:
-      selector:
-        app: "demo-stcp"
-      ports:
-        - name: "stcp"
-          port: 443
-          targetPort: 18002
-          protocol: "stcp"
-      proxy_mode: "stcp"
-      load_balancer: "round_robin"
-
-  - metadata:
-      name: "demo-udp-service"
-      namespace: "default"
-      labels:
-        app: "demo-udp"
-        version: "v1"
-    spec:
-      selector:
-        app: "demo-udp"
-      ports:
-        - name: "udp"
-          port: 53
-          targetPort: 18001
-          protocol: "udp"
-      proxy_mode: "udp"
-      load_balancer: "round_robin"
+# 服务默认策略 (可选)
+default_service_policy:
+  load_balancer: "round_robin"
+  health_check:
+    enabled: true
+    interval: "30s"
+    timeout: "5s"
+  session_affinity: false
 
 # 日志配置
 logging:
