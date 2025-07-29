@@ -119,7 +119,7 @@ OutpostNet 的核心特性：
 7. WHEN 以 register 模式启动的 OutpostNet Client 在节点上注销或者中断 THEN OutpostNet Server SHALL 移除相关的 workload endpoint 并且重新负载均衡 OutpostNet Client proxy 发送的服务请求
 
 
-### Requirement 3: Site 内服务协同
+### Requirement 3: Cluster 内服务协同
 
 **User Story:** 作为边缘计算节点运维人员，我需要 OutpostNet 可以提供跨节点的服务订阅能力。
 
