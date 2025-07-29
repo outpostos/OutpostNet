@@ -15,6 +15,24 @@ func NewLoadBalancer(algorithm string) (types.LoadBalancer, error) {
 		return NewRandomLoadBalancer(), nil
 	case "least_conn":
 		return NewLeastConnLoadBalancer(), nil
+	case "geographic_aware":
+		return NewGeographicAwareLoadBalancer(nil), nil
+	default:
+		return nil, fmt.Errorf("unknown load balancer algorithm: %s", algorithm)
+	}
+}
+
+// NewLoadBalancerWithContext 根据算法名称和客户端位置创建负载均衡器
+func NewLoadBalancerWithContext(algorithm string, clientLocation *types.EndpointMetadata) (types.LoadBalancer, error) {
+	switch algorithm {
+	case "round_robin", "":
+		return NewRoundRobinLoadBalancer(), nil
+	case "random":
+		return NewRandomLoadBalancer(), nil
+	case "least_conn":
+		return NewLeastConnLoadBalancer(), nil
+	case "geographic_aware":
+		return NewGeographicAwareLoadBalancer(clientLocation), nil
 	default:
 		return nil, fmt.Errorf("unknown load balancer algorithm: %s", algorithm)
 	}
@@ -26,6 +44,7 @@ func GetSupportedAlgorithms() []string {
 		"round_robin",
 		"random",
 		"least_conn",
+		"geographic_aware",
 	}
 }
 

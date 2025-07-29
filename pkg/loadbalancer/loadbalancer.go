@@ -30,6 +30,7 @@ const (
 	LeastConnections LoadBalancerType = "least_connections"
 	Random         LoadBalancerType = "random"
 	ConsistentHash LoadBalancerType = "consistent_hash"
+	GeographicAware LoadBalancerType = "geographic_aware"
 )
 
 // NewLoadBalancerByType 根据类型创建负载均衡器
@@ -45,6 +46,28 @@ func NewLoadBalancerByType(lbType LoadBalancerType) LoadBalancer {
 		return &randomLB{}
 	case ConsistentHash:
 		return &consistentHashLB{}
+	case GeographicAware:
+		return NewGeographicAwareLoadBalancer(nil)
+	default:
+		return &roundRobinLB{} // 默认使用轮询
+	}
+}
+
+// NewLoadBalancerByTypeWithContext 根据类型和客户端位置创建负载均衡器
+func NewLoadBalancerByTypeWithContext(lbType LoadBalancerType, clientLocation *types.EndpointMetadata) LoadBalancer {
+	switch lbType {
+	case RoundRobin:
+		return &roundRobinLB{}
+	case WeightedRoundRobin:
+		return &weightedRoundRobinLB{}
+	case LeastConnections:
+		return &leastConnectionsLB{}
+	case Random:
+		return &randomLB{}
+	case ConsistentHash:
+		return &consistentHashLB{}
+	case GeographicAware:
+		return NewGeographicAwareLoadBalancer(clientLocation)
 	default:
 		return &roundRobinLB{} // 默认使用轮询
 	}
@@ -342,6 +365,29 @@ func (m *LoadBalancerManager) GetLoadBalancer(serviceName string, lbType LoadBal
 
 	// 创建新的负载均衡器
 	lb := NewLoadBalancerByType(lbType)
+	m.balancers[key] = lb
+	return lb
+}
+
+// GetLoadBalancerWithContext 获取指定服务的负载均衡器（带客户端位置信息）
+func (m *LoadBalancerManager) GetLoadBalancerWithContext(serviceName string, lbType LoadBalancerType, clientLocation *types.EndpointMetadata) LoadBalancer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 对于地理位置感知的负载均衡器，需要包含客户端位置信息在key中
+	var key string
+	if lbType == GeographicAware && clientLocation != nil {
+		key = fmt.Sprintf("%s:%s:%s:%s:%s", serviceName, lbType, clientLocation.Site, clientLocation.Zone, clientLocation.Region)
+	} else {
+		key = fmt.Sprintf("%s:%s", serviceName, lbType)
+	}
+
+	if lb, exists := m.balancers[key]; exists {
+		return lb
+	}
+
+	// 创建新的负载均衡器
+	lb := NewLoadBalancerByTypeWithContext(lbType, clientLocation)
 	m.balancers[key] = lb
 	return lb
 }

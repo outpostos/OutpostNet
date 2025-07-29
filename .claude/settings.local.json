@@ -18,7 +18,8 @@
       "Bash(cp:*)",
       "Bash(mkdir:*)",
       "Bash(chmod:*)",
-      "WebFetch(domain:skupper.io)"
+      "WebFetch(domain:skupper.io)",
+      "Bash(go build:*)"
     ],
     "deny": []
   }
