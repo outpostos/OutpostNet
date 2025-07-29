@@ -10,8 +10,9 @@ OutpostNet 是一个面向边缘计算的开源网络服务层，提供服务注
 - 📋 **Phase 3 (跨区域联邦)**: 10% 完成，计划阶段
 
 **实现亮点**:
-- 🚀 **Express Mode**: 一行命令启动完整服务网格
-- 🔧 **Kubernetes 兼容**: 100% 兼容 K8s API，支持 kubectl 管理
+- � **E智能默认配置**: 零配置启动，通过命令行参数灵活定制
+- � **配置b生成工具**: 支持 `-save-config` 导出完整配置文件
+- � ***Kubernetes 兼容**: 100% 兼容 K8s API，支持 kubectl 管理
 - 📊 **完整监控**: 开箱即用的 Prometheus 集成和 Web UI
 - 🌐 **多协议支持**: TCP/UDP/STCP/SUDP 全协议栈支持
 - ⚡ **高性能**: 零拷贝优化，生产级性能表现
@@ -568,6 +569,22 @@ service ClusterCommunication {
 
 ## Configuration Design
 
+### 设计理念：智能默认配置
+
+OutpostNet 采用 **"智能默认配置 + 配置生成工具"** 的设计理念，而不是单独的 Express Mode：
+
+**设计原则**:
+1. **零配置启动**: 所有组件都有合理的默认配置，可以直接启动
+2. **命令行定制**: 通过命令行参数灵活覆盖默认值
+3. **配置导出**: 支持 `-save-config` 将当前配置导出为标准配置文件
+4. **配置文件优先**: 生产环境推荐使用配置文件部署
+
+**去掉 Express Mode 的原因**:
+- 避免维护两套参数解析逻辑
+- 简化用户心理模型，只有一种启动方式
+- 通过智能默认配置达到同样的简化效果
+- 减少代码复杂度和维护成本
+
 ### 1. Server Configuration
 
 ```yaml
@@ -607,6 +624,24 @@ api:
   grpc:
     enabled: true
     port: 9090
+```
+
+**简化的启动方式**:
+```bash
+# 使用智能默认配置启动
+./outpostnet-server
+
+# 通过命令行参数定制
+./outpostnet-server -port 8080 -token my-secret-token
+
+# 预定义服务
+./outpostnet-server -service "user-service:8080:3000" -service "order-service:8081:3001"
+
+# 生成配置文件
+./outpostnet-server -service "user-service:8080:3000" -save-config server.yaml
+
+# 使用配置文件启动
+./outpostnet-server -config server.yaml
 ```
 
 ### 2. Client Configuration
@@ -666,6 +701,21 @@ proxies:
       requiredLabels:
         environment: "production"
     loadBalancer: "round_robin"
+```
+
+**简化的客户端启动**:
+```bash
+# Register 模式：使用默认配置注册服务
+./outpostnet-client -mode register -service user-service -backend 127.0.0.1:3000
+
+# Proxy 模式：使用默认配置代理服务
+./outpostnet-client -mode proxy -service user-service -local-port 8080
+
+# 生成配置文件
+./outpostnet-client -mode register -service user-service -backend 127.0.0.1:3000 -save-config client.yaml
+
+# 使用配置文件启动
+./outpostnet-client -config client.yaml
 ```
 
 ## Implementation Plan
