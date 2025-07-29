@@ -17,7 +17,8 @@
       "Bash(./build/outpostnet-client:*)",
       "Bash(cp:*)",
       "Bash(mkdir:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "WebFetch(domain:skupper.io)"
     ],
     "deny": []
   }
