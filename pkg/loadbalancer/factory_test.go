@@ -12,8 +12,11 @@ func TestNewLoadBalancer(t *testing.T) {
 	}{
 		{"round_robin", false, "round_robin"},
 		{"", false, "round_robin"}, // 默认算法
+		{"weighted_round_robin", false, "weighted_round_robin"},
 		{"random", false, "random"},
 		{"least_conn", false, "least_conn"},
+		{"consistent_hash", false, "consistent_hash"},
+		{"geographic_aware", false, "geographic_aware"},
 		{"invalid", true, ""},
 	}
 
@@ -42,7 +45,7 @@ func TestNewLoadBalancer(t *testing.T) {
 
 func TestGetSupportedAlgorithms(t *testing.T) {
 	algorithms := GetSupportedAlgorithms()
-	expected := []string{"round_robin", "random", "least_conn"}
+	expected := []string{"round_robin", "weighted_round_robin", "random", "least_conn", "consistent_hash", "geographic_aware"}
 	
 	if len(algorithms) != len(expected) {
 		t.Fatalf("expected %d algorithms, got %d", len(expected), len(algorithms))
@@ -61,8 +64,11 @@ func TestIsValidAlgorithm(t *testing.T) {
 		valid     bool
 	}{
 		{"round_robin", true},
+		{"weighted_round_robin", true},
 		{"random", true},
 		{"least_conn", true},
+		{"consistent_hash", true},
+		{"geographic_aware", true},
 		{"", true}, // 空字符串是有效的，默认为 round_robin
 		{"invalid", false},
 		{"ROUND_ROBIN", false}, // 大小写敏感

@@ -11,10 +11,14 @@ func NewLoadBalancer(algorithm string) (types.LoadBalancer, error) {
 	switch algorithm {
 	case "round_robin", "":
 		return NewRoundRobinLoadBalancer(), nil
+	case "weighted_round_robin":
+		return NewWeightedRoundRobinLoadBalancer(), nil
 	case "random":
 		return NewRandomLoadBalancer(), nil
 	case "least_conn":
 		return NewLeastConnLoadBalancer(), nil
+	case "consistent_hash":
+		return NewConsistentHashLoadBalancer(), nil
 	case "geographic_aware":
 		return NewGeographicAwareLoadBalancer(nil), nil
 	default:
@@ -27,10 +31,14 @@ func NewLoadBalancerWithContext(algorithm string, clientLocation *types.Endpoint
 	switch algorithm {
 	case "round_robin", "":
 		return NewRoundRobinLoadBalancer(), nil
+	case "weighted_round_robin":
+		return NewWeightedRoundRobinLoadBalancer(), nil
 	case "random":
 		return NewRandomLoadBalancer(), nil
 	case "least_conn":
 		return NewLeastConnLoadBalancer(), nil
+	case "consistent_hash":
+		return NewConsistentHashLoadBalancer(), nil
 	case "geographic_aware":
 		return NewGeographicAwareLoadBalancer(clientLocation), nil
 	default:
@@ -42,8 +50,10 @@ func NewLoadBalancerWithContext(algorithm string, clientLocation *types.Endpoint
 func GetSupportedAlgorithms() []string {
 	return []string{
 		"round_robin",
+		"weighted_round_robin",
 		"random",
 		"least_conn",
+		"consistent_hash",
 		"geographic_aware",
 	}
 }
