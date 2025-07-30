@@ -68,11 +68,55 @@ type ServiceMetadata struct {
 
 // ServiceSpec 服务规格定义
 type ServiceSpec struct {
-	Selector     map[string]string `yaml:"selector" json:"selector"`
-	Ports        []ServicePort     `yaml:"ports" json:"ports"`
-	ProxyMode    string            `yaml:"proxy_mode" json:"proxy_mode"` // tcp/udp/stcp/sudp
-	LoadBalancer string            `yaml:"load_balancer" json:"load_balancer"`
+	Selector     map[string]string  `yaml:"selector" json:"selector"`
+	Ports        []ServicePort      `yaml:"ports" json:"ports"`
+	ProxyMode    string             `yaml:"proxy_mode" json:"proxy_mode"` // tcp/udp/stcp/sudp
+	LoadBalancer string             `yaml:"load_balancer" json:"load_balancer"`
+	Constraints  *ServiceConstraints `yaml:"constraints,omitempty" json:"constraints,omitempty"`
 }
+
+// ServiceConstraints 服务约束条件定义 (简化版本)
+type ServiceConstraints struct {
+	// 端点健康状态约束 - 最基础的约束
+	HealthyOnly bool `yaml:"healthy_only" json:"healthy_only"`
+	
+	// 标签表达式约束：支持K8s风格的标签选择器
+	LabelSelector *LabelSelector `yaml:"label_selector,omitempty" json:"label_selector,omitempty"`
+	
+	// TODO: 后期可添加的高级功能
+	// - RequiredLabels map[string]string     // 简单标签匹配（可用LabelSelector.MatchLabels替代）
+	// - MinEndpoints int                     // 最小端点数约束
+	// - MaxEndpoints int                     // 最大端点数约束  
+	// - AllowedStatuses []string             // 端点状态约束
+	// - ExcludeEndpoints []string            // 排除特定端点
+	// - PreferredEndpoints []string          // 首选端点
+}
+
+// LabelSelector 标签选择器，支持复杂的标签匹配逻辑
+type LabelSelector struct {
+	// 等值匹配：key=value
+	MatchLabels map[string]string `yaml:"match_labels,omitempty" json:"match_labels,omitempty"`
+	
+	// 表达式匹配：支持In、NotIn、Exists、DoesNotExist操作
+	MatchExpressions []LabelSelectorRequirement `yaml:"match_expressions,omitempty" json:"match_expressions,omitempty"`
+}
+
+// LabelSelectorRequirement 标签选择器表达式
+type LabelSelectorRequirement struct {
+	Key      string                      `yaml:"key" json:"key"`
+	Operator LabelSelectorOperator       `yaml:"operator" json:"operator"`
+	Values   []string                    `yaml:"values,omitempty" json:"values,omitempty"`
+}
+
+// LabelSelectorOperator 标签选择器操作符
+type LabelSelectorOperator string
+
+const (
+	LabelSelectorOpIn           LabelSelectorOperator = "In"           // key的值在给定列表中
+	LabelSelectorOpNotIn        LabelSelectorOperator = "NotIn"        // key的值不在给定列表中
+	LabelSelectorOpExists       LabelSelectorOperator = "Exists"       // key存在（忽略值）
+	LabelSelectorOpDoesNotExist LabelSelectorOperator = "DoesNotExist"  // key不存在
+)
 
 // ServicePort 服务端口定义
 type ServicePort struct {

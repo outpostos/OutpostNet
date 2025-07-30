@@ -15,7 +15,7 @@
 
 ### Phase 1: 完善单节点服务网格功能
 
-- [-] 1. 完善基础负载均衡算法
+- [x] 1. 完善基础负载均衡算法
   - 优化 `pkg/loadbalancer/round_robin.go` 中的轮询算法实现
   - 完善 `pkg/loadbalancer/least_conn.go` 中的最少连接算法
   - 实现 `pkg/loadbalancer/weighted_round_robin.go` 加权轮询算法
@@ -37,21 +37,21 @@
   - 添加哈希算法的单元测试
   - _Requirements: 2.6_
 
-- [ ] 2. 扩展服务约束条件支持
+- [x] 2. 扩展服务约束条件支持
   - 扩展 `pkg/types/service.go` 中的 `ServiceConstraints` 结构
   - 实现基于标签的服务过滤逻辑（不涉及地理位置）
   - 在 `pkg/registry/memory_k8s.go` 中集成约束条件过滤
   - 添加约束条件验证和错误处理
   - _Requirements: 2.2_
 
-- [ ] 2.1 实现标签选择器过滤
+- [x] 2.1 实现标签选择器过滤
   - 在 `pkg/registry/selector.go` 中实现标签选择器逻辑
   - 支持等值匹配、集合匹配等选择器操作
   - 实现选择器表达式解析和验证
   - 添加选择器过滤的单元测试
   - _Requirements: 2.2_
 
-- [ ] 2.2 实现服务健康状态过滤
+- [x] 2.2 实现服务健康状态过滤
   - 在服务查询时自动过滤不健康的端点
   - 实现基于心跳的健康状态判断逻辑
   - 添加健康检查超时和重试机制

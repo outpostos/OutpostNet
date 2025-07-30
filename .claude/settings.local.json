@@ -19,7 +19,8 @@
       "Bash(mkdir:*)",
       "Bash(chmod:*)",
       "WebFetch(domain:skupper.io)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(rg \"ServiceConstraints\" /Users/neov/src/github.com/outpostos/OutpostNet/pkg/types/service.go)"
     ],
     "deny": []
   }

@@ -21,6 +21,10 @@ type K8sMemoryRegistry struct {
 	serviceIndexes  map[string][]string               // namespace -> [service_names]
 	watchChannels   map[string]chan *K8sEvent         // watch_id -> event_channel
 	nextWatchID     int64
+	
+	// 约束条件过滤器和健康检查器
+	constraintFilter *ConstraintFilter
+	healthChecker    *HealthChecker
 }
 
 // K8sNamespace K8s命名空间定义
@@ -41,14 +45,16 @@ type K8sEvent struct {
 // NewK8sMemoryRegistry 创建新的 K8s 风格内存注册表
 func NewK8sMemoryRegistry() *K8sMemoryRegistry {
 	registry := &K8sMemoryRegistry{
-		services:       make(map[string]*types.Service),
-		workloads:      make(map[string]*types.Workload),
-		endpoints:      make(map[string][]*types.Endpoint),
-		namespaces:     make(map[string]*K8sNamespace),
-		labelIndexes:   make(map[string]map[string][]string),
-		serviceIndexes: make(map[string][]string),
-		watchChannels:  make(map[string]chan *K8sEvent),
-		nextWatchID:    1,
+		services:         make(map[string]*types.Service),
+		workloads:        make(map[string]*types.Workload),
+		endpoints:        make(map[string][]*types.Endpoint),
+		namespaces:       make(map[string]*K8sNamespace),
+		labelIndexes:     make(map[string]map[string][]string),
+		serviceIndexes:   make(map[string][]string),
+		watchChannels:    make(map[string]chan *K8sEvent),
+		nextWatchID:      1,
+		constraintFilter: NewConstraintFilter(),
+		healthChecker:    NewHealthChecker(DefaultHealthCheckConfig()),
 	}
 	
 	// 创建默认命名空间
@@ -56,6 +62,11 @@ func NewK8sMemoryRegistry() *K8sMemoryRegistry {
 	registry.ensureNamespace("kube-system")
 	
 	return registry
+}
+
+// GetHealthChecker 获取健康检查器 (用于集成到服务器中)
+func (r *K8sMemoryRegistry) GetHealthChecker() *HealthChecker {
+	return r.healthChecker
 }
 
 // RegisterService 注册服务定义
@@ -79,6 +90,13 @@ func (r *K8sMemoryRegistry) RegisterService(service *types.Service) error {
 
 	if err := r.validateK8sNamespaceName(service.Metadata.Namespace); err != nil {
 		return fmt.Errorf("invalid namespace name: %v", err)
+	}
+
+	// 验证约束条件
+	if service.Spec.Constraints != nil {
+		if err := r.constraintFilter.ValidateConstraints(service.Spec.Constraints); err != nil {
+			return fmt.Errorf("invalid service constraints: %w", err)
+		}
 	}
 
 	key := r.serviceKey(service.Metadata.Namespace, service.Metadata.Name)
@@ -218,6 +236,16 @@ func (r *K8sMemoryRegistry) UnregisterWorkload(workloadID string) error {
 	// 从标签索引中移除
 	r.removeFromLabelIndex(workloadID, workload.Metadata.Labels)
 
+	// 从健康检查器中移除相关端点
+	// 注意：这里需要找到与该工作负载相关的所有端点ID
+	for _, endpoints := range r.endpoints {
+		for _, ep := range endpoints {
+			if ep.ID != "" && ep.ID[:len(workloadID)] == workloadID {
+				r.healthChecker.UnregisterEndpoint(ep.ID)
+			}
+		}
+	}
+
 	// 删除工作负载
 	delete(r.workloads, workloadID)
 
@@ -310,6 +338,57 @@ func (r *K8sMemoryRegistry) GetEndpoints(serviceName, namespace string, selector
 	return matchedEndpoints, nil
 }
 
+// GetEndpointsWithConstraints 根据服务约束条件获取端点列表
+func (r *K8sMemoryRegistry) GetEndpointsWithConstraints(serviceName, namespace string) ([]*types.Endpoint, error) {
+	key := r.serviceKey(namespace, serviceName)
+
+	r.mu.RLock()
+	service, exists := r.services[key]
+	if !exists {
+		r.mu.RUnlock()
+		return nil, fmt.Errorf("service %s/%s not found", namespace, serviceName)
+	}
+
+	allEndpoints := r.endpoints[key]
+	r.mu.RUnlock()
+
+	if allEndpoints == nil {
+		return []*types.Endpoint{}, nil
+	}
+
+	// 首先应用基本的选择器过滤（如果有）
+	var filteredEndpoints []*types.Endpoint
+	for _, ep := range allEndpoints {
+		if r.matchLabels(ep.Labels, service.Spec.Selector) {
+			epCopy := *ep
+			filteredEndpoints = append(filteredEndpoints, &epCopy)
+		}
+	}
+
+	// 然后应用约束条件过滤
+	if service.Spec.Constraints != nil {
+		var err error
+		filteredEndpoints, err = r.constraintFilter.FilterEndpoints(filteredEndpoints, service.Spec.Constraints)
+		if err != nil {
+			return nil, fmt.Errorf("constraint filtering failed: %w", err)
+		}
+	} else {
+		// 如果没有约束条件，默认只返回健康的端点
+		var healthyEndpoints []*types.Endpoint
+		for _, ep := range filteredEndpoints {
+			if ep.Status.Ready {
+				healthyEndpoints = append(healthyEndpoints, ep)
+			}
+		}
+		filteredEndpoints = healthyEndpoints
+	}
+	
+	// 最后应用健康检查过滤 (所有端点都要经过健康检查)
+	filteredEndpoints = r.healthChecker.FilterHealthyEndpoints(filteredEndpoints)
+
+	return filteredEndpoints, nil
+}
+
 // RegisterEndpoint 注册端点到指定服务
 func (r *K8sMemoryRegistry) RegisterEndpoint(serviceName, namespace string, endpoint *types.Endpoint) error {
 	r.mu.Lock()
@@ -399,6 +478,10 @@ func (r *K8sMemoryRegistry) syncEndpointsForService(service *types.Service) {
 				}
 
 				r.endpoints[key] = append(r.endpoints[key], endpoint)
+				
+				// 注册端点到健康检查器
+				r.healthChecker.RegisterEndpoint(endpoint.ID)
+				r.healthChecker.UpdateEndpointLastSeen(endpoint.ID)
 			}
 		}
 	}
