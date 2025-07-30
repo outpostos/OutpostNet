@@ -20,48 +20,47 @@ var (
 	configFile = flag.String("config", "", "path to configuration file")
 	version    = flag.Bool("version", false, "show version")
 	
-	// Express Mode 参数
-	express     = flag.Bool("express", false, "enable express mode for quick setup")
-	port        = flag.Int("port", 7629, "express mode: server listen port")
-	token       = flag.String("token", "outpostnet-express-token", "express mode: authentication token")
-	services    expressServices
-	showConfig  = flag.Bool("show-config", false, "express mode: show generated config and exit")
-	saveConfig  = flag.String("save-config", "", "express mode: save generated config to file")
+	// 智能默认配置参数
+	port        = flag.Int("port", 7629, "server listen port")
+	token       = flag.String("token", "", "authentication token")
+	services    smartServices
+	showConfig  = flag.Bool("show-config", false, "show current config and exit")
+	saveConfig  = flag.String("save-config", "", "save current config to file")
 	
-	// Phase 2 Express Mode: 区域配置参数
-	regionID    = flag.String("region-id", "", "express mode: region identifier for Phase 2 cluster mode")
-	nodeID      = flag.String("node-id", "", "express mode: node identifier for Phase 2 cluster mode")
-	neighbors   expressNeighbors
+	// Phase 2: 区域配置参数
+	regionID    = flag.String("region-id", "", "region identifier for Phase 2 cluster mode")
+	nodeID      = flag.String("node-id", "", "node identifier for Phase 2 cluster mode")
+	neighbors   smartNeighbors
 )
 
-// expressServices 实现 flag.Value 接口，用于解析多个服务定义
-type expressServices []string
+// smartServices 实现 flag.Value 接口，用于解析多个服务定义
+type smartServices []string
 
-func (s *expressServices) String() string {
+func (s *smartServices) String() string {
 	return strings.Join(*s, ",")
 }
 
-func (s *expressServices) Set(value string) error {
+func (s *smartServices) Set(value string) error {
 	*s = append(*s, value)
 	return nil
 }
 
-// expressNeighbors 实现 flag.Value 接口，用于解析邻居节点定义 (Phase 2)
-type expressNeighbors []string
+// smartNeighbors 实现 flag.Value 接口，用于解析邻居节点定义 (Phase 2)
+type smartNeighbors []string
 
-func (n *expressNeighbors) String() string {
+func (n *smartNeighbors) String() string {
 	return strings.Join(*n, ",")
 }
 
-func (n *expressNeighbors) Set(value string) error {
+func (n *smartNeighbors) Set(value string) error {
 	*n = append(*n, value)
 	return nil
 }
 
 func init() {
 	// 注册自定义 flag
-	flag.Var(&services, "service", "express mode: define service in format 'name:port:targetPort' (can be used multiple times)")
-	flag.Var(&neighbors, "neighbor", "express mode: define neighbor in format 'nodeID:address:port' (can be used multiple times)")
+	flag.Var(&services, "service", "define service in format 'name:port:targetPort' (can be used multiple times)")
+	flag.Var(&neighbors, "neighbor", "define neighbor in format 'nodeID:address:port' (can be used multiple times)")
 }
 
 func main() {
@@ -75,47 +74,50 @@ func main() {
 	var cfg *config.ServerConfig
 	var err error
 
-	// Express Mode 处理
-	if *express {
-		cfg, err = generateExpressConfig()
-		if err != nil {
-			log.Fatalf("failed to generate express config: %v", err)
-		}
-		
-		// 显示配置并退出
-		if *showConfig {
-			if err := printConfig(cfg); err != nil {
-				log.Fatalf("failed to print config: %v", err)
-			}
-			return
-		}
-		
-		// 保存配置到文件
-		if *saveConfig != "" {
-			if err := saveConfigToFile(cfg, *saveConfig); err != nil {
-				log.Fatalf("failed to save config: %v", err)
-			}
-			log.Printf("Express config saved to: %s", *saveConfig)
-			return
-		}
-		
-		log.Println("🚀 Starting outpostnet-server in Express Mode")
-		log.Printf("✅ Listen Address: %s", cfg.Server.ListenAddr)
-		log.Printf("✅ Auth Token: %s", cfg.Server.AuthToken)
-		log.Printf("✅ K8s API: https://localhost:%d", cfg.K8sAPI.Port)
-		if len(cfg.Services) > 0 {
-			log.Printf("✅ Pre-configured Services:")
-			for _, svc := range cfg.Services {
-				for _, port := range svc.Spec.Ports {
-					log.Printf("   - %s:%d -> %d (%s)", svc.Metadata.Name, port.Port, port.TargetPort, port.Protocol)
-				}
-			}
-		}
-	} else {
-		// 标准模式：加载配置文件
+	// 加载基础配置（文件或默认）
+	if *configFile != "" {
 		cfg, err = config.LoadServerConfig(*configFile)
 		if err != nil {
 			log.Fatalf("failed to load config: %v", err)
+		}
+	} else {
+		// 使用智能默认配置
+		cfg = generateSmartConfig()
+	}
+
+	// 应用命令行参数覆盖
+	applyCommandLineOverrides(cfg)
+
+	// 显示配置并退出
+	if *showConfig {
+		if err := printConfig(cfg); err != nil {
+			log.Fatalf("failed to print config: %v", err)
+		}
+		return
+	}
+
+	// 保存配置到文件
+	if *saveConfig != "" {
+		if err := saveConfigToFile(cfg, *saveConfig); err != nil {
+			log.Fatalf("failed to save config: %v", err)
+		}
+		log.Printf("Config saved to: %s", *saveConfig)
+		return
+	}
+
+	// 显示配置信息
+	log.Printf("🚀 Starting outpostnet-server")
+	log.Printf("✅ Listen Address: %s", cfg.Server.ListenAddr)
+	log.Printf("✅ Auth Token: %s", cfg.Server.AuthToken)
+	if cfg.K8sAPI.Enabled {
+		log.Printf("✅ K8s API: https://localhost:%d", cfg.K8sAPI.Port)
+	}
+	if len(cfg.Services) > 0 {
+		log.Printf("✅ Pre-configured Services:")
+		for _, svc := range cfg.Services {
+			for _, port := range svc.Spec.Ports {
+				log.Printf("   - %s:%d -> %d (%s)", svc.Metadata.Name, port.Port, port.TargetPort, port.Protocol)
+			}
 		}
 	}
 
@@ -153,24 +155,16 @@ func main() {
 	}
 }
 
-// generateExpressConfig 生成Express Mode配置
-func generateExpressConfig() (*config.ServerConfig, error) {
-	cfg := &config.ServerConfig{
-		Server: config.ServerSpec{
-			ListenAddr: fmt.Sprintf("0.0.0.0:%d", *port),
-			AuthToken:  *token,
-		},
-		K8sAPI: config.K8sAPISpec{
-			Enabled: true,
-			Port:    8443,
-		},
-	}
+// generateSmartConfig 生成智能默认配置
+func generateSmartConfig() *config.ServerConfig {
+	// 使用默认配置作为基础
+	cfg := config.DefaultServerConfig()
 
 	// Phase 2: 检查并生成区域配置
 	if *regionID != "" && *nodeID != "" {
 		neighborNodes, err := parseNeighborDefinitions(neighbors)
 		if err != nil {
-			return nil, fmt.Errorf("invalid neighbor definitions: %v", err)
+			log.Fatalf("invalid neighbor definitions: %v", err)
 		}
 		
 		cfg.Region = &types.RegionConfig{
@@ -196,7 +190,7 @@ func generateExpressConfig() (*config.ServerConfig, error) {
 	for _, serviceDef := range services {
 		service, err := parseServiceDefinition(serviceDef)
 		if err != nil {
-			return nil, fmt.Errorf("invalid service definition '%s': %v", serviceDef, err)
+			log.Fatalf("invalid service definition '%s': %v", serviceDef, err)
 		}
 		
 		// Phase 2: 为服务添加地理元数据
@@ -213,47 +207,20 @@ func generateExpressConfig() (*config.ServerConfig, error) {
 		cfg.Services = append(cfg.Services, *service)
 	}
 
-	// 如果没有定义服务，添加默认服务
-	if len(cfg.Services) == 0 {
-		service := types.Service{
-			Metadata: types.ServiceMetadata{
-				Name:      "express-default-service",
-				Namespace: "default",
-				Labels: map[string]string{
-					"app":                    "express-default",
-					"outpostnet.io/express":     "true",
-					"outpostnet.io/created-by": "express-mode",
-				},
-			},
-			Spec: types.ServiceSpec{
-				Selector: map[string]string{
-					"app": "express-default",
-				},
-				Ports: []types.ServicePort{
-					{
-						Name:       "http",
-						Port:       80,
-						TargetPort: 8080,
-						Protocol:   "tcp",
-					},
-				},
-				ProxyMode:    "tcp",
-				LoadBalancer: "round_robin",
-			},
-		}
-		
-		// Phase 2: 为默认服务添加地理元数据
-		if cfg.Region != nil && cfg.Region.Enabled {
-			service.Metadata.Region = cfg.Region.RegionID
-			service.Metadata.Site = cfg.Region.NodeID
-			service.Metadata.Labels["outpostnet.io/region"] = cfg.Region.RegionID
-			service.Metadata.Labels["outpostnet.io/node"] = cfg.Region.NodeID
-		}
-		
-		cfg.Services = []types.Service{service}
-	}
+	return cfg
+}
 
-	return cfg, nil
+// applyCommandLineOverrides 应用命令行参数覆盖
+func applyCommandLineOverrides(cfg *config.ServerConfig) {
+	// 应用端口覆盖
+	if *port != 7629 { // 如果不是默认值
+		cfg.Server.ListenAddr = fmt.Sprintf("0.0.0.0:%d", *port)
+	}
+	
+	// 应用token覆盖
+	if *token != "" {
+		cfg.Server.AuthToken = *token
+	}
 }
 
 // parseServiceDefinition 解析服务定义字符串: "name:port:targetPort"
@@ -283,9 +250,8 @@ func parseServiceDefinition(def string) (*types.Service, error) {
 			Name:      name,
 			Namespace: "default",
 			Labels: map[string]string{
-				"app":                    name,
-				"outpostnet.io/express":     "true",
-				"outpostnet.io/created-by": "express-mode",
+				"app":                        name,
+				"outpostnet.io/created-by":   "command-line",
 			},
 		},
 		Spec: types.ServiceSpec{

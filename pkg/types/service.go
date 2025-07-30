@@ -64,6 +64,11 @@ type ServiceMetadata struct {
 	Site   string `yaml:"site,omitempty" json:"site,omitempty"`     // 站点标识
 	Zone   string `yaml:"zone,omitempty" json:"zone,omitempty"`     // 可用区
 	Region string `yaml:"region,omitempty" json:"region,omitempty"` // 区域
+	
+	// TTL 和清理相关元数据
+	CreatedAt time.Time     `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+	TTL       time.Duration `yaml:"ttl,omitempty" json:"ttl,omitempty"`           // 生存时间
+	LastSeen  time.Time     `yaml:"last_seen,omitempty" json:"last_seen,omitempty"` // 最后可见时间
 }
 
 // ServiceSpec 服务规格定义
@@ -201,6 +206,10 @@ type WorkloadMetadata struct {
 	ID        string            `yaml:"id" json:"id"`
 	Labels    map[string]string `yaml:"labels" json:"labels"`
 	CreatedAt time.Time         `yaml:"created_at" json:"created_at"`
+	
+	// TTL 和清理相关元数据
+	TTL       time.Duration     `yaml:"ttl,omitempty" json:"ttl,omitempty"`           // 生存时间
+	LastSeen  time.Time         `yaml:"last_seen,omitempty" json:"last_seen,omitempty"` // 最后可见时间
 }
 
 // WorkloadSpec 工作负载规格定义

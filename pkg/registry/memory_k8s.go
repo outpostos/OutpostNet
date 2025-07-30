@@ -25,6 +25,9 @@ type K8sMemoryRegistry struct {
 	// 约束条件过滤器和健康检查器
 	constraintFilter *ConstraintFilter
 	healthChecker    *HealthChecker
+	
+	// 清理管理器
+	cleanupManager   *CleanupManager
 }
 
 // K8sNamespace K8s命名空间定义
@@ -57,6 +60,9 @@ func NewK8sMemoryRegistry() *K8sMemoryRegistry {
 		healthChecker:    NewHealthChecker(DefaultHealthCheckConfig()),
 	}
 	
+	// 初始化清理管理器
+	registry.cleanupManager = NewCleanupManager(registry, DefaultCleanupConfig())
+	
 	// 创建默认命名空间
 	registry.ensureNamespace("default")
 	registry.ensureNamespace("kube-system")
@@ -67,6 +73,11 @@ func NewK8sMemoryRegistry() *K8sMemoryRegistry {
 // GetHealthChecker 获取健康检查器 (用于集成到服务器中)
 func (r *K8sMemoryRegistry) GetHealthChecker() *HealthChecker {
 	return r.healthChecker
+}
+
+// GetCleanupManager 获取清理管理器 (用于集成到服务器中)
+func (r *K8sMemoryRegistry) GetCleanupManager() *CleanupManager {
+	return r.cleanupManager
 }
 
 // RegisterService 注册服务定义
@@ -113,8 +124,23 @@ func (r *K8sMemoryRegistry) RegisterService(service *types.Service) error {
 		isUpdate = true
 	}
 
-	// 复制服务对象
+	// 复制服务对象并设置元数据
 	serviceCopy := *service
+	now := time.Now()
+	
+	// 设置创建时间（如果未设置）
+	if serviceCopy.Metadata.CreatedAt.IsZero() {
+		serviceCopy.Metadata.CreatedAt = now
+	}
+	
+	// 更新最后可见时间
+	serviceCopy.Metadata.LastSeen = now
+	
+	// 设置默认 TTL（如果未设置）
+	if serviceCopy.Metadata.TTL == 0 {
+		serviceCopy.Metadata.TTL = r.cleanupManager.config.ServiceTTL
+	}
+	
 	r.services[key] = &serviceCopy
 
 	// 更新服务索引
@@ -186,10 +212,17 @@ func (r *K8sMemoryRegistry) RegisterWorkload(workload *types.Workload) error {
 	}
 
 	// 设置创建时间和状态
-	workload.Metadata.CreatedAt = time.Now()
+	now := time.Now()
+	workload.Metadata.CreatedAt = now
 	workload.Status.Ready = true
-	workload.Status.LastSeen = time.Now()
+	workload.Status.LastSeen = now
 	workload.Status.Reason = "registered"
+	
+	// 设置 TTL 相关的元数据
+	if workload.Metadata.TTL == 0 {
+		workload.Metadata.TTL = r.cleanupManager.config.WorkloadTTL
+	}
+	workload.Metadata.LastSeen = now
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

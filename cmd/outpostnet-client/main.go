@@ -22,16 +22,15 @@ var (
 	mode       = flag.String("mode", "proxy", "client mode: proxy or register (used when no config file)")
 	version    = flag.Bool("version", false, "show version")
 	
-	// Express Mode 参数
-	express     = flag.Bool("express", false, "enable express mode for quick setup")
-	server      = flag.String("server", "127.0.0.1:7629", "express mode: server address")
-	token       = flag.String("token", "outpostnet-express-token", "express mode: authentication token")
-	service     = flag.String("service", "", "express mode: service name")
-	localPort   = flag.Int("local-port", 0, "express mode: local port (proxy mode)")
-	backend     = flag.String("backend", "", "express mode: backend address (register mode)")
-	labels      = flag.String("labels", "", "express mode: labels in format 'key1=value1,key2=value2' (register mode)")
-	showConfig  = flag.Bool("show-config", false, "express mode: show generated config and exit")
-	saveConfig  = flag.String("save-config", "", "express mode: save generated config to file")
+	// 智能默认配置参数
+	server      = flag.String("server", "127.0.0.1:7629", "server address")
+	token       = flag.String("token", "", "authentication token")
+	service     = flag.String("service", "", "service name")
+	localPort   = flag.Int("local-port", 0, "local port (proxy mode)")
+	backend     = flag.String("backend", "", "backend address (register mode)")
+	labels      = flag.String("labels", "", "labels in format 'key1=value1,key2=value2' (register mode)")
+	showConfig  = flag.Bool("show-config", false, "show current config and exit")
+	saveConfig  = flag.String("save-config", "", "save current config to file")
 )
 
 func main() {
@@ -45,45 +44,46 @@ func main() {
 	var cfg *config.ClientConfig
 	var err error
 
-	// Express Mode 处理
-	if *express {
-		cfg, err = generateExpressClientConfig()
-		if err != nil {
-			log.Fatalf("failed to generate express config: %v", err)
-		}
-		
-		// 显示配置并退出
-		if *showConfig {
-			if err := printConfig(cfg); err != nil {
-				log.Fatalf("failed to print config: %v", err)
-			}
-			return
-		}
-		
-		// 保存配置到文件
-		if *saveConfig != "" {
-			if err := saveConfigToFile(cfg, *saveConfig); err != nil {
-				log.Fatalf("failed to save config: %v", err)
-			}
-			log.Printf("Express config saved to: %s", *saveConfig)
-			return
-		}
-		
-		log.Println("🚀 Starting outpostnet-client in Express Mode")
-		log.Printf("✅ Mode: %s", cfg.Client.Mode)
-		log.Printf("✅ Server: %s", cfg.Client.ServerAddr)
-		log.Printf("✅ Auth Token: %s", cfg.Client.AuthToken)
-		if cfg.Client.Mode == "proxy" && len(cfg.Proxies) > 0 {
-			log.Printf("✅ Proxy: localhost:%d -> service:%s", cfg.Proxies[0].LocalPort, cfg.Proxies[0].ServiceName)
-		} else if cfg.Client.Mode == "register" && len(cfg.Workloads) > 0 {
-			log.Printf("✅ Register: %s:%d as service:%s", cfg.Workloads[0].Spec.LocalAddr, cfg.Workloads[0].Spec.LocalPort, *service)
-		}
-	} else {
-		// 标准模式：加载配置文件
+	// 加载基础配置（文件或默认）
+	if *configFile != "" {
 		cfg, err = config.LoadClientConfigWithMode(*configFile, *mode)
 		if err != nil {
 			log.Fatalf("failed to load config: %v", err)
 		}
+	} else {
+		// 使用智能默认配置
+		cfg = generateSmartClientConfig()
+	}
+
+	// 应用命令行参数覆盖
+	applyClientCommandLineOverrides(cfg)
+
+	// 显示配置并退出
+	if *showConfig {
+		if err := printConfig(cfg); err != nil {
+			log.Fatalf("failed to print config: %v", err)
+		}
+		return
+	}
+
+	// 保存配置到文件
+	if *saveConfig != "" {
+		if err := saveConfigToFile(cfg, *saveConfig); err != nil {
+			log.Fatalf("failed to save config: %v", err)
+		}
+		log.Printf("Config saved to: %s", *saveConfig)
+		return
+	}
+
+	// 显示配置信息
+	log.Printf("🚀 Starting outpostnet-client")
+	log.Printf("✅ Mode: %s", cfg.Client.Mode)
+	log.Printf("✅ Server: %s", cfg.Client.ServerAddr)
+	log.Printf("✅ Auth Token: %s", cfg.Client.AuthToken)
+	if cfg.Client.Mode == "proxy" && len(cfg.Proxies) > 0 {
+		log.Printf("✅ Proxy: localhost:%d -> service:%s", cfg.Proxies[0].LocalPort, cfg.Proxies[0].ServiceName)
+	} else if cfg.Client.Mode == "register" && len(cfg.Workloads) > 0 {
+		log.Printf("✅ Register: %s:%d", cfg.Workloads[0].Spec.LocalAddr, cfg.Workloads[0].Spec.LocalPort)
 	}
 
 	// 创建客户端
@@ -124,31 +124,31 @@ func main() {
 	}
 }
 
-// generateExpressClientConfig 生成Express Mode客户端配置
-func generateExpressClientConfig() (*config.ClientConfig, error) {
-	// 验证必需参数
-	if *service == "" {
-		return nil, fmt.Errorf("service name is required in express mode")
+// generateSmartClientConfig 生成智能默认客户端配置
+func generateSmartClientConfig() *config.ClientConfig {
+	// 使用默认配置作为基础
+	cfg := config.DefaultClientConfig(*mode)
+	
+	return cfg
+}
+
+// applyClientCommandLineOverrides 应用客户端命令行参数覆盖
+func applyClientCommandLineOverrides(cfg *config.ClientConfig) {
+	// 应用服务器地址参数覆盖
+	if *server != "127.0.0.1:7629" { // 如果不是默认值
+		cfg.Client.ServerAddr = *server
+	}
+	
+	// 应用token覆盖
+	if *token != "" {
+		cfg.Client.AuthToken = *token
 	}
 
-	// 基础配置
-	cfg := &config.ClientConfig{
-		Client: config.ClientSpec{
-			ServerAddr: *server,
-			AuthToken:  *token,
-			Mode:       *mode,
-		},
-	}
-
-	// 根据模式生成配置
+	// 根据模式和命令行参数生成配置
 	switch *mode {
 	case "proxy":
-		if *localPort == 0 {
-			return nil, fmt.Errorf("local-port is required for proxy mode")
-		}
-		
-		cfg.Proxies = []types.Proxy{
-			{
+		if *service != "" && *localPort > 0 {
+			proxy := types.Proxy{
 				Name:             fmt.Sprintf("%s-proxy", *service),
 				ServiceName:      *service,
 				ServiceNamespace: "default",
@@ -158,38 +158,37 @@ func generateExpressClientConfig() (*config.ClientConfig, error) {
 					"app": *service,
 				},
 				LoadBalancer: "round_robin",
-			},
+			}
+			cfg.Proxies = append(cfg.Proxies, proxy)
 		}
 
 	case "register":
-		if *backend == "" {
-			return nil, fmt.Errorf("backend is required for register mode")
-		}
-		
-		backendAddr, backendPort, err := parseBackend(*backend)
-		if err != nil {
-			return nil, fmt.Errorf("invalid backend format: %v", err)
-		}
-		
-		// 解析标签
-		labelsMap := map[string]string{
-			"app":                    *service,
-			"outpostnet.io/express":     "true",
-			"outpostnet.io/created-by": "express-mode",
-		}
-		
-		if *labels != "" {
-			parsedLabels, err := parseLabels(*labels)
+		if *backend != "" {
+			backendAddr, backendPort, err := parseBackend(*backend)
 			if err != nil {
-				return nil, fmt.Errorf("invalid labels format: %v", err)
+				log.Fatalf("invalid backend format: %v", err)
 			}
-			for k, v := range parsedLabels {
-				labelsMap[k] = v
+			
+			// 解析标签
+			labelsMap := map[string]string{
+				"outpostnet.io/created-by": "command-line",
 			}
-		}
-		
-		cfg.Workloads = []config.ClientWorkload{
-			{
+			
+			if *service != "" {
+				labelsMap["app"] = *service
+			}
+			
+			if *labels != "" {
+				parsedLabels, err := parseLabels(*labels)
+				if err != nil {
+					log.Fatalf("invalid labels format: %v", err)
+				}
+				for k, v := range parsedLabels {
+					labelsMap[k] = v
+				}
+			}
+			
+			workload := config.ClientWorkload{
 				Metadata: config.ClientWorkloadMetadata{
 					Labels: labelsMap,
 				},
@@ -198,14 +197,10 @@ func generateExpressClientConfig() (*config.ClientConfig, error) {
 					LocalPort: backendPort,
 					Protocol:  "tcp",
 				},
-			},
+			}
+			cfg.Workloads = append(cfg.Workloads, workload)
 		}
-
-	default:
-		return nil, fmt.Errorf("unsupported mode: %s", *mode)
 	}
-
-	return cfg, nil
 }
 
 // parseBackend 解析后端地址: "host:port"

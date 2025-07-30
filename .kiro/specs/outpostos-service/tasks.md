@@ -58,21 +58,21 @@
   - 实现健康状态变化的事件通知
   - _Requirements: 1.8_
 
-- [ ] 3. 完善元数据过期清理机制
+- [x] 3. 完善元数据过期清理机制
   - 实现 `pkg/registry/cleanup.go` 中的自动清理逻辑
   - 实现基于 TTL 的智能过期策略
   - 添加手动清理 API 接口
   - 实现清理操作的监控指标
   - _Requirements: 6.4_
 
-- [ ] 3.1 实现 TTL 过期策略
+- [x] 3.1 实现 TTL 过期策略
   - 为服务注册添加 TTL 配置支持
   - 实现基于最后心跳时间的过期判断
   - 添加过期服务的自动清理机制
   - 实现过期时间的动态配置
   - _Requirements: 6.4_
 
-- [ ] 4. 去掉 Express Mode，实现智能默认配置
+- [x] 4. 去掉 Express Mode，实现智能默认配置
   - 移除 `cmd/outpostnet-server/main.go` 中的 Express Mode 相关代码
   - 移除 `cmd/outpostnet-client/main.go` 中的 Express Mode 相关代码
   - 将 Express Mode 的智能默认值合并到标准配置加载逻辑
@@ -80,14 +80,14 @@
   - 更新命令行帮助信息和使用示例
   - _Requirements: 设计文档要求_
 
-- [ ] 4.1 实现智能默认配置加载
+- [x] 4.1 实现智能默认配置加载
   - 在 `pkg/config/defaults.go` 中定义所有组件的默认配置
   - 实现配置的优先级机制（命令行 > 配置文件 > 默认值）
   - 添加配置验证和错误提示机制
   - 实现配置的热重载功能
   - _Requirements: 设计文档要求_
 
-- [ ] 4.2 完善配置导出功能
+- [x] 4.2 完善配置导出功能
   - 实现 `-save-config` 命令行参数的配置导出
   - 支持导出当前运行时的完整配置
   - 添加配置文件格式验证和美化输出
