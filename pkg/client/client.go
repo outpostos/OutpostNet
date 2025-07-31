@@ -8,13 +8,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/outpostos/OutpostNet/pkg/config"
 	"github.com/outpostos/OutpostNet/pkg/loadbalancer"
 	"github.com/outpostos/OutpostNet/pkg/types"
-	"github.com/google/uuid"
 )
 
 // Client outpostnet 客户端
@@ -33,10 +34,10 @@ type Client struct {
 	addressResolver *config.AddressResolver
 
 	// 消息处理
-	encoder *json.Encoder
-	decoder *json.Decoder
+	encoder       *json.Encoder
+	decoder       *json.Decoder
 	authenticated bool
-	clientID string
+	clientID      string
 
 	// 控制通道
 	ctx    context.Context
@@ -173,12 +174,12 @@ func (c *Client) connectToServer() error {
 	c.conn = conn
 	c.encoder = json.NewEncoder(conn)
 	c.decoder = json.NewDecoder(conn)
-	
+
 	// 进行认证
 	if err := c.authenticate(); err != nil {
 		return fmt.Errorf("authentication failed: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -278,9 +279,9 @@ func (c *Client) startUDPProxy(proxyConfig types.Proxy) error {
 	}
 
 	proxy := &ProxyInstance{
-		Config:   proxyConfig,
-		UDPConn:  conn,
-		Active:   true,
+		Config:  proxyConfig,
+		UDPConn: conn,
+		Active:  true,
 	}
 
 	// 注册代理实例
@@ -325,8 +326,8 @@ func (c *Client) handleTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) {
 
 	// 1. 查询目标服务的端点
 	service, endpoints, err := c.queryService(
-		proxy.Config.ServiceName, 
-		proxy.Config.ServiceNamespace, 
+		proxy.Config.ServiceName,
+		proxy.Config.ServiceNamespace,
 		proxy.Config.Selector,
 	)
 	if err != nil {
@@ -344,7 +345,7 @@ func (c *Client) handleTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) {
 	for i := range endpoints {
 		endpointPtrs[i] = &endpoints[i]
 	}
-	
+
 	// 3. 使用负载均衡器选择端点
 	endpoint := c.selectEndpoint(service, endpointPtrs, conn.RemoteAddr().String())
 	if endpoint == nil {
@@ -363,7 +364,7 @@ func (c *Client) handleTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) {
 	}
 	defer targetConn.Close()
 
-	log.Printf("proxy %s established connection to %s for service %s", 
+	log.Printf("proxy %s established connection to %s for service %s",
 		proxy.Config.Name, targetAddr, service.Metadata.Name)
 
 	// 4. 双向数据转发
@@ -405,7 +406,7 @@ func (c *Client) registerWorkload(workload config.ClientWorkload) error {
 			Protocol:  workload.Spec.Protocol,
 		},
 	}
-	
+
 	// 发送注册消息
 	msg := types.Message{
 		Type: types.MsgTypeRegisterWorkload,
@@ -415,27 +416,27 @@ func (c *Client) registerWorkload(workload config.ClientWorkload) error {
 		},
 		Timestamp: time.Now(),
 	}
-	
+
 	if err := c.encoder.Encode(msg); err != nil {
 		return fmt.Errorf("failed to send register message: %v", err)
 	}
-	
+
 	// 等待响应
 	var response types.Message
 	if err := c.decoder.Decode(&response); err != nil {
 		return fmt.Errorf("failed to receive response: %v", err)
 	}
-	
+
 	if response.Type == types.MsgTypeError {
 		var errorPayload types.ErrorPayload
 		payloadBytes, _ := json.Marshal(response.Payload)
 		json.Unmarshal(payloadBytes, &errorPayload)
 		return fmt.Errorf("server error: %s", errorPayload.Message)
 	}
-	
-	log.Printf("successfully registered workload at %s:%d with labels: %v", 
+
+	log.Printf("successfully registered workload at %s:%d with labels: %v",
 		workload.Spec.LocalAddr, workload.Spec.LocalPort, workload.Metadata.Labels)
-	
+
 	return nil
 }
 
@@ -482,21 +483,21 @@ func (c *Client) authenticate() error {
 		},
 		Timestamp: time.Now(),
 	}
-	
+
 	if err := c.encoder.Encode(msg); err != nil {
 		return fmt.Errorf("failed to send auth message: %v", err)
 	}
-	
+
 	// 等待认证响应
 	var response types.Message
 	if err := c.decoder.Decode(&response); err != nil {
 		return fmt.Errorf("failed to receive auth response: %v", err)
 	}
-	
+
 	if response.Type != types.MsgTypeAuthResponse {
 		return fmt.Errorf("unexpected response type: %s", response.Type)
 	}
-	
+
 	var authResponse types.AuthResponsePayload
 	payloadBytes, err := json.Marshal(response.Payload)
 	if err != nil {
@@ -505,15 +506,15 @@ func (c *Client) authenticate() error {
 	if err := json.Unmarshal(payloadBytes, &authResponse); err != nil {
 		return fmt.Errorf("failed to unmarshal auth response: %v", err)
 	}
-	
+
 	if !authResponse.Success {
 		return fmt.Errorf("authentication failed: %s", authResponse.Message)
 	}
-	
+
 	c.authenticated = true
 	c.clientID = authResponse.ClientID
 	log.Printf("authenticated successfully as client %s", c.clientID)
-	
+
 	return nil
 }
 
@@ -564,28 +565,68 @@ func (c *Client) queryService(serviceName, serviceNamespace string, selector map
 		},
 		Timestamp: time.Now(),
 	}
-	
+
 	if err := encoder.Encode(msg); err != nil {
 		return nil, nil, fmt.Errorf("failed to send query message: %v", err)
 	}
-	
+
 	// 等待响应
 	var response types.Message
 	if err := decoder.Decode(&response); err != nil {
 		return nil, nil, fmt.Errorf("failed to receive response: %v", err)
 	}
-	
+
 	if response.Type == types.MsgTypeError {
 		var errorPayload types.ErrorPayload
 		payloadBytes, _ := json.Marshal(response.Payload)
 		json.Unmarshal(payloadBytes, &errorPayload)
-		return nil, nil, fmt.Errorf("server error: %s", errorPayload.Message)
+
+		// 如果是服务未找到错误，尝试自动创建服务
+		if strings.Contains(errorPayload.Message, "not found") {
+			log.Printf("service %s/%s not found, attempting to create automatically", serviceNamespace, serviceName)
+
+			// 尝试创建服务
+			if err := c.createServiceIfNeeded(serviceName, serviceNamespace, selector, encoder, decoder); err != nil {
+				log.Printf("failed to auto-create service %s/%s: %v", serviceNamespace, serviceName, err)
+				return nil, nil, fmt.Errorf("server error: %s", errorPayload.Message)
+			}
+
+			// 重新查询服务
+			msg2 := types.Message{
+				Type: types.MsgTypeQueryService,
+				ID:   uuid.New().String(),
+				Payload: types.QueryServicePayload{
+					ServiceName:      serviceName,
+					ServiceNamespace: serviceNamespace,
+					Selector:         selector,
+				},
+				Timestamp: time.Now(),
+			}
+
+			if err := encoder.Encode(msg2); err != nil {
+				return nil, nil, fmt.Errorf("failed to send retry query message: %v", err)
+			}
+
+			// 等待第二次响应
+			if err := decoder.Decode(&response); err != nil {
+				return nil, nil, fmt.Errorf("failed to receive retry response: %v", err)
+			}
+
+			if response.Type == types.MsgTypeError {
+				var retryErrorPayload types.ErrorPayload
+				retryPayloadBytes, _ := json.Marshal(response.Payload)
+				json.Unmarshal(retryPayloadBytes, &retryErrorPayload)
+				return nil, nil, fmt.Errorf("server error after retry: %s", retryErrorPayload.Message)
+			}
+		} else {
+			return nil, nil, fmt.Errorf("server error: %s", errorPayload.Message)
+		}
 	}
-	
+
 	if response.Type != types.MsgTypeServiceInfo {
 		return nil, nil, fmt.Errorf("unexpected response type: %s", response.Type)
 	}
-	
+
 	var serviceInfo types.ServiceInfoPayload
 	payloadBytes, err := json.Marshal(response.Payload)
 	if err != nil {
@@ -594,14 +635,14 @@ func (c *Client) queryService(serviceName, serviceNamespace string, selector map
 	if err := json.Unmarshal(payloadBytes, &serviceInfo); err != nil {
 		return nil, nil, fmt.Errorf("failed to unmarshal service info: %v", err)
 	}
-	
+
 	return &serviceInfo.Service, serviceInfo.Endpoints, nil
 }
 
 // reconnect 重新连接到服务器
 func (c *Client) reconnect() {
 	log.Println("attempting to reconnect to server...")
-	
+
 	c.authenticated = false
 	if err := c.connectToServer(); err != nil {
 		log.Printf("failed to reconnect: %v", err)
@@ -652,7 +693,7 @@ func (c *Client) handleUDPProxyPackets(proxy *ProxyInstance) {
 		default:
 			// 设置读取超时
 			proxy.UDPConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-			
+
 			n, clientAddr, err := proxy.UDPConn.ReadFromUDP(buffer)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -735,7 +776,7 @@ func (c *Client) createUDPSession(proxy *ProxyInstance, clientAddr *net.UDPAddr)
 	for i := range endpoints {
 		endpointPtrs[i] = &endpoints[i]
 	}
-	
+
 	// 3. 使用负载均衡器选择端点
 	endpoint := c.selectEndpoint(service, endpointPtrs, clientAddr.String())
 	if endpoint == nil {
@@ -744,7 +785,7 @@ func (c *Client) createUDPSession(proxy *ProxyInstance, clientAddr *net.UDPAddr)
 	}
 	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
 
-	log.Printf("UDP proxy %s creating session to endpoint %s for client %s", 
+	log.Printf("UDP proxy %s creating session to endpoint %s for client %s",
 		proxy.Config.Name, targetAddr, clientAddr.String())
 
 	// 3. 建立到目标端点的 UDP 连接
@@ -760,7 +801,7 @@ func (c *Client) createUDPSession(proxy *ProxyInstance, clientAddr *net.UDPAddr)
 		return nil
 	}
 
-	log.Printf("UDP proxy %s established session to %s for service %s", 
+	log.Printf("UDP proxy %s established session to %s for service %s",
 		proxy.Config.Name, targetAddr, service.Metadata.Name)
 
 	return &UDPSession{
@@ -780,7 +821,7 @@ func (c *Client) handleUDPSessionData(proxy *ProxyInstance, session *UDPSession,
 	for {
 		// 设置读取超时
 		session.TargetConn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		
+
 		n, err := session.TargetConn.Read(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -788,7 +829,7 @@ func (c *Client) handleUDPSessionData(proxy *ProxyInstance, session *UDPSession,
 				session.mu.Lock()
 				inactive := time.Since(session.LastActivity) > 5*time.Minute
 				session.mu.Unlock()
-				
+
 				if inactive {
 					log.Printf("UDP session %s expired, cleaning up", sessionKey)
 					c.cleanupUDPSession(sessionKey, session, sessions, sessionsMu)
@@ -821,7 +862,7 @@ func (c *Client) cleanupUDPSession(sessionKey string, session *UDPSession, sessi
 	sessionsMu.Lock()
 	delete(sessions, sessionKey)
 	sessionsMu.Unlock()
-	
+
 	if session.TargetConn != nil {
 		session.TargetConn.Close()
 	}
@@ -866,9 +907,9 @@ func (c *Client) startSUDPProxy(proxyConfig types.Proxy) error {
 	}
 
 	proxy := &ProxyInstance{
-		Config:   proxyConfig,
-		UDPConn:  conn,
-		Active:   true,
+		Config:  proxyConfig,
+		UDPConn: conn,
+		Active:  true,
 	}
 
 	// 注册代理实例
@@ -932,7 +973,7 @@ func (c *Client) handleSTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) 
 	for i := range endpoints {
 		endpointPtrs[i] = &endpoints[i]
 	}
-	
+
 	// 3. 使用负载均衡器选择端点
 	endpoint := c.selectEndpoint(service, endpointPtrs, conn.RemoteAddr().String())
 	if endpoint == nil {
@@ -1073,7 +1114,7 @@ func (c *Client) handleSUDPProxyConnections(proxy *ProxyInstance) {
 		default:
 			// 设置读取超时
 			proxy.UDPConn.SetReadDeadline(time.Now().Add(time.Second))
-			
+
 			n, clientAddr, err := proxy.UDPConn.ReadFromUDP(buffer)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -1115,7 +1156,7 @@ func (c *Client) establishSUDPTunnel(proxyConfig types.Proxy) (net.Conn, error) 
 	for i := range endpoints {
 		endpointPtrs[i] = &endpoints[i]
 	}
-	
+
 	// 3. 使用负载均衡器选择端点
 	endpoint := c.selectEndpoint(service, endpointPtrs, "")
 	if endpoint == nil {
@@ -1123,7 +1164,7 @@ func (c *Client) establishSUDPTunnel(proxyConfig types.Proxy) (net.Conn, error) 
 	}
 	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
 
-	log.Printf("SUDP proxy %s establishing tunnel to endpoint %s for service %s", 
+	log.Printf("SUDP proxy %s establishing tunnel to endpoint %s for service %s",
 		proxyConfig.Name, targetAddr, service.Metadata.Name)
 
 	// 3. 建立到服务器的新控制连接
@@ -1199,23 +1240,89 @@ func (c *Client) establishSUDPTunnel(proxyConfig types.Proxy) (net.Conn, error) 
 func (c *Client) forwardSUDPData(tunnelConn net.Conn, data []byte, clientAddr *net.UDPAddr) error {
 	// 创建 SUDP 数据包格式：[length][client_addr][data]
 	clientAddrBytes := []byte(clientAddr.String())
-	
+
 	// 构建完整的数据包
 	packet := make([]byte, 4+4+len(clientAddrBytes)+len(data))
-	
+
 	// 写入总长度
 	binary.BigEndian.PutUint32(packet[0:4], uint32(len(packet)-4))
-	
+
 	// 写入客户端地址长度
 	binary.BigEndian.PutUint32(packet[4:8], uint32(len(clientAddrBytes)))
-	
+
 	// 写入客户端地址
 	copy(packet[8:8+len(clientAddrBytes)], clientAddrBytes)
-	
+
 	// 写入数据
 	copy(packet[8+len(clientAddrBytes):], data)
 
 	// 发送到加密隧道
 	_, err := tunnelConn.Write(packet)
 	return err
+}
+
+// createServiceIfNeeded 尝试根据selector自动创建服务
+func (c *Client) createServiceIfNeeded(serviceName, serviceNamespace string, selector map[string]string, encoder *json.Encoder, decoder *json.Decoder) error {
+	if selector == nil || len(selector) == 0 {
+		return fmt.Errorf("selector is empty, cannot auto-create service")
+	}
+
+	// 构造服务定义
+	service := types.Service{
+		Metadata: types.ServiceMetadata{
+			Name:      serviceName,
+			Namespace: serviceNamespace,
+			Labels: map[string]string{
+				"outpostnet.io/auto-created": "true",
+				"outpostnet.io/created-by":   "proxy-client",
+			},
+		},
+		Spec: types.ServiceSpec{
+			Selector: selector,
+			Ports: []types.ServicePort{
+				{
+					Name:       "auto",
+					Port:       80,   // 默认服务端口
+					TargetPort: 8080, // 默认目标端口，实际会从workload推断
+					Protocol:   "tcp",
+				},
+			},
+			ProxyMode:    "tcp",
+			LoadBalancer: "round_robin",
+		},
+	}
+
+	// 发送创建服务消息
+	msg := types.Message{
+		Type: types.MsgTypeCreateService,
+		ID:   uuid.New().String(),
+		Payload: types.CreateServicePayload{
+			Service: service,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := encoder.Encode(msg); err != nil {
+		return fmt.Errorf("failed to send create service message: %v", err)
+	}
+
+	// 等待创建响应
+	var response types.Message
+	if err := decoder.Decode(&response); err != nil {
+		return fmt.Errorf("failed to receive create service response: %v", err)
+	}
+
+	if response.Type == types.MsgTypeError {
+		var errorPayload types.ErrorPayload
+		payloadBytes, _ := json.Marshal(response.Payload)
+		json.Unmarshal(payloadBytes, &errorPayload)
+		return fmt.Errorf("failed to create service: %s", errorPayload.Message)
+	}
+
+	if response.Type != types.MsgTypeServiceCreated {
+		return fmt.Errorf("unexpected response type for create service: %s", response.Type)
+	}
+
+	log.Printf("successfully auto-created service %s/%s", serviceNamespace, serviceName)
+	return nil
 }

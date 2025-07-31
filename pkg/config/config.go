@@ -2,37 +2,40 @@ package config
 
 import (
 	"time"
+
 	"github.com/outpostos/OutpostNet/pkg/types"
 )
 
 // ServerConfig outpostnet-server 配置
 type ServerConfig struct {
-	Server     ServerSpec      `yaml:"server" json:"server"`
-	Services   []types.Service `yaml:"services" json:"services"`
-	K8sAPI     K8sAPISpec      `yaml:"k8s_api,omitempty" json:"k8s_api,omitempty"`
-	Monitoring MonitoringSpec  `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
-	
+	Server               ServerSpec              `yaml:"server" json:"server"`
+	Services             []types.Service         `yaml:"services" json:"services"`
+	ServiceDiscovery     *ServiceDiscoveryConfig `yaml:"service_discovery,omitempty" json:"service_discovery,omitempty"`
+	DefaultServicePolicy *DefaultServicePolicy   `yaml:"default_service_policy,omitempty" json:"default_service_policy,omitempty"`
+	K8sAPI               K8sAPISpec              `yaml:"k8s_api,omitempty" json:"k8s_api,omitempty"`
+	Monitoring           MonitoringSpec          `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
+
 	// Phase 2 新增：区域配置（可选）
-	Region   *types.RegionConfig `yaml:"region,omitempty" json:"region,omitempty"`
+	Region *types.RegionConfig `yaml:"region,omitempty" json:"region,omitempty"`
 }
 
 // ServerSpec 服务端配置规格
 type ServerSpec struct {
-	ListenAddr   string `yaml:"listen_addr" json:"listen_addr"`
-	AuthToken    string `yaml:"auth_token" json:"auth_token"`
-	
+	ListenAddr string `yaml:"listen_addr" json:"listen_addr"`
+	AuthToken  string `yaml:"auth_token" json:"auth_token"`
+
 	// Unix Socket 配置 - 如果配置了路径就自动启用双协议监听
 	UnixSockPath string `yaml:"unix_sock_path,omitempty" json:"unix_sock_path,omitempty"`
-	
+
 	// 证书配置 (STCP 模式使用)
 	TLS *TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
 }
 
 // TLSConfig TLS/证书配置
 type TLSConfig struct {
-	CertFile   string `yaml:"cert_file" json:"cert_file"`
-	KeyFile    string `yaml:"key_file" json:"key_file"`
-	CAFile     string `yaml:"ca_file" json:"ca_file"`
+	CertFile    string `yaml:"cert_file" json:"cert_file"`
+	KeyFile     string `yaml:"key_file" json:"key_file"`
+	CAFile      string `yaml:"ca_file" json:"ca_file"`
 	TrustBundle string `yaml:"trust_bundle,omitempty" json:"trust_bundle,omitempty"`
 }
 
@@ -52,16 +55,32 @@ type MonitoringSpec struct {
 	MetricsPath       string `yaml:"metrics_path,omitempty" json:"metrics_path,omitempty"`
 }
 
+// ServiceDiscoveryConfig 服务发现配置
+type ServiceDiscoveryConfig struct {
+	Mode                string        `yaml:"mode" json:"mode"`                                   // "static" 或 "dynamic"
+	AutoCreateServices  bool          `yaml:"auto_create_services" json:"auto_create_services"`   // 是否自动创建服务
+	DefaultLoadBalancer string        `yaml:"default_load_balancer" json:"default_load_balancer"` // 默认负载均衡策略
+	ServiceTTL          time.Duration `yaml:"service_ttl" json:"service_ttl"`                     // 服务生存时间
+	CleanupInterval     time.Duration `yaml:"cleanup_interval" json:"cleanup_interval"`           // 清理间隔
+}
+
+// DefaultServicePolicy 默认服务策略配置
+type DefaultServicePolicy struct {
+	LoadBalancer    string            `yaml:"load_balancer" json:"load_balancer"`
+	HealthCheck     HealthCheckConfig `yaml:"health_check" json:"health_check"`
+	SessionAffinity bool              `yaml:"session_affinity" json:"session_affinity"`
+}
+
 // ClientConfig outpostnet-client 配置
 type ClientConfig struct {
-	Client      ClientSpec         `yaml:"client" json:"client"`
-	Proxies     []types.Proxy      `yaml:"proxies,omitempty" json:"proxies,omitempty"`
-	
+	Client  ClientSpec    `yaml:"client" json:"client"`
+	Proxies []types.Proxy `yaml:"proxies,omitempty" json:"proxies,omitempty"`
+
 	// Register 模式下的工作负载配置 (K8s Pod 风格)
-	Workloads   []ClientWorkload   `yaml:"workloads,omitempty" json:"workloads,omitempty"`
-	
+	Workloads []ClientWorkload `yaml:"workloads,omitempty" json:"workloads,omitempty"`
+
 	// 健康检查配置
-	HealthCheck HealthCheckConfig  `yaml:"health_check,omitempty" json:"health_check,omitempty"`
+	HealthCheck HealthCheckConfig `yaml:"health_check,omitempty" json:"health_check,omitempty"`
 }
 
 // ClientSpec 客户端配置规格
@@ -69,10 +88,10 @@ type ClientSpec struct {
 	ServerAddr string `yaml:"server_addr" json:"server_addr"`
 	AuthToken  string `yaml:"auth_token" json:"auth_token"`
 	Mode       string `yaml:"mode" json:"mode"` // proxy 或 register
-	
+
 	// Unix Socket 连接配置
-	ConnProto  string `yaml:"conn_proto,omitempty" json:"conn_proto,omitempty"` // "tcp"|"unix"|"auto"
-	
+	ConnProto string `yaml:"conn_proto,omitempty" json:"conn_proto,omitempty"` // "tcp"|"unix"|"auto"
+
 	// 证书配置 (STCP 模式使用)
 	TLS *TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
 }
@@ -193,9 +212,9 @@ func DefaultClientConfig(mode string) *ClientConfig {
 // DefaultRegionConfig 返回默认区域配置 (Phase 2)
 func DefaultRegionConfig(regionID, nodeID string) *types.RegionConfig {
 	return &types.RegionConfig{
-		Enabled:  false, // 默认关闭，需要显式启用
-		RegionID: regionID,
-		NodeID:   nodeID,
+		Enabled:   false, // 默认关闭，需要显式启用
+		RegionID:  regionID,
+		NodeID:    nodeID,
 		Neighbors: []types.NeighborNode{},
 		ServiceSync: types.ServiceSyncConfig{
 			SyncInterval: 30 * time.Second,
@@ -209,12 +228,12 @@ func DefaultRegionConfig(regionID, nodeID string) *types.RegionConfig {
 // ServerConfigWithRegion 创建带区域配置的服务端配置
 func ServerConfigWithRegion(regionID, nodeID string, neighbors []types.NeighborNode) *ServerConfig {
 	config := DefaultServerConfig()
-	
+
 	// 添加区域配置
 	config.Region = DefaultRegionConfig(regionID, nodeID)
 	config.Region.Enabled = true
 	config.Region.Neighbors = neighbors
-	
+
 	// 为服务添加地理元数据
 	for i := range config.Services {
 		config.Services[i].Metadata.Region = regionID
@@ -225,6 +244,6 @@ func ServerConfigWithRegion(regionID, nodeID string, neighbors []types.NeighborN
 		config.Services[i].Metadata.Labels["outpostnet.io/region"] = regionID
 		config.Services[i].Metadata.Labels["outpostnet.io/node"] = nodeID
 	}
-	
+
 	return config
 }

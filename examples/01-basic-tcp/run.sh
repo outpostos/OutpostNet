@@ -41,13 +41,23 @@ fi
 # 清理函数
 cleanup() {
     log_info "正在清理进程..."
+    
+    # 清理 OutpostNet 进程
     pkill -f "outpostnet-server.*demo-server-config.yaml" 2>/dev/null || true
     pkill -f "outpostnet-client.*demo-register-config.yaml" 2>/dev/null || true  
     pkill -f "outpostnet-client.*demo-proxy-config.yaml" 2>/dev/null || true
-    pkill -f "python.*8000" 2>/dev/null || true
+    
+    # 清理 Python 测试服务器 (端口 18000)
+    pkill -f "python.*test-web-server.py" 2>/dev/null || true
+    pkill -f "python3.*test-web-server.py" 2>/dev/null || true
+    
+    # 通过端口强制清理进程
+    lsof -ti:17000 | xargs kill -9 2>/dev/null || true  # 服务端口
+    lsof -ti:18000 | xargs kill -9 2>/dev/null || true  # 后端服务端口
+    lsof -ti:19999 | xargs kill -9 2>/dev/null || true  # 代理端口
     
     # 等待端口释放
-    sleep 2
+    sleep 3
     log_success "清理完成"
 }
 
@@ -60,12 +70,46 @@ log_info ""
 # 检查端口占用
 check_port() {
     local port=$1
-    if netstat -tln 2>/dev/null | grep -q ":$port "; then
+    if lsof -ti:$port >/dev/null 2>&1; then
         log_warning "端口 $port 已被占用，正在尝试释放..."
         lsof -ti:$port | xargs kill -9 2>/dev/null || true
         sleep 1
     fi
 }
+
+# 检查是否有进程占用端口
+log_info "检查进程占用情况..."
+PORTS_IN_USE=false
+
+for port in 17000 18000 19999; do
+    PID=$(lsof -ti:$port 2>/dev/null | head -1)
+    if [ -n "$PID" ]; then
+        PORTS_IN_USE=true
+        PROCESS_INFO=$(ps -p $PID -o comm= 2>/dev/null || echo "unknown")
+        log_warning "端口 $port 被占用 (PID: $PID, 进程: $PROCESS_INFO)"
+    fi
+done
+
+if [ "$PORTS_IN_USE" = true ]; then
+    log_info ""
+    log_info "🛠️  如需清理相关进程，可执行以下命令："
+    log_info "   # 清理 OutpostNet 进程"
+    log_info "   pkill -f 'outpostnet-server.*demo-server-config.yaml'"
+    log_info "   pkill -f 'outpostnet-client.*demo-register-config.yaml'"
+    log_info "   pkill -f 'outpostnet-client.*demo-proxy-config.yaml'"
+    log_info "   # 清理测试服务器"
+    log_info "   pkill -f 'python.*test-web-server.py'"
+    log_info "   # 强制清理端口占用"
+    log_info "   lsof -ti:17000 | xargs kill -9; lsof -ti:18000 | xargs kill -9; lsof -ti:19999 | xargs kill -9"
+    log_info ""
+    
+    read -p "是否继续启动？可能会遇到端口冲突 (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "已取消启动"
+        exit 0
+    fi
+fi
 
 log_info "检查端口占用..."
 check_port 17000  # 服务端口

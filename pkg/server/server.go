@@ -21,9 +21,9 @@ import (
 
 // Server outpostnet 服务器
 type Server struct {
-	config   *config.ServerConfig
+	config        *config.ServerConfig
 	multiListener *listener.MultiProtocolListener // 多协议监听器
-	registry types.ServiceRegistry
+	registry      types.ServiceRegistry
 
 	// 客户端连接管理
 	clients   map[string]*ClientConn
@@ -45,12 +45,12 @@ type Server struct {
 
 // ClientConn 表示一个客户端连接
 type ClientConn struct {
-	ID           string
-	Conn         net.Conn
-	Mode         string // proxy 或 register
+	ID            string
+	Conn          net.Conn
+	Mode          string // proxy 或 register
 	Authenticated bool
-	Workloads    []string // register 模式下注册的工作负载 ID
-	LastSeen     time.Time
+	Workloads     []string // register 模式下注册的工作负载 ID
+	LastSeen      time.Time
 }
 
 // NewServer 创建新的服务器实例
@@ -195,7 +195,7 @@ func (s *Server) Run(ctx context.Context) error {
 // handleConnections 处理新连接
 func (s *Server) handleConnections() {
 	log.Printf("started connection handler")
-	
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -205,7 +205,7 @@ func (s *Server) handleConnections() {
 			// 跟踪连接
 			connID := s.connTracker.TrackConnection(connInfo)
 			log.Printf("new connection %s from %s via %s", connID, connInfo.RemoteAddr, connInfo.Protocol)
-			
+
 			// 在独立的 goroutine 中处理连接
 			go s.handleClientConnection(connInfo, connID)
 		}
@@ -215,7 +215,7 @@ func (s *Server) handleConnections() {
 // handleErrors 处理监听器错误
 func (s *Server) handleErrors() {
 	log.Printf("started error handler")
-	
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -263,7 +263,7 @@ func (s *Server) handleClientConnection(connInfo listener.ConnectionInfo, connID
 					}
 				}
 			}
-			
+
 			if err := s.registry.UnregisterWorkload(workloadID); err != nil {
 				log.Printf("failed to unregister workload %s: %v", workloadID, err)
 			}
@@ -281,7 +281,7 @@ func (s *Server) handleClientConnection(connInfo listener.ConnectionInfo, connID
 func (s *Server) handleClientMessages(client *ClientConn) {
 	decoder := json.NewDecoder(client.Conn)
 	encoder := json.NewEncoder(client.Conn)
-	
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -292,9 +292,9 @@ func (s *Server) handleClientMessages(client *ClientConn) {
 				log.Printf("failed to decode message from client %s: %v", client.ID, err)
 				return
 			}
-			
+
 			client.LastSeen = time.Now()
-			
+
 			// 处理不同类型的消息
 			if err := s.handleMessage(client, &msg, encoder); err != nil {
 				log.Printf("failed to handle message from client %s: %v", client.ID, err)
@@ -310,14 +310,14 @@ func (s *Server) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
+
 	if s.multiListener != nil {
 		if err := s.multiListener.Stop(); err != nil {
 			log.Printf("error stopping multi-protocol listener: %v", err)
 			return err
 		}
 	}
-	
+
 	return nil
 }
 
@@ -373,6 +373,11 @@ func (s *Server) handleMessage(client *ClientConn, msg *types.Message, encoder *
 			return fmt.Errorf("client not authenticated")
 		}
 		return s.handleQueryService(client, msg, encoder)
+	case types.MsgTypeCreateService:
+		if !client.Authenticated {
+			return fmt.Errorf("client not authenticated")
+		}
+		return s.handleCreateService(client, msg, encoder)
 	case types.MsgTypeSTCPTunnelRequest:
 		if !client.Authenticated {
 			return fmt.Errorf("client not authenticated")
@@ -400,7 +405,7 @@ func (s *Server) handleAuth(client *ClientConn, msg *types.Message, encoder *jso
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
-	
+
 	// 验证 token
 	success := payload.Token == s.config.Server.AuthToken
 	var message string
@@ -413,7 +418,7 @@ func (s *Server) handleAuth(client *ClientConn, msg *types.Message, encoder *jso
 		message = "invalid token"
 		log.Printf("client %s authentication failed", client.ID)
 	}
-	
+
 	// 发送认证响应
 	return s.sendAuthResponse(encoder, msg.ID, success, message, client.ID)
 }
@@ -428,19 +433,19 @@ func (s *Server) handleRegisterWorkload(client *ClientConn, msg *types.Message, 
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
-	
+
 	// 设置工作负载的注册 IP
 	clientIP, _, _ := net.SplitHostPort(client.Conn.RemoteAddr().String())
 	payload.Workload.Status.RegisterIP = clientIP
-	
+
 	// 注册工作负载到服务注册表
 	if err := s.registry.RegisterWorkload(&payload.Workload); err != nil {
 		return err
 	}
-	
+
 	// 记录客户端注册的工作负载
 	client.Workloads = append(client.Workloads, payload.Workload.Metadata.ID)
-	
+
 	// 将工作负载对应的端点添加到健康检查
 	endpoints, err := s.registry.GetEndpoints("", "", payload.Workload.Metadata.Labels)
 	if err == nil {
@@ -452,14 +457,14 @@ func (s *Server) handleRegisterWorkload(client *ClientConn, msg *types.Message, 
 			}
 		}
 	}
-	
-	log.Printf("registered workload %s from client %s with labels: %v", 
+
+	log.Printf("registered workload %s from client %s with labels: %v",
 		payload.Workload.Metadata.ID, client.ID, payload.Workload.Metadata.Labels)
-	
+
 	// 发送成功响应
 	return s.sendGenericResponse(encoder, msg.ID, "workload_registered", map[string]interface{}{
 		"workload_id": payload.Workload.Metadata.ID,
-		"status": "success",
+		"status":      "success",
 	})
 }
 
@@ -473,28 +478,28 @@ func (s *Server) handleQueryService(client *ClientConn, msg *types.Message, enco
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return err
 	}
-	
+
 	// 查询服务
 	service, err := s.registry.GetService(payload.ServiceName, payload.ServiceNamespace)
 	if err != nil {
 		return err
 	}
-	
+
 	// 获取服务的端点（基于 K8s Controller 自动发现）
 	endpoints, err := s.registry.GetEndpoints(payload.ServiceName, payload.ServiceNamespace, payload.Selector)
 	if err != nil {
 		return err
 	}
-	
-	log.Printf("client %s queried service %s/%s, found %d endpoints", 
+
+	log.Printf("client %s queried service %s/%s, found %d endpoints",
 		client.ID, payload.ServiceNamespace, payload.ServiceName, len(endpoints))
-	
+
 	// 转换 endpoints 类型
 	endpointValues := make([]types.Endpoint, len(endpoints))
 	for i, ep := range endpoints {
 		endpointValues[i] = *ep
 	}
-	
+
 	// 发送服务信息响应
 	return s.sendServiceInfo(encoder, msg.ID, *service, endpointValues)
 }
@@ -502,7 +507,7 @@ func (s *Server) handleQueryService(client *ClientConn, msg *types.Message, enco
 // handleHeartbeat 处理心跳消息
 func (s *Server) handleHeartbeat(client *ClientConn, msg *types.Message, encoder *json.Encoder) error {
 	return s.sendGenericResponse(encoder, msg.ID, types.MsgTypePong, map[string]interface{}{
-		"status": "alive",
+		"status":    "alive",
 		"timestamp": time.Now(),
 	})
 }
@@ -573,7 +578,7 @@ func (s *Server) handleSTCPTunnelRequest(client *ClientConn, msg *types.Message,
 		return s.sendError(encoder, msg.ID, 400, "Failed to parse tunnel request")
 	}
 
-	log.Printf("STCP tunnel request from client %s for service %s to %s", 
+	log.Printf("STCP tunnel request from client %s for service %s to %s",
 		client.ID, payload.ServiceName, payload.TargetAddr)
 
 	// 1. 获取服务信息
@@ -616,7 +621,7 @@ func (s *Server) handleSTCPTunnelRequest(client *ClientConn, msg *types.Message,
 		return err
 	}
 
-	log.Printf("STCP tunnel %s established: client %s <-> server <-> %s", 
+	log.Printf("STCP tunnel %s established: client %s <-> server <-> %s",
 		tunnelID, client.ID, realTargetAddr)
 
 	// 6. 启动数据转发（客户端连接现在变成隧道）
@@ -668,7 +673,7 @@ func (s *Server) handleSUDPTunnelRequest(client *ClientConn, msg *types.Message,
 		return s.sendError(encoder, msg.ID, 400, "Failed to parse SUDP tunnel request")
 	}
 
-	log.Printf("SUDP tunnel request from client %s for service %s to %s", 
+	log.Printf("SUDP tunnel request from client %s for service %s to %s",
 		client.ID, payload.ServiceName, payload.TargetAddr)
 
 	// 1. 获取服务信息
@@ -716,7 +721,7 @@ func (s *Server) handleSUDPTunnelRequest(client *ClientConn, msg *types.Message,
 		return err
 	}
 
-	log.Printf("SUDP tunnel %s established: client %s <-> server <-> %s", 
+	log.Printf("SUDP tunnel %s established: client %s <-> server <-> %s",
 		tunnelID, client.ID, realTargetAddr)
 
 	// 6. 启动 SUDP 数据转发（客户端连接现在变成隧道）
@@ -740,7 +745,7 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 	// 客户端隧道 -> 目标 UDP 服务
 	go func() {
 		defer func() { done <- struct{}{} }()
-		
+
 		buffer := make([]byte, 65536)
 		for {
 			// 读取来自客户端隧道的数据包
@@ -793,7 +798,7 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 				return
 			}
 
-			log.Printf("SUDP tunnel %s: forwarded %d bytes from %s to target", 
+			log.Printf("SUDP tunnel %s: forwarded %d bytes from %s to target",
 				tunnelID, len(data), clientAddrStr)
 		}
 	}()
@@ -801,12 +806,12 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 	// 目标 UDP 服务 -> 客户端隧道
 	go func() {
 		defer func() { done <- struct{}{} }()
-		
+
 		buffer := make([]byte, 65536)
 		for {
 			// 设置读取超时
 			targetConn.SetReadDeadline(time.Now().Add(30 * time.Second))
-			
+
 			n, err := targetConn.Read(buffer)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -833,16 +838,16 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 			// 构建响应数据包格式：[length][client_addr_len][client_addr][data]
 			clientAddrBytes := []byte(lastClientAddr)
 			responsePacket := make([]byte, 4+4+len(clientAddrBytes)+n)
-			
+
 			// 写入总长度
 			binary.BigEndian.PutUint32(responsePacket[0:4], uint32(len(responsePacket)-4))
-			
+
 			// 写入客户端地址长度
 			binary.BigEndian.PutUint32(responsePacket[4:8], uint32(len(clientAddrBytes)))
-			
+
 			// 写入客户端地址
 			copy(responsePacket[8:8+len(clientAddrBytes)], clientAddrBytes)
-			
+
 			// 写入数据
 			copy(responsePacket[8+len(clientAddrBytes):], buffer[:n])
 
@@ -853,7 +858,7 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 				return
 			}
 
-			log.Printf("SUDP tunnel %s: forwarded %d bytes from target to %s", 
+			log.Printf("SUDP tunnel %s: forwarded %d bytes from target to %s",
 				tunnelID, n, lastClientAddr)
 		}
 	}()
@@ -861,4 +866,58 @@ func (s *Server) forwardSUDPTunnel(clientConn net.Conn, targetConn *net.UDPConn,
 	// 等待任一方向关闭
 	<-done
 	log.Printf("SUDP tunnel %s closed", tunnelID)
+}
+
+// handleCreateService 处理创建服务请求
+func (s *Server) handleCreateService(client *ClientConn, msg *types.Message, encoder *json.Encoder) error {
+	var payload types.CreateServicePayload
+	payloadBytes, err := json.Marshal(msg.Payload)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return err
+	}
+
+	log.Printf("client %s requested to create service %s/%s",
+		client.ID, payload.Service.Metadata.Namespace, payload.Service.Metadata.Name)
+
+	// 检查服务是否已存在
+	existingService, err := s.registry.GetService(payload.Service.Metadata.Name, payload.Service.Metadata.Namespace)
+	if err == nil && existingService != nil {
+		// 服务已存在，返回成功
+		return s.sendGenericResponse(encoder, msg.ID, types.MsgTypeServiceCreated, map[string]interface{}{
+			"service_name":      payload.Service.Metadata.Name,
+			"service_namespace": payload.Service.Metadata.Namespace,
+			"status":            "already_exists",
+			"message":           "Service already exists",
+		})
+	}
+
+	// 查找匹配selector的workloads，智能推断端口
+	workloads, err := s.registry.ListWorkloads(payload.Service.Spec.Selector)
+	if err == nil && len(workloads) > 0 {
+		// 使用第一个匹配的workload的端口作为目标端口
+		targetPort := workloads[0].Spec.LocalPort
+		if len(payload.Service.Spec.Ports) > 0 {
+			payload.Service.Spec.Ports[0].TargetPort = targetPort
+		}
+		log.Printf("inferred target port %d from existing workload %s", targetPort, workloads[0].Metadata.ID)
+	}
+
+	// 创建服务
+	if err := s.registry.RegisterService(&payload.Service); err != nil {
+		return s.sendError(encoder, msg.ID, 500, fmt.Sprintf("Failed to create service: %v", err))
+	}
+
+	log.Printf("created service %s/%s successfully",
+		payload.Service.Metadata.Namespace, payload.Service.Metadata.Name)
+
+	// 发送成功响应
+	return s.sendGenericResponse(encoder, msg.ID, types.MsgTypeServiceCreated, map[string]interface{}{
+		"service_name":      payload.Service.Metadata.Name,
+		"service_namespace": payload.Service.Metadata.Namespace,
+		"status":            "created",
+		"message":           "Service created successfully",
+	})
 }
