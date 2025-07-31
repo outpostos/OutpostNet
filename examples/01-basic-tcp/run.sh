@@ -199,10 +199,9 @@ log_info "🚀 测试3：并发连接测试"
 CONCURRENT_SUCCESS=0
 for i in {1..5}; do
     if curl -s --connect-timeout 3 http://localhost:19999 > /dev/null; then
-        ((CONCURRENT_SUCCESS++))
-    fi &
+        CONCURRENT_SUCCESS=$((CONCURRENT_SUCCESS + 1))
+    fi
 done
-wait
 
 if [ $CONCURRENT_SUCCESS -eq 5 ]; then
     log_success "✅ 并发连接测试通过 (5/5)"
