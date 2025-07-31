@@ -1,0 +1,140 @@
+# OutpostNet Mesh Cluster with Discovery Configuration
+# 集群节点发现配置示例
+
+node:
+  node_id: "edge-server-1"
+  listen_addr: "0.0.0.0:7629"
+  advertise_addr: "192.168.1.100:7629"
+  cluster_name: "edge-cluster-east"
+  
+  # 节点标签
+  labels:
+    zone: "east"
+    role: "server"
+    environment: "production"
+    datacenter: "dc1"
+
+  # 集群发现配置
+  discovery:
+    # 启用多种发现方法
+    methods: 
+      - "static"     # 静态配置节点
+      - "env"        # 环境变量发现
+      - "dns"        # DNS发现
+      - "multicast"  # 多播发现
+    
+    # 静态节点配置
+    static_nodes:
+      - id: "edge-server-2"
+        address: "192.168.1.101:7629"
+        labels:
+          zone: "east"
+          role: "server"
+          priority: "high"
+        priority: 1
+      
+      - id: "edge-server-3"
+        address: "192.168.1.102:7629"
+        labels:
+          zone: "west"
+          role: "server"
+          priority: "medium"
+        priority: 2
+    
+    # 环境变量发现配置
+    env:
+      enabled: true
+      nodes_env_var: "OUTPOSTNET_NODES"
+      cluster_env_var: "OUTPOSTNET_CLUSTER_NODES"
+      separator: ","
+    
+    # DNS发现配置
+    dns:
+      enabled: true
+      domain: "outpostnet.local"
+      servers: 
+        - "8.8.8.8:53"
+        - "1.1.1.1:53"
+      interval: "60s"
+      record_type: "A"
+    
+    # 多播发现配置
+    multicast:
+      enabled: true
+      group: "224.0.0.1"
+      port: 7630
+      interface: ""  # 空表示使用默认接口
+      ttl: 1
+      interval: "30s"
+    
+    # 发现时间配置
+    discovery_interval: "30s"    # 每30秒执行一次发现
+    node_timeout: "5m"           # 节点5分钟无响应视为离线
+    health_check_interval: "30s" # 每30秒进行健康检查
+
+  # 安全配置
+  tls_enabled: false
+  cert_file: ""
+  key_file: ""
+  ca_file: ""
+  
+  # 性能配置
+  max_connections: 1000
+  buffer_size: 8192
+  read_timeout: "30s"
+  write_timeout: "30s"
+  heartbeat_interval: "10s"
+  join_timeout: "30s"
+
+# 服务器配置
+server:
+  listen_addr: "0.0.0.0:7000"
+  auth_token: "your-cluster-secret-token"
+
+# 示例服务定义
+services:
+  - metadata:
+      name: "web-service"
+      namespace: "default"
+      labels:
+        app: "nginx"
+        tier: "frontend"
+    spec:
+      selector:
+        app: "nginx"
+      ports:
+        - name: "http"
+          port: 80
+          target_port: 8080
+          protocol: "tcp"
+      proxy_mode: "tcp"
+      load_balancer: "round_robin"
+
+  - metadata:
+      name: "api-service"
+      namespace: "default" 
+      labels:
+        app: "api"
+        tier: "backend"
+    spec:
+      selector:
+        app: "api"
+      ports:
+        - name: "api"
+          port: 8080
+          target_port: 3000
+          protocol: "tcp"
+      proxy_mode: "stcp"  # 使用安全隧道
+      load_balancer: "least_conn"
+
+# K8s API compatibility
+k8s_api:
+  enabled: true
+  port: 8443
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9090
+  address: "0.0.0.0"
+  metrics_path: "/metrics"

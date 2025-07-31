@@ -99,6 +99,9 @@ type NodeConfig struct {
 	JoinTimeout     time.Duration `yaml:"join_timeout" json:"join_timeout"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" json:"heartbeat_interval"`
 	
+	// 节点发现配置
+	Discovery *DiscoveryConfig `yaml:"discovery" json:"discovery"`
+	
 	// 安全配置
 	TLSEnabled   bool   `yaml:"tls_enabled" json:"tls_enabled"`
 	CertFile     string `yaml:"cert_file" json:"cert_file"`
@@ -121,31 +124,18 @@ type NodeEvent struct {
 }
 
 // NodeEventType 节点事件类型
-type NodeEventType int
+type NodeEventType string
 
 const (
-	NodeEventJoined NodeEventType = iota
-	NodeEventLeft
-	NodeEventFailed
-	NodeEventUpdated
-	NodeEventDiscovered
+	NodeEventJoined     NodeEventType = "joined"
+	NodeEventLeft       NodeEventType = "left"
+	NodeEventFailed     NodeEventType = "failed"
+	NodeEventUpdated    NodeEventType = "updated"
+	NodeEventDiscovered NodeEventType = "discovered"
 )
 
 func (t NodeEventType) String() string {
-	switch t {
-	case NodeEventJoined:
-		return "joined"
-	case NodeEventLeft:
-		return "left"
-	case NodeEventFailed:
-		return "failed"
-	case NodeEventUpdated:
-		return "updated"
-	case NodeEventDiscovered:
-		return "discovered"
-	default:
-		return "unknown"
-	}
+	return string(t)
 }
 
 // NewLocalNode 创建本地节点

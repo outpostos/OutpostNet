@@ -29,6 +29,12 @@ type MeshCluster struct {
 	// Gossip协议
 	gossipManager *GossipManager
 	
+	// 节点发现
+	discoveryManager *DiscoveryManager
+	
+	// 服务同步
+	syncManager *ServiceSyncManager
+	
 	// 控制
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -66,6 +72,34 @@ func NewMeshCluster(config *NodeConfig, localNode *LocalNode) (*MeshCluster, err
 	}
 	cluster.gossipManager = gossipManager
 	
+	// 创建节点发现管理器
+	discoveryConfig := config.Discovery
+	if discoveryConfig == nil {
+		discoveryConfig = DefaultDiscoveryConfig()
+	}
+	discoveryManager, err := NewDiscoveryManager(discoveryConfig, localNode)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create discovery manager: %w", err)
+	}
+	cluster.discoveryManager = discoveryManager
+	
+	// 注册发现事件监听器
+	cluster.discoveryManager.AddEventListener(cluster)
+	
+	// 创建服务同步管理器
+	syncConfig := DefaultSyncConfig()
+	// TODO: 从config中读取同步配置
+	syncManager, err := NewServiceSyncManager(syncConfig, localNode, cluster, localNode.serviceRegistry)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create sync manager: %w", err)
+	}
+	cluster.syncManager = syncManager
+	
+	// 注册同步事件监听器
+	cluster.syncManager.AddListener(cluster)
+	
 	return cluster, nil
 }
 
@@ -82,6 +116,21 @@ func (c *MeshCluster) Start() error {
 	if err := c.gossipManager.Start(); err != nil {
 		c.listener.Close()
 		return fmt.Errorf("failed to start gossip manager: %w", err)
+	}
+	
+	// 启动节点发现管理器
+	if err := c.discoveryManager.Start(); err != nil {
+		c.listener.Close()
+		c.gossipManager.Stop()
+		return fmt.Errorf("failed to start discovery manager: %w", err)
+	}
+	
+	// 启动服务同步管理器
+	if err := c.syncManager.Start(); err != nil {
+		c.listener.Close()
+		c.gossipManager.Stop()
+		c.discoveryManager.Stop()
+		return fmt.Errorf("failed to start sync manager: %w", err)
 	}
 	
 	// 启动连接处理器
@@ -107,6 +156,16 @@ func (c *MeshCluster) Stop() error {
 	// 停止gossip管理器
 	if c.gossipManager != nil {
 		c.gossipManager.Stop()
+	}
+	
+	// 停止节点发现管理器
+	if c.discoveryManager != nil {
+		c.discoveryManager.Stop()
+	}
+	
+	// 停止服务同步管理器
+	if c.syncManager != nil {
+		c.syncManager.Stop()
 	}
 	
 	// 关闭连接池
@@ -522,6 +581,134 @@ func (c *MeshCluster) GetLocalNode() *LocalNode {
 // GetGossipManager 获取gossip管理器
 func (c *MeshCluster) GetGossipManager() *GossipManager {
 	return c.gossipManager
+}
+
+// 实现NodeEventListener接口
+func (c *MeshCluster) OnNodeJoined(node *Node) {
+	c.nodesMu.Lock()
+	defer c.nodesMu.Unlock()
+	
+	// 将发现的节点添加到集群节点列表
+	c.nodes[node.ID] = node
+	
+	// 发送事件到本地节点
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventJoined,
+		Node:      node,
+		Timestamp: time.Now(),
+		Details:   "node joined via discovery",
+	}:
+	default:
+	}
+}
+
+func (c *MeshCluster) OnNodeLeft(node *Node) {
+	c.nodesMu.Lock()
+	defer c.nodesMu.Unlock()
+	
+	// 从集群节点列表移除
+	delete(c.nodes, node.ID)
+	
+	// 发送事件到本地节点
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventLeft,
+		Node:      node,
+		Timestamp: time.Now(),
+		Details:   "node left via discovery",
+	}:
+	default:
+	}
+}
+
+func (c *MeshCluster) OnNodeUpdated(node *Node) {
+	c.nodesMu.Lock()
+	defer c.nodesMu.Unlock()
+	
+	// 更新节点信息
+	if existingNode, exists := c.nodes[node.ID]; exists {
+		*existingNode = *node
+	}
+	
+	// 发送事件到本地节点
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventUpdated,
+		Node:      node,
+		Timestamp: time.Now(),
+		Details:   "node updated via discovery",
+	}:
+	default:
+	}
+}
+
+func (c *MeshCluster) OnNodeFailed(node *Node) {
+	c.nodesMu.Lock()
+	defer c.nodesMu.Unlock()
+	
+	// 标记节点为失败状态
+	if existingNode, exists := c.nodes[node.ID]; exists {
+		existingNode.Status = NodeStatusFailed
+	}
+	
+	// 发送事件到本地节点
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventFailed,
+		Node:      node,
+		Timestamp: time.Now(),
+		Details:   "node failed via discovery",
+	}:
+	default:
+	}
+}
+
+// GetDiscoveryManager 获取发现管理器
+func (c *MeshCluster) GetDiscoveryManager() *DiscoveryManager {
+	return c.discoveryManager
+}
+
+// GetSyncManager 获取同步管理器
+func (c *MeshCluster) GetSyncManager() *ServiceSyncManager {
+	return c.syncManager
+}
+
+// 实现ServiceSyncListener接口
+func (c *MeshCluster) OnServiceSynced(service *types.Service) {
+	// 服务同步完成，可以进行额外处理
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventUpdated,
+		Node:      c.localNode.Node,
+		Timestamp: time.Now(),
+		Details:   fmt.Sprintf("service synced: %s/%s", service.Metadata.Namespace, service.Metadata.Name),
+	}:
+	default:
+	}
+}
+
+func (c *MeshCluster) OnEndpointSynced(endpoint *types.Endpoint) {
+	// 端点同步完成，可以进行额外处理
+	select {
+	case c.localNode.eventChan <- &NodeEvent{
+		Type:      NodeEventUpdated,
+		Node:      c.localNode.Node,
+		Timestamp: time.Now(),
+		Details:   fmt.Sprintf("endpoint synced: %s", endpoint.ID),
+	}:
+	default:
+	}
+}
+
+func (c *MeshCluster) OnSyncConflict(localEntry, remoteEntry *SyncEntry) {
+	// 处理同步冲突
+	fmt.Printf("Sync conflict detected: local=%s remote=%s\n", localEntry.ID, remoteEntry.ID)
+}
+
+func (c *MeshCluster) OnSyncError(err error) {
+	// 处理同步错误
+	fmt.Printf("Sync error: %v\n", err)
 }
 
 // GetClusterStats 获取集群统计信息
