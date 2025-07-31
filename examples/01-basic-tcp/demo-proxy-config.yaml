@@ -9,23 +9,17 @@ client:
 # 代理配置
 proxies:
   - name: "demo-web-proxy"
+    service_name: "demo-web-service"     # 服务名称 (必需)
+    service_namespace: "default"         # 服务命名空间 (必需)
     local_port: 19999                    # 本地代理端口
     proxy_mode: "tcp"                    # 代理模式
     
     # 端点选择器 - 告诉服务端我要什么样的端点
-    endpoint_selector:
+    selector:
       app: "demo-web"                    # 选择 app=demo-web 的端点
     
     # 负载均衡策略 (可选)
     load_balancer: "round_robin"
-    
-    # 端点过滤器 (可选)
-    endpoint_filter:
-      prefer_labels:                     # 优先选择的端点标签
-        zone: "local"
-        version: "v1"
-      exclude_labels:                    # 排除的端点标签
-        status: "maintenance"
 
 # 日志配置
 logging:
