@@ -22,7 +22,23 @@
       "Bash(go build:*)",
       "Bash(rg \"ServiceConstraints\" /Users/neov/src/github.com/outpostos/OutpostNet/pkg/types/service.go)",
       "Bash(./outpostnet-client:*)",
-      "Bash(./outpostnet-server:*)"
+      "Bash(./outpostnet-server:*)",
+      "Bash(./run.sh)",
+      "Bash(python3:*)",
+      "Bash(../../build/outpostnet-server --help)",
+      "Bash(../../build/outpostnet-server -config demo-udp-server-config.yaml -show-config)",
+      "Bash(cat:*)",
+      "Bash(pkill:*)",
+      "Bash(true)",
+      "Bash(__NEW_LINE__ echo \"所有进程已清理\")",
+      "Bash(/Users/neov/src/github.com/outpostos/OutpostNet/test_architecture.sh)",
+      "Bash(GOPROXY=direct go build -o /Users/neov/src/github.com/outpostos/OutpostNet/build/outpostnet-server /Users/neov/src/github.com/outpostos/OutpostNet/cmd/outpostnet-server)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(../../build/outpostnet-client -c demo-proxy-config.yaml)",
+      "Bash(rg -n \"handleClientConnection|handleConnection\" /Users/neov/src/github.com/outpostos/OutpostNet/pkg/server/server.go)",
+      "Bash(gtimeout:*)",
+      "Bash(bash:*)"
     ],
     "deny": []
   }

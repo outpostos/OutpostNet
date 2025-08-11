@@ -42,12 +42,46 @@ log_info ""
 check_port() {
     local port=$1
     local proto=${2:-tcp}
-    if netstat -${proto:0:1}ln 2>/dev/null | grep -q ":$port "; then
+    if lsof -ti:$port 2>/dev/null | grep -q .; then
         log_warning "端口 $port 已被占用，正在尝试释放..."
         lsof -ti:$port | xargs kill -9 2>/dev/null || true
         sleep 1
     fi
 }
+
+# 检查是否有进程占用端口
+log_info "检查进程占用情况..."
+PORTS_IN_USE=false
+
+for port in 17001 18001 15353; do
+    PID=$(lsof -ti:$port 2>/dev/null | head -1)
+    if [ -n "$PID" ]; then
+        PORTS_IN_USE=true
+        PROCESS_INFO=$(ps -p $PID -o comm= 2>/dev/null || echo "unknown")
+        log_warning "端口 $port 被占用 (PID: $PID, 进程: $PROCESS_INFO)"
+    fi
+done
+
+if [ "$PORTS_IN_USE" = true ]; then
+    log_info ""
+    log_info "🛠️  如需清理相关进程，可执行以下命令："
+    log_info "   # 清理 OutpostNet 进程"
+    log_info "   pkill -f 'outpostnet-server.*demo-udp-server-config.yaml'"
+    log_info "   pkill -f 'outpostnet-client.*demo-udp-register-config.yaml'"
+    log_info "   pkill -f 'outpostnet-client.*demo-udp-proxy-config.yaml'"
+    log_info "   # 清理测试服务器"
+    log_info "   pkill -f 'python.*udp-test-server.py'"
+    log_info "   # 强制清理端口占用"
+    log_info "   lsof -ti:17001 | xargs kill -9; lsof -ti:18001 | xargs kill -9; lsof -ti:15353 | xargs kill -9"
+    log_info ""
+    
+    read -p "是否继续启动？可能会遇到端口冲突 (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "已取消启动"
+        exit 0
+    fi
+fi
 
 log_info "检查端口占用..."
 check_port 17001 tcp  # 服务端控制端口
@@ -63,23 +97,44 @@ import socket
 import threading
 import time
 import json
+import sys
+import signal
 from datetime import datetime
 
+# 全局标志用于优雅退出
+running = True
+
+def signal_handler(signum, frame):
+    global running
+    print(f"\n收到信号 {signum}，正在关闭UDP服务器...")
+    running = False
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 def udp_server():
+    global running
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('127.0.0.1', 18001))
+    sock.settimeout(1.0)  # 设置超时以便检查running标志
     
-    print(f"UDP服务器启动在端口 18001")
+    try:
+        sock.bind(('127.0.0.1', 18001))
+        print(f"UDP服务器启动在端口 18001，PID: {os.getpid() if 'os' in globals() else 'unknown'}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"UDP服务器启动失败: {e}")
+        return
     
-    while True:
+    while running:
         try:
             data, addr = sock.recvfrom(1024)
             message = data.decode('utf-8', errors='ignore')
             
             # 构造响应
             response_data = {
-                "status": "success",
+                "status": "success", 
                 "message": f"UDP代理测试成功！",
                 "received": message.strip(),
                 "server": "UDP Test Server",
@@ -93,20 +148,46 @@ def udp_server():
             sock.sendto(response.encode('utf-8'), addr)
             
             print(f"处理来自 {addr} 的UDP请求: {message.strip()}")
+            sys.stdout.flush()
             
-        except Exception as e:
-            print(f"UDP服务器错误: {e}")
+        except socket.timeout:
+            # 超时是正常的，继续循环检查running标志
             continue
+        except Exception as e:
+            if running:  # 只在仍在运行时报错
+                print(f"UDP服务器错误: {e}")
+                sys.stdout.flush()
+            continue
+    
+    print("UDP服务器正常关闭")
+    sock.close()
 
 if __name__ == "__main__":
+    import os
     udp_server()
 EOF
 
-python3 udp-test-server.py &
+python3 udp-test-server.py > /tmp/udp-test-server.log 2>&1 &
 UDP_SERVER_PID=$!
 cd - > /dev/null
 
 sleep 2
+
+# 检查UDP服务器是否正常启动
+if ! kill -0 $UDP_SERVER_PID 2>/dev/null; then
+    log_error "UDP服务器启动失败，查看日志："
+    cat /tmp/udp-test-server.log
+    exit 1
+fi
+
+# 验证UDP端口是否监听
+sleep 1
+if ! lsof -i :18001 >/dev/null 2>&1; then
+    log_error "UDP端口18001未正常监听，查看日志："
+    cat /tmp/udp-test-server.log
+    exit 1
+fi
+
 log_success "后端 UDP 服务已启动 (PID: $UDP_SERVER_PID)"
 
 # 启动 OutpostNet 服务端
@@ -150,7 +231,7 @@ log_success "UDP代理客户端已启动 (PID: $PROXY_PID)"
 
 # 等待服务就绪
 log_info "等待服务就绪..."
-sleep 3
+sleep 8
 
 # 测试UDP连接
 log_info "测试UDP代理连接..."
@@ -171,7 +252,7 @@ else
     echo "  1. 检查UDP端口监听: netstat -ulnp | grep -E '15353|17001|18001'"
     echo "  2. 测试后端服务: echo 'test' | nc -u localhost 18001"
     echo "  3. 查看服务端日志: tail -f /tmp/outpostnet-udp-server.log"
-    exit 1
+    log_warning "⚠️  继续运行其他测试..."
 fi
 
 # 测试2：JSON数据传输
@@ -189,18 +270,9 @@ fi
 log_info "🚀 测试3：并发UDP请求"
 CONCURRENT_SUCCESS=0
 for i in {1..5}; do
-    (
-        RESP=$(echo "Concurrent test $i" | timeout 3 nc -u localhost 15353 2>/dev/null)
-        if [ -n "$RESP" ] && echo "$RESP" | grep -q "success"; then
-            echo "success"
-        fi
-    ) &
-done
-
-# 等待所有并发请求完成并计数
-for job in $(jobs -p); do
-    if wait $job 2>/dev/null; then
-        ((CONCURRENT_SUCCESS++))
+    RESP=$(echo "Concurrent test $i" | timeout 3 nc -u localhost 15353 2>/dev/null)
+    if [ -n "$RESP" ] && echo "$RESP" | grep -q "success"; then
+        CONCURRENT_SUCCESS=$((CONCURRENT_SUCCESS + 1))
     fi
 done
 

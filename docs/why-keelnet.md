@@ -2,18 +2,18 @@
 
 ## Differentiating Keelnet from Traditional Proxies
 
-A common initial assessment of Keelnet is to view it as a more complex version of tools like `frp`. This comparison is valid only in the narrow context of simple port forwarding.
+A common initial assessment of Keelnet is to view it as a more complex version of traditional proxy tools. This comparison is valid only in the narrow context of simple port forwarding.
 
-- **`frp`**: Optimized for simplicity in point-to-point TCP/UDP port forwarding. Requires two processes and two configuration files for a basic setup.
+- **Traditional proxies**: Optimized for simplicity in point-to-point TCP/UDP port forwarding. Requires two processes and two configuration files for a basic setup.
 - **Keelnet**: A comprehensive service mesh platform designed for edge computing. A minimal deployment involves three processes and a configuration model based on cloud-native concepts like `Service`, `Workload`, and `Endpoint`.
 
-For use cases strictly limited to exposing internal ports to a public network, `frp` offers a more direct and simpler solution. However, Keelnet is engineered to address a fundamentally different and more complex set of challenges.
+For use cases strictly limited to exposing internal ports to a public network, traditional proxy tools offer a more direct and simpler solution. However, Keelnet is engineered to address a fundamentally different and more complex set of challenges.
 
 ---
 
 ## Core Design Philosophy: Resilience in Unstable Environments
 
-Keelnet was not designed to be a replacement for `frp`. Its primary objective is to serve as a resilient networking foundation for edge computing platforms operating in extreme and unstable conditions.
+Keelnet was not designed to be a replacement for traditional proxy tools. Its primary objective is to serve as a resilient networking foundation for edge computing platforms operating in extreme and unstable conditions.
 
 Consider the following target operating environments:
 - **Tactical Edge**: Unstable, low-bandwidth, and frequently interrupted network links (e.g., tactical military networks, disaster response teams).
@@ -34,9 +34,9 @@ To achieve its design goals, Keelnet employs a distinct architecture. Understand
 
 ### Principle 1: Decentralized, Node-Local Agents
 
-A prevalent misconception is that `OutpostNet-server` is a centralized proxy server analogous to `frps`.
+A prevalent misconception is that `OutpostNet-server` is a centralized proxy server analogous to traditional proxy servers.
 
-- **`frp` Architecture**: Relies on a central `frps` server that acts as a mandatory intermediary for all traffic.
+- **Traditional Proxy Architecture**: Relies on a central proxy server that acts as a mandatory intermediary for all traffic.
 - **Keelnet Architecture**: The `OutpostNet-server` is a decentralized daemon process that runs on **every** node in the mesh. It functions as a local agent, analogous to the role of `kubelet` in a Kubernetes cluster or `istio-proxy` in an Istio data plane.
 
 The correct deployment topology is as follows:
@@ -69,7 +69,7 @@ The `Service/Workload/Endpoint` resource model, while seemingly complex, is the 
 
 - **Use Case: Network Re-IPing**
   - **Problem**: A node's IP address changes due to DHCP, network migration, or multi-homing.
-  - **`frp` Behavior**: The connection breaks. Manual or scripted intervention is required to update the configuration with the new IP address.
+  - **Traditional Proxy Behavior**: The connection breaks. Manual or scripted intervention is required to update the configuration with the new IP address.
   - **Keelnet Behavior**: The application's connection to the network is abstracted. Communication between the `client` and the local `server` (via Unix Socket) is unaffected by external IP changes. The `OutpostNet-server` on the affected node advertises its new address to its peers via the gossip protocol. The mesh automatically converges on the new topology, restoring connectivity without manual intervention.
 
 - **Use Case: Control Plane Disconnection**
@@ -87,7 +87,7 @@ Given Keelnet's sophisticated architecture, the purpose of a simplified "Express
 
 Express Mode is not an architectural compromise; it is a usability feature designed to:
 
-1.  **Abstract Complexity**: Provide a streamlined, `frp`-like interface for simple use cases, such as local development or single-node deployments, without requiring an understanding of the distributed systems concepts.
+1.  **Abstract Complexity**: Provide a streamlined, traditional proxy-like interface for simple use cases, such as local development or single-node deployments, without requiring an understanding of the distributed systems concepts.
 2.  **Enable Progressive Disclosure**: Allow users to begin with a simple, intuitive model and gradually adopt the more advanced features of the "Standard Mode" as their requirements evolve. The underlying core engine remains the same.
 3.  **Improve Development Velocity**: Offer a single-command method for instantiating a local Keelnet environment, significantly accelerating development and testing cycles.
 

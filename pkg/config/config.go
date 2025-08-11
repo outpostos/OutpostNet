@@ -104,6 +104,7 @@ type ClientWorkload struct {
 
 // ClientWorkloadMetadata 工作负载元数据
 type ClientWorkloadMetadata struct {
+	ID     string            `yaml:"id,omitempty" json:"id,omitempty"`
 	Labels map[string]string `yaml:"labels" json:"labels"`
 }
 

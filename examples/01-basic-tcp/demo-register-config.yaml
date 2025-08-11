@@ -9,7 +9,7 @@ client:
 # 工作负载配置 - 注册端点信息
 workloads:
   - metadata:
-      name: "web-backend-1"               # 端点名称
+      id: "web-backend-1"                 # 工作负载ID (必需)
       labels:
         app: "demo-web"                   # 应用标签 (用于Service选择)
         version: "v1"                     # 版本标签

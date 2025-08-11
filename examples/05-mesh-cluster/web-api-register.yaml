@@ -1,0 +1,68 @@
+# Web API 服务注册配置
+# 在 cluster-node-a 上运行，注册 Web API 后端服务
+
+client:
+  server_addr: "127.0.0.1:7000"
+  auth_token: "mesh-cluster-secret-token-2024"
+  mode: "register"
+  conn_proto: "tcp"
+
+# 工作负载配置 - 注册本地 Web API 服务实例
+workloads:
+  - metadata:
+      id: "web-api-instance-1"
+      labels:
+        app: "web-api"
+        tier: "frontend"
+        version: "v1.0"
+        instance: "primary"
+        node: "cluster-node-a"
+        zone: "east"
+        datacenter: "dc1"
+      # TTL 配置
+      ttl: "5m"
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 8080
+      protocol: "tcp"
+
+  - metadata:
+      id: "web-api-instance-2"
+      labels:
+        app: "web-api"
+        tier: "frontend"
+        version: "v1.0"
+        instance: "secondary"
+        node: "cluster-node-a"
+        zone: "east"
+        datacenter: "dc1"
+      # TTL 配置
+      ttl: "5m"
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 8081
+      protocol: "tcp"
+
+  - metadata:
+      id: "user-service-instance-1"
+      labels:
+        app: "user-service"
+        tier: "backend"
+        version: "v2.1"
+        instance: "primary"
+        node: "cluster-node-a"
+        zone: "east"
+        datacenter: "dc1"
+      # TTL 配置  
+      ttl: "5m"
+    spec:
+      local_addr: "127.0.0.1"
+      local_port: 9090
+      protocol: "tcp"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "30s"
+  timeout: "10s"
+  retries: 3

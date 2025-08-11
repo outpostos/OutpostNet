@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/outpostos/OutpostNet/pkg/config"
-	"github.com/outpostos/OutpostNet/pkg/loadbalancer"
 	"github.com/outpostos/OutpostNet/pkg/types"
 )
 
@@ -27,8 +26,7 @@ type Client struct {
 	proxies   map[string]*ProxyInstance
 	proxiesMu sync.RWMutex
 
-	// 负载均衡管理
-	lbManager *loadbalancer.LoadBalancerManager
+
 
 	// 地址解析器
 	addressResolver *config.AddressResolver
@@ -38,6 +36,7 @@ type Client struct {
 	decoder       *json.Decoder
 	authenticated bool
 	clientID      string
+	currentSessionID string // 当前数据会话ID
 
 	// 控制通道
 	ctx    context.Context
@@ -61,46 +60,188 @@ func NewClient(cfg *config.ClientConfig) (*Client, error) {
 	c := &Client{
 		config:          cfg,
 		proxies:         make(map[string]*ProxyInstance),
-		lbManager:       loadbalancer.NewLoadBalancerManager(),
 		addressResolver: config.NewAddressResolver("tcp"),
 	}
 
 	return c, nil
 }
 
-// selectEndpoint 使用负载均衡器选择端点
-func (c *Client) selectEndpoint(service *types.Service, endpoints []*types.Endpoint, clientAddr string) *types.Endpoint {
-	if len(endpoints) == 0 {
-		return nil
+// requestWorkConnection 向 server 请求工作连接
+func (c *Client) requestWorkConnection(serviceName, serviceNamespace string) (net.Conn, error) {
+	// 发送工作连接请求
+	workConnMsg := types.Message{
+		Type: types.MsgTypeWorkConnRequest,
+		ID:   uuid.New().String(),
+		Payload: types.WorkConnRequestPayload{
+			ServiceName:      serviceName,
+			ServiceNamespace: serviceNamespace,
+		},
+		Timestamp: time.Now(),
 	}
 
-	// 获取负载均衡类型
-	lbType := loadbalancer.RoundRobin // 默认轮询
-	if service.Spec.LoadBalancer != "" {
-		switch service.Spec.LoadBalancer {
-		case "round_robin":
-			lbType = loadbalancer.RoundRobin
-		case "weighted_round_robin":
-			lbType = loadbalancer.WeightedRoundRobin
-		case "least_connections":
-			lbType = loadbalancer.LeastConnections
-		case "random":
-			lbType = loadbalancer.Random
-		case "consistent_hash":
-			lbType = loadbalancer.ConsistentHash
-		}
+	if err := c.encoder.Encode(workConnMsg); err != nil {
+		return nil, fmt.Errorf("failed to send work connection request: %v", err)
 	}
 
-	// 获取负载均衡器
-	lb := c.lbManager.GetLoadBalancer(service.Metadata.Name, lbType)
-
-	// 选择端点（对于一致性哈希，使用客户端地址作为键）
-	key := clientAddr
-	if key == "" {
-		key = fmt.Sprintf("%s:%d", service.Metadata.Name, time.Now().UnixNano())
+	var response types.Message
+	if err := c.decoder.Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to receive work connection response: %v", err)
 	}
 
-	return lb.SelectEndpoint(endpoints, key)
+	if response.Type != types.MsgTypeWorkConnResponse {
+		return nil, fmt.Errorf("work connection request failed: %s", response.Type)
+	}
+
+	var workConnResponse types.WorkConnResponsePayload
+	payloadBytes, err := json.Marshal(response.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal work connection response: %v", err)
+	}
+	if err := json.Unmarshal(payloadBytes, &workConnResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal work connection response: %v", err)
+	}
+
+	if !workConnResponse.Success {
+		return nil, fmt.Errorf("work connection request failed: %s", workConnResponse.Message)
+	}
+
+	// 建立新的连接作为工作连接
+	workConn, err := net.DialTimeout("tcp", c.config.Client.ServerAddr, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to establish work connection: %v", err)
+	}
+
+	// 发送工作连接标识
+	workConnID := types.Message{
+		Type: types.MsgTypeWorkConnID,
+		ID:   workConnResponse.WorkConnID,
+		Payload: types.WorkConnIDPayload{
+			WorkConnID: workConnResponse.WorkConnID,
+		},
+		Timestamp: time.Now(),
+	}
+
+	encoder := json.NewEncoder(workConn)
+	if err := encoder.Encode(workConnID); err != nil {
+		workConn.Close()
+		return nil, fmt.Errorf("failed to send work connection ID: %v", err)
+	}
+
+	log.Printf("work connection %s established for service %s/%s", workConnResponse.WorkConnID, serviceNamespace, serviceName)
+	return workConn, nil
+}
+
+// requestTunnelConnection 向 server 请求隧道连接 (新架构)
+func (c *Client) requestTunnelConnection(serviceName, serviceNamespace string) (net.Conn, error) {
+	// 发送隧道请求
+	tunnelMsg := types.Message{
+		Type: types.MsgTypeTunnelRequest,
+		ID:   uuid.New().String(),
+		Payload: types.TunnelRequestPayload{
+			ServiceName:      serviceName,
+			ServiceNamespace: serviceNamespace,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := c.encoder.Encode(tunnelMsg); err != nil {
+		return nil, fmt.Errorf("failed to send tunnel request: %v", err)
+	}
+
+	var response types.Message
+	if err := c.decoder.Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to receive tunnel response: %v", err)
+	}
+
+	if response.Type == types.MsgTypeError {
+		return nil, fmt.Errorf("tunnel request failed: %v", response.Payload)
+	}
+
+	if response.Type != types.MsgTypeTunnelResponse {
+		return nil, fmt.Errorf("unexpected tunnel response type: %s", response.Type)
+	}
+
+	var tunnelResponse types.TunnelResponsePayload
+	payloadBytes, err := json.Marshal(response.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tunnel response: %v", err)
+	}
+	if err := json.Unmarshal(payloadBytes, &tunnelResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tunnel response: %v", err)
+	}
+
+	if !tunnelResponse.Success {
+		return nil, fmt.Errorf("tunnel request failed: %s", tunnelResponse.Message)
+	}
+
+	log.Printf("data session %s established for service %s/%s", 
+		tunnelResponse.TunnelID, serviceNamespace, serviceName)
+	
+	// 新架构：不再需要连接专用隧道端口
+	// 但需要记录session ID用于数据消息
+	c.currentSessionID = tunnelResponse.TunnelID
+	log.Printf("using control connection for data transfer in session %s", tunnelResponse.TunnelID)
+	return c.conn, nil
+}
+
+// requestUDPTunnel 向 server 请求 UDP 隧道连接 (新架构)
+func (c *Client) requestUDPTunnel(serviceName, serviceNamespace, clientAddr string) (*net.UDPConn, error) {
+	// 发送 UDP 隧道请求
+	tunnelMsg := types.Message{
+		Type: types.MsgTypeUDPTunnelRequest,
+		ID:   uuid.New().String(),
+		Payload: types.UDPTunnelRequestPayload{
+			ServiceName:      serviceName,
+			ServiceNamespace: serviceNamespace,
+			ClientAddr:       clientAddr,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := c.encoder.Encode(tunnelMsg); err != nil {
+		return nil, fmt.Errorf("failed to send UDP tunnel request: %v", err)
+	}
+
+	var response types.Message
+	if err := c.decoder.Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to receive UDP tunnel response: %v", err)
+	}
+
+	if response.Type == types.MsgTypeError {
+		return nil, fmt.Errorf("UDP tunnel request failed: %v", response.Payload)
+	}
+
+	if response.Type != types.MsgTypeUDPTunnelResponse {
+		return nil, fmt.Errorf("unexpected UDP tunnel response type: %s", response.Type)
+	}
+
+	var tunnelResponse types.UDPTunnelResponsePayload
+	payloadBytes, err := json.Marshal(response.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal UDP tunnel response: %v", err)
+	}
+	if err := json.Unmarshal(payloadBytes, &tunnelResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal UDP tunnel response: %v", err)
+	}
+
+	if !tunnelResponse.Success {
+		return nil, fmt.Errorf("UDP tunnel request failed: %s", tunnelResponse.Message)
+	}
+
+	log.Printf("UDP tunnel %s established for service %s/%s, client %s", 
+		tunnelResponse.TunnelID, serviceNamespace, serviceName, clientAddr)
+	
+	// 对于 UDP 隧道，我们需要建立一个 UDP 连接用于数据传输
+	// 但 UDP 隧道的数据传输需要通过特殊的协议进行包装
+	// 为了简化实现，我们创建一个本地 UDP 连接用于数据传输
+	udpConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create UDP connection for tunnel: %v", err)
+	}
+	
+	// TODO: 实现通过控制连接转发 UDP 数据包的逻辑
+	// 目前先返回本地 UDP 连接，后续需要实现数据包包装和转发
+	return udpConn, nil
 }
 
 // Run 启动客户端
@@ -220,7 +361,339 @@ func (c *Client) startRegisterMode() error {
 		log.Printf("registered workload with labels: %v", workload.Metadata.Labels)
 	}
 
+	// 注册完成后，建立工作连接池来处理来自 Server 的代理请求
+	go c.startWorkConnectionPool()
+
+	// 启动控制连接消息处理器，监听来自Server的工作连接请求 (服务器中转模式)
+	go c.startControlMessageHandler()
+
+	// 创建初始工作连接池 (服务器中转模式)
+	go c.createInitialWorkConnections()
+
 	return nil
+}
+
+// startWorkConnectionPool 启动工作连接池 (Register Client 专用)
+// 这是修复架构的关键：Register Client 主动建立到 Server 的工作连接
+func (c *Client) startWorkConnectionPool() {
+	log.Println("starting work connection pool for register mode")
+	
+	// 初始工作连接数
+	initialConnections := 3
+	
+	for i := 0; i < initialConnections; i++ {
+		go c.createWorkConnection(i)
+	}
+	
+	// 监控工作连接状态，必要时重新建立连接
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			// TODO: 实现工作连接健康检查和重连逻辑
+			log.Println("work connection pool health check")
+		}
+	}
+}
+
+// createWorkConnection 创建单个工作连接
+func (c *Client) createWorkConnection(id int) {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			if err := c.handleWorkConnection(id); err != nil {
+				log.Printf("work connection %d error: %v, retrying in 5s", id, err)
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}
+}
+
+// handleWorkConnection 处理单个工作连接的生命周期 (服务器中转模式)
+func (c *Client) handleWorkConnection(id int) error {
+	// 工作连接池保持连接活跃，等待server请求工作连接
+	for {
+		select {
+		case <-c.ctx.Done():
+			return nil
+		default:
+			// 工作连接在控制连接中等待server的工作连接请求
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// handleReqWorkConn 处理来自Server的工作连接请求 (服务器中转模式)
+func (c *Client) handleReqWorkConn(msg types.Message) {
+	// 解析ReqWorkConn消息
+	var reqPayload types.ReqWorkConnPayload
+	payloadBytes, err := json.Marshal(msg.Payload)
+	if err != nil {
+		log.Printf("failed to marshal req work connection payload: %v", err)
+		return
+	}
+	if err := json.Unmarshal(payloadBytes, &reqPayload); err != nil {
+		log.Printf("failed to unmarshal req work connection payload: %v", err)
+		return
+	}
+
+	log.Printf("server requested %d work connections", reqPayload.Count)
+	
+	// Server请求创建指定数量的工作连接
+	for i := 0; i < reqPayload.Count; i++ {
+		go c.createNewWorkConn()
+	}
+}
+
+// createNewWorkConn 创建新的工作连接 (服务器中转模式)
+func (c *Client) createNewWorkConn() {
+	// 建立到Server的新工作连接
+	workConn, err := net.DialTimeout("tcp", c.config.Client.ServerAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("failed to establish work connection: %v", err)
+		return
+	}
+
+	log.Printf("work connection established to %s", c.config.Client.ServerAddr)
+
+	// 发送NewWorkConn消息到Server
+	encoder := json.NewEncoder(workConn)
+	decoder := json.NewDecoder(workConn)
+
+	// 发送工作连接标识
+	workConnID := uuid.New().String()
+	newWorkConnMsg := types.Message{
+		Type: types.MsgTypeNewWorkConn,
+		ID:   workConnID,
+		Payload: types.NewWorkConnPayload{
+			RunID:      c.clientID,
+			WorkConnID: workConnID,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := encoder.Encode(newWorkConnMsg); err != nil {
+		log.Printf("failed to send new work connection message: %v", err)
+		workConn.Close()
+		return
+	}
+
+	log.Printf("work connection %s waiting for start signal", workConnID)
+
+	// 等待Server的StartWorkConn指令
+	var startMsg types.Message
+	if err := decoder.Decode(&startMsg); err != nil {
+		log.Printf("failed to receive start work connection message: %v", err)
+		workConn.Close()
+		return
+	}
+
+	if startMsg.Type != types.MsgTypeStartWorkConn {
+		log.Printf("unexpected message type: %s, expected start_work_conn", startMsg.Type)
+		workConn.Close()
+		return
+	}
+
+	// 解析StartWorkConn消息
+	var startPayload types.StartWorkConnPayload
+	payloadBytes, err := json.Marshal(startMsg.Payload)
+	if err != nil {
+		log.Printf("failed to marshal start work connection payload: %v", err)
+		workConn.Close()
+		return
+	}
+	if err := json.Unmarshal(payloadBytes, &startPayload); err != nil {
+		log.Printf("failed to unmarshal start work connection payload: %v", err)
+		workConn.Close()
+		return
+	}
+
+	log.Printf("work connection %s starting data bridge for workload %s", workConnID, startPayload.WorkloadID)
+
+	// 根据WorkloadID找到对应的本地服务
+	var matchedWorkload *config.ClientWorkload
+	for i, workload := range c.config.Workloads {
+		if workload.Metadata.ID == startPayload.WorkloadID {
+			matchedWorkload = &c.config.Workloads[i]
+			break
+		}
+	}
+
+	if matchedWorkload == nil {
+		log.Printf("no matching workload found for ID: %s", startPayload.WorkloadID)
+		workConn.Close()
+		return
+	}
+
+	// 建立到本地后端服务的连接
+	backendAddr := fmt.Sprintf("%s:%d", matchedWorkload.Spec.LocalAddr, matchedWorkload.Spec.LocalPort)
+	backendConn, err := net.DialTimeout(startPayload.Protocol, backendAddr, 10*time.Second)
+	if err != nil {
+		log.Printf("failed to connect to backend %s: %v", backendAddr, err)
+		workConn.Close()
+		return
+	}
+
+	log.Printf("work connection %s established backend connection to %s", workConnID, backendAddr)
+
+	// 开始数据桥接 (服务器中转模式)
+	defer func() {
+		workConn.Close()
+		backendConn.Close()
+		log.Printf("work connection %s data bridge closed", workConnID)
+	}()
+
+	// 使用io.Copy进行双向数据桥接
+	done := make(chan struct{}, 2)
+
+	// work connection -> backend
+	go func() {
+		defer func() { done <- struct{}{} }()
+		io.Copy(backendConn, workConn)
+	}()
+
+	// backend -> work connection
+	go func() {
+		defer func() { done <- struct{}{} }()
+		io.Copy(workConn, backendConn)
+	}()
+
+	// 等待任一方向完成
+	<-done
+}
+
+// createInitialWorkConnections 创建初始工作连接池 (服务器中转模式)
+func (c *Client) createInitialWorkConnections() {
+	// 等待一小段时间确保工作负载注册完成
+	time.Sleep(1 * time.Second)
+	
+	// 发送工作连接就绪消息 (为了兼容现有的RegisterWorkConnManager)
+	c.sendWorkConnReady()
+	
+	// 创建3个初始工作连接
+	for i := 0; i < 3; i++ {
+		go c.createNewWorkConn()
+		time.Sleep(100 * time.Millisecond) // 避免同时创建太多连接
+	}
+	
+	log.Printf("created initial work connections for register client %s", c.clientID)
+}
+
+// sendWorkConnReady 发送工作连接就绪消息 (兼容性)
+func (c *Client) sendWorkConnReady() {
+	readyMsg := types.Message{
+		Type: types.MsgTypeWorkConnReady,
+		ID:   uuid.New().String(),
+		Payload: types.WorkConnReadyPayload{
+			ConnectionID: fmt.Sprintf("work-conn-ready-%s", c.clientID),
+			Workloads:    c.getRegisteredWorkloads(),
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := c.encoder.Encode(readyMsg); err != nil {
+		log.Printf("failed to send work connection ready message: %v", err)
+	} else {
+		log.Printf("sent work connection ready message for client %s", c.clientID)
+	}
+}
+
+// startControlMessageHandler 启动控制连接消息处理器 (服务器中转模式)
+func (c *Client) startControlMessageHandler() {
+	log.Println("starting control message handler for register mode")
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			var msg types.Message
+			if err := c.decoder.Decode(&msg); err != nil {
+				if err != io.EOF {
+					log.Printf("error decoding control message: %v, reconnecting...", err)
+					// 尝试重连
+					time.Sleep(5 * time.Second)
+					c.reconnect()
+				}
+				return
+			}
+
+			// 处理控制消息 (服务器中转模式)
+			switch msg.Type {
+			case types.MsgTypeReqWorkConn:
+				// Server请求创建工作连接 (服务器中转模式)
+				log.Printf("received work connection request from server")
+				c.handleReqWorkConn(msg)
+			case types.MsgTypeHeartbeat:
+				// 响应心跳
+				c.sendHeartbeatResponse(c.encoder, msg.ID)
+			case types.MsgTypePong:
+				// 心跳响应，忽略
+				log.Printf("received pong from server")
+			default:
+				log.Printf("received unexpected control message type: %s", msg.Type)
+			}
+		}
+	}
+}
+
+// getRegisteredWorkloads 获取注册的工作负载信息
+func (c *Client) getRegisteredWorkloads() []types.WorkloadInfo {
+	var workloads []types.WorkloadInfo
+	for _, workload := range c.config.Workloads {
+		workloads = append(workloads, types.WorkloadInfo{
+			ID:       workload.Metadata.ID,
+			Labels:   workload.Metadata.Labels,
+			Protocol: workload.Spec.Protocol,
+			Address:  workload.Spec.LocalAddr,
+			Port:     workload.Spec.LocalPort,
+		})
+	}
+	return workloads
+}
+
+// handleProxyRequestWithDecoder 处理来自 Server 的代理请求（已废弃，使用服务器中转工作连接模式）
+func (c *Client) handleProxyRequestWithDecoder(workConn net.Conn, msg types.Message, encoder *json.Encoder, decoder *json.Decoder) {
+	log.Printf("handleProxyRequestWithDecoder called but is deprecated in server relay mode")
+}
+
+// handleDataForwardingWithDecoder 处理数据转发 (已废弃，使用服务器中转工作连接模式)
+func (c *Client) handleDataForwardingWithDecoder(workConn net.Conn, backendConn net.Conn, sessionID string, encoder *json.Encoder, decoder *json.Decoder) {
+	log.Printf("handleDataForwardingWithDecoder called but is deprecated in server relay mode")
+}
+
+// sendHeartbeatResponse 发送心跳响应
+func (c *Client) sendHeartbeatResponse(encoder *json.Encoder, requestID string) {
+	response := types.Message{
+		Type: types.MsgTypeHeartbeatResponse,
+		ID:   requestID,
+		Payload: types.HeartbeatPayload{
+			Timestamp: time.Now(),
+			ClientID:  c.clientID,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := encoder.Encode(response); err != nil {
+		log.Printf("failed to send heartbeat response: %v", err)
+	}
+}
+
+// sendResponse 发送通用响应
+func (c *Client) sendResponse(encoder *json.Encoder, requestID string, msgType types.MessageType, payload interface{}) error {
+	response := types.Message{
+		Type:      msgType,
+		ID:        requestID,
+		Payload:   payload,
+		Timestamp: time.Now(),
+	}
+	return encoder.Encode(response)
 }
 
 // startProxy 启动单个代理
@@ -267,6 +740,8 @@ func (c *Client) startTCPProxy(proxyConfig types.Proxy) error {
 
 // startUDPProxy 启动 UDP 代理
 func (c *Client) startUDPProxy(proxyConfig types.Proxy) error {
+	log.Printf("starting UDP proxy %s on port %d", proxyConfig.Name, proxyConfig.LocalPort)
+
 	// 监听本地 UDP 端口
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", proxyConfig.LocalPort))
 	if err != nil {
@@ -277,6 +752,8 @@ func (c *Client) startUDPProxy(proxyConfig types.Proxy) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP port %d: %v", proxyConfig.LocalPort, err)
 	}
+
+	log.Printf("UDP proxy %s successfully bound to port %d", proxyConfig.Name, proxyConfig.LocalPort)
 
 	proxy := &ProxyInstance{
 		Config:  proxyConfig,
@@ -324,73 +801,61 @@ func (c *Client) handleTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) {
 
 	log.Printf("new connection to proxy %s from %s", proxy.Config.Name, conn.RemoteAddr())
 
-	// 1. 查询目标服务的端点
-	service, endpoints, err := c.queryService(
-		proxy.Config.ServiceName,
-		proxy.Config.ServiceNamespace,
-		proxy.Config.Selector,
-	)
+	// 向 server 请求隧道连接来处理这个代理连接 (新架构)
+	tunnelConn, err := c.requestTunnelConnection(proxy.Config.ServiceName, proxy.Config.ServiceNamespace)
 	if err != nil {
-		log.Printf("failed to query service %s: %v", proxy.Config.ServiceName, err)
+		log.Printf("failed to request tunnel connection for service %s: %v", proxy.Config.ServiceName, err)
 		return
 	}
+	defer tunnelConn.Close()
 
-	if len(endpoints) == 0 {
-		log.Printf("no available endpoints for service %s", proxy.Config.ServiceName)
-		return
-	}
+	log.Printf("proxy %s established tunnel connection for service %s", proxy.Config.Name, proxy.Config.ServiceName)
 
-	// 2. 转换 endpoints 为指针切片
-	endpointPtrs := make([]*types.Endpoint, len(endpoints))
-	for i := range endpoints {
-		endpointPtrs[i] = &endpoints[i]
-	}
+	// 服务器中转架构：直接进行数据转发，不需要JSON包装
+	// tunnelConn 已经是一个工作连接，可以直接进行数据传输
+	c.forwardTCPData(conn, tunnelConn, proxy.Config.Name)
+	log.Printf("proxy connection closed for %s", proxy.Config.Name)
+}
 
-	// 3. 使用负载均衡器选择端点
-	endpoint := c.selectEndpoint(service, endpointPtrs, conn.RemoteAddr().String())
-	if endpoint == nil {
-		log.Printf("no suitable endpoint selected for service %s", proxy.Config.ServiceName)
-		return
-	}
-	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
+// forwardTCPData 进行TCP数据转发 (服务器中转模式)
+func (c *Client) forwardTCPData(localConn, workConn net.Conn, proxyName string) {
+	defer func() {
+		localConn.Close()
+		workConn.Close()
+		log.Printf("TCP data forwarding closed for proxy %s", proxyName)
+	}()
 
-	log.Printf("proxy %s connecting to endpoint %s", proxy.Config.Name, targetAddr)
+	log.Printf("starting TCP data forwarding for proxy %s", proxyName)
 
-	// 3. 建立到目标端点的连接
-	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		log.Printf("failed to connect to target %s: %v", targetAddr, err)
-		return
-	}
-	defer targetConn.Close()
-
-	log.Printf("proxy %s established connection to %s for service %s",
-		proxy.Config.Name, targetAddr, service.Metadata.Name)
-
-	// 4. 双向数据转发
+	// 使用io.Copy进行双向数据转发 (服务器中转模式)
 	done := make(chan struct{}, 2)
 
-	// 客户端 -> 目标端点
+	// local client -> work connection
 	go func() {
 		defer func() { done <- struct{}{} }()
-		_, err := io.Copy(targetConn, conn)
+		_, err := io.Copy(workConn, localConn)
 		if err != nil {
-			log.Printf("error copying client->target for proxy %s: %v", proxy.Config.Name, err)
+			log.Printf("error copying local->work for proxy %s: %v", proxyName, err)
 		}
 	}()
 
-	// 目标端点 -> 客户端
+	// work connection -> local client
 	go func() {
 		defer func() { done <- struct{}{} }()
-		_, err := io.Copy(conn, targetConn)
+		_, err := io.Copy(localConn, workConn)
 		if err != nil {
-			log.Printf("error copying target->client for proxy %s: %v", proxy.Config.Name, err)
+			log.Printf("error copying work->local for proxy %s: %v", proxyName, err)
 		}
 	}()
 
-	// 等待任一方向的连接关闭
+	// 等待任一方向完成
 	<-done
-	log.Printf("proxy connection closed for %s", proxy.Config.Name)
+	log.Printf("TCP data forwarding completed for proxy %s", proxyName)
+}
+
+// handleProxyDataForwarding 处理代理数据转发 (已废弃，使用服务器中转工作连接模式)
+func (c *Client) handleProxyDataForwarding(localConn, controlConn net.Conn, serviceName string) {
+	log.Printf("handleProxyDataForwarding called but is deprecated in server relay mode")
 }
 
 // registerWorkload 向服务器注册工作负载 (K8s Pod 风格)
@@ -704,6 +1169,7 @@ func (c *Client) handleUDPProxyPackets(proxy *ProxyInstance) {
 			}
 
 			// 处理数据包
+			log.Printf("UDP proxy %s received %d bytes from %s", proxy.Config.Name, n, clientAddr.String())
 			go c.handleUDPPacket(proxy, clientAddr, buffer[:n], sessions, &sessionsMu)
 		}
 	}
@@ -720,15 +1186,18 @@ type UDPSession struct {
 // handleUDPPacket 处理单个 UDP 数据包
 func (c *Client) handleUDPPacket(proxy *ProxyInstance, clientAddr *net.UDPAddr, data []byte, sessions map[string]*UDPSession, sessionsMu *sync.RWMutex) {
 	sessionKey := clientAddr.String()
+	log.Printf("UDP proxy %s handling packet from %s", proxy.Config.Name, sessionKey)
 
 	sessionsMu.RLock()
 	session, exists := sessions[sessionKey]
 	sessionsMu.RUnlock()
 
 	if !exists {
-		// 创建新会话
-		session = c.createUDPSession(proxy, clientAddr)
+		log.Printf("UDP proxy %s creating new session for %s", proxy.Config.Name, sessionKey)
+		// 通过 server 建立 UDP 隧道会话
+		session = c.createUDPTunnelSession(proxy, clientAddr)
 		if session == nil {
+			log.Printf("UDP proxy %s failed to create tunnel session for %s", proxy.Config.Name, sessionKey)
 			return
 		}
 
@@ -736,6 +1205,7 @@ func (c *Client) handleUDPPacket(proxy *ProxyInstance, clientAddr *net.UDPAddr, 
 		sessions[sessionKey] = session
 		sessionsMu.Unlock()
 
+		log.Printf("UDP proxy %s created tunnel session for %s", proxy.Config.Name, sessionKey)
 		// 启动会话数据接收
 		go c.handleUDPSessionData(proxy, session, sessions, sessionsMu)
 	}
@@ -745,70 +1215,35 @@ func (c *Client) handleUDPPacket(proxy *ProxyInstance, clientAddr *net.UDPAddr, 
 	session.LastActivity = time.Now()
 	session.mu.Unlock()
 
-	// 转发数据到目标端点
+	// 转发数据到隧道连接
 	_, err := session.TargetConn.Write(data)
 	if err != nil {
-		log.Printf("failed to write UDP data to target for proxy %s: %v", proxy.Config.Name, err)
+		log.Printf("failed to write UDP data to tunnel for proxy %s: %v", proxy.Config.Name, err)
 		c.cleanupUDPSession(sessionKey, session, sessions, sessionsMu)
 	}
 }
 
-// createUDPSession 创建新的 UDP 会话
-func (c *Client) createUDPSession(proxy *ProxyInstance, clientAddr *net.UDPAddr) *UDPSession {
-	// 1. 查询目标服务的端点
-	service, endpoints, err := c.queryService(
-		proxy.Config.ServiceName,
-		proxy.Config.ServiceNamespace,
-		proxy.Config.Selector,
-	)
+// createUDPTunnelSession 通过 server 创建新的 UDP 隧道会话 (新架构)
+func (c *Client) createUDPTunnelSession(proxy *ProxyInstance, clientAddr *net.UDPAddr) *UDPSession {
+	log.Printf("Creating UDP tunnel session for service %s, client %s", proxy.Config.ServiceName, clientAddr.String())
+
+	// 向 server 请求 UDP 隧道
+	tunnelConn, err := c.requestUDPTunnel(proxy.Config.ServiceName, proxy.Config.ServiceNamespace, clientAddr.String())
 	if err != nil {
-		log.Printf("failed to query service %s for UDP session: %v", proxy.Config.ServiceName, err)
+		log.Printf("failed to request UDP tunnel for service %s: %v", proxy.Config.ServiceName, err)
 		return nil
 	}
 
-	if len(endpoints) == 0 {
-		log.Printf("no available endpoints for UDP service %s", proxy.Config.ServiceName)
-		return nil
-	}
+	log.Printf("UDP tunnel established for service %s, client %s", proxy.Config.ServiceName, clientAddr.String())
 
-	// 2. 转换 endpoints 为指针切片
-	endpointPtrs := make([]*types.Endpoint, len(endpoints))
-	for i := range endpoints {
-		endpointPtrs[i] = &endpoints[i]
-	}
-
-	// 3. 使用负载均衡器选择端点
-	endpoint := c.selectEndpoint(service, endpointPtrs, clientAddr.String())
-	if endpoint == nil {
-		log.Printf("no suitable endpoint selected for UDP service %s", proxy.Config.ServiceName)
-		return nil
-	}
-	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
-
-	log.Printf("UDP proxy %s creating session to endpoint %s for client %s",
-		proxy.Config.Name, targetAddr, clientAddr.String())
-
-	// 3. 建立到目标端点的 UDP 连接
-	targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
-	if err != nil {
-		log.Printf("failed to resolve target UDP address %s: %v", targetAddr, err)
-		return nil
-	}
-
-	targetConn, err := net.DialUDP("udp", nil, targetUDPAddr)
-	if err != nil {
-		log.Printf("failed to connect to UDP target %s: %v", targetAddr, err)
-		return nil
-	}
-
-	log.Printf("UDP proxy %s established session to %s for service %s",
-		proxy.Config.Name, targetAddr, service.Metadata.Name)
-
-	return &UDPSession{
+	// 创建 UDP 会话
+	session := &UDPSession{
 		ClientAddr:   clientAddr,
-		TargetConn:   targetConn,
+		TargetConn:   tunnelConn,
 		LastActivity: time.Now(),
 	}
+
+	return session
 }
 
 // handleUDPSessionData 处理 UDP 会话的返回数据
@@ -952,73 +1387,8 @@ func (c *Client) handleSTCPProxyConnection(proxy *ProxyInstance, conn net.Conn) 
 
 	log.Printf("new STCP connection to proxy %s from %s", proxy.Config.Name, conn.RemoteAddr())
 
-	// 1. 查询目标服务的端点
-	service, endpoints, err := c.queryService(
-		proxy.Config.ServiceName,
-		proxy.Config.ServiceNamespace,
-		proxy.Config.Selector,
-	)
-	if err != nil {
-		log.Printf("failed to query service %s for STCP: %v", proxy.Config.ServiceName, err)
-		return
-	}
-
-	if len(endpoints) == 0 {
-		log.Printf("no available endpoints for STCP service %s", proxy.Config.ServiceName)
-		return
-	}
-
-	// 2. 转换 endpoints 为指针切片
-	endpointPtrs := make([]*types.Endpoint, len(endpoints))
-	for i := range endpoints {
-		endpointPtrs[i] = &endpoints[i]
-	}
-
-	// 3. 使用负载均衡器选择端点
-	endpoint := c.selectEndpoint(service, endpointPtrs, conn.RemoteAddr().String())
-	if endpoint == nil {
-		log.Printf("no suitable endpoint selected for STCP service %s", proxy.Config.ServiceName)
-		return
-	}
-	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
-
-	log.Printf("STCP proxy %s connecting to endpoint %s", proxy.Config.Name, targetAddr)
-
-	// 3. 建立到目标端点的加密隧道连接
-	targetConn, err := c.establishSTCPTunnel(targetAddr, proxy.Config.ServiceName)
-	if err != nil {
-		log.Printf("failed to establish STCP tunnel to %s: %v", targetAddr, err)
-		return
-	}
-	defer targetConn.Close()
-
-	log.Printf("STCP proxy %s established encrypted tunnel to %s for service %s",
-		proxy.Config.Name, targetAddr, service.Metadata.Name)
-
-	// 4. 双向数据转发（隧道内的数据已经是加密的）
-	done := make(chan struct{}, 2)
-
-	// 客户端 -> 加密隧道
-	go func() {
-		defer func() { done <- struct{}{} }()
-		_, err := io.Copy(targetConn, conn)
-		if err != nil {
-			log.Printf("error copying client->tunnel for STCP proxy %s: %v", proxy.Config.Name, err)
-		}
-	}()
-
-	// 加密隧道 -> 客户端
-	go func() {
-		defer func() { done <- struct{}{} }()
-		_, err := io.Copy(conn, targetConn)
-		if err != nil {
-			log.Printf("error copying tunnel->client for STCP proxy %s: %v", proxy.Config.Name, err)
-		}
-	}()
-
-	// 等待任一方向的连接关闭
-	<-done
-	log.Printf("STCP proxy connection closed for %s", proxy.Config.Name)
+	// TODO: 重新实现 STCP 隧道逻辑，使用工作连接机制
+	log.Printf("STCP proxy not implemented with new work connection mechanism")
 }
 
 // establishSTCPTunnel 建立 STCP 加密隧道
@@ -1059,13 +1429,13 @@ func (c *Client) establishSTCPTunnel(targetAddr, serviceName string) (net.Conn, 
 		return nil, fmt.Errorf("unexpected STCP auth response type: %s", authResponse.Type)
 	}
 
-	// 请求建立加密隧道
+	// 请求建立加密隧道（现在 targetAddr 实际上是 namespace/serviceName 格式）
 	tunnelMsg := types.Message{
 		Type: types.MsgTypeSTCPTunnelRequest,
 		ID:   uuid.New().String(),
 		Payload: types.STCPTunnelRequestPayload{
 			ServiceName: serviceName,
-			TargetAddr:  targetAddr,
+			TargetAddr:  targetAddr, // 格式：namespace/serviceName
 		},
 		Timestamp: time.Now(),
 	}
@@ -1137,103 +1507,8 @@ func (c *Client) handleSUDPProxyConnections(proxy *ProxyInstance) {
 
 // establishSUDPTunnel 建立 SUDP 加密隧道
 func (c *Client) establishSUDPTunnel(proxyConfig types.Proxy) (net.Conn, error) {
-	// 1. 查询目标服务的端点
-	service, endpoints, err := c.queryService(
-		proxyConfig.ServiceName,
-		proxyConfig.ServiceNamespace,
-		proxyConfig.Selector,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query service %s for SUDP: %v", proxyConfig.ServiceName, err)
-	}
-
-	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("no available endpoints for SUDP service %s", proxyConfig.ServiceName)
-	}
-
-	// 2. 转换 endpoints 为指针切片
-	endpointPtrs := make([]*types.Endpoint, len(endpoints))
-	for i := range endpoints {
-		endpointPtrs[i] = &endpoints[i]
-	}
-
-	// 3. 使用负载均衡器选择端点
-	endpoint := c.selectEndpoint(service, endpointPtrs, "")
-	if endpoint == nil {
-		return nil, fmt.Errorf("no suitable endpoint selected for SUDP service %s", proxyConfig.ServiceName)
-	}
-	targetAddr := fmt.Sprintf("%s:%d", endpoint.IP, endpoint.Port)
-
-	log.Printf("SUDP proxy %s establishing tunnel to endpoint %s for service %s",
-		proxyConfig.Name, targetAddr, service.Metadata.Name)
-
-	// 3. 建立到服务器的新控制连接
-	controlConn, err := net.DialTimeout("tcp", c.config.Client.ServerAddr, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to server for SUDP tunnel: %v", err)
-	}
-
-	// 4. 认证
-	encoder := json.NewEncoder(controlConn)
-	decoder := json.NewDecoder(controlConn)
-
-	authMsg := types.Message{
-		Type: types.MsgTypeAuth,
-		ID:   uuid.New().String(),
-		Payload: types.AuthPayload{
-			Token: c.config.Client.AuthToken,
-			Mode:  "proxy",
-		},
-		Timestamp: time.Now(),
-	}
-
-	if err := encoder.Encode(authMsg); err != nil {
-		controlConn.Close()
-		return nil, fmt.Errorf("failed to send SUDP auth: %v", err)
-	}
-
-	var authResponse types.Message
-	if err := decoder.Decode(&authResponse); err != nil {
-		controlConn.Close()
-		return nil, fmt.Errorf("failed to receive SUDP auth response: %v", err)
-	}
-
-	if authResponse.Type != types.MsgTypeAuthResponse {
-		controlConn.Close()
-		return nil, fmt.Errorf("SUDP authentication failed")
-	}
-
-	// 5. 请求建立 SUDP 隧道
-	tunnelMsg := types.Message{
-		Type: types.MsgTypeSUDPTunnelRequest,
-		ID:   uuid.New().String(),
-		Payload: types.SUDPTunnelRequestPayload{
-			ServiceName: proxyConfig.ServiceName,
-			TargetAddr:  targetAddr,
-			LocalPort:   proxyConfig.LocalPort,
-		},
-		Timestamp: time.Now(),
-	}
-
-	if err := encoder.Encode(tunnelMsg); err != nil {
-		controlConn.Close()
-		return nil, fmt.Errorf("failed to send SUDP tunnel request: %v", err)
-	}
-
-	var tunnelResponse types.Message
-	if err := decoder.Decode(&tunnelResponse); err != nil {
-		controlConn.Close()
-		return nil, fmt.Errorf("failed to receive SUDP tunnel response: %v", err)
-	}
-
-	if tunnelResponse.Type != types.MsgTypeSUDPTunnelResponse {
-		controlConn.Close()
-		return nil, fmt.Errorf("SUDP tunnel request failed: %s", tunnelResponse.Type)
-	}
-
-	// 控制连接现在变成了加密数据隧道
-	log.Printf("SUDP tunnel established to %s for service %s", targetAddr, proxyConfig.ServiceName)
-	return controlConn, nil
+	// TODO: 重新实现 SUDP 隧道逻辑，使用工作连接机制
+	return nil, fmt.Errorf("SUDP tunnel not implemented with new work connection mechanism")
 }
 
 // forwardSUDPData 转发 SUDP 数据到加密隧道

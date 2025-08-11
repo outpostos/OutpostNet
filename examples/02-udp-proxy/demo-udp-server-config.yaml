@@ -10,7 +10,7 @@ monitoring:
   enabled: true
   port: 9091
 
-# 动态服务发现配置
+# 动态服务发现配置 - 支持自动创建服务
 service_discovery:
   mode: "dynamic"                    # 动态模式
   auto_create_services: true         # 自动创建服务

@@ -1,0 +1,171 @@
+# OutpostNet 集群节点 B 配置 (工作节点)
+# 这个节点将自动发现并加入由 node-a 创建的集群
+
+# 节点基本配置
+node:
+  node_id: "cluster-node-b"
+  listen_addr: "0.0.0.0:7629"
+  advertise_addr: "192.168.1.101:7629"
+  cluster_name: "outpostnet-mesh-cluster"
+  
+  # 种子节点配置 (用于加入集群)
+  seed_nodes:
+    - "192.168.1.100:7629"  # node-a 地址
+  
+  # 节点标签
+  labels:
+    role: "worker"
+    zone: "east"
+    datacenter: "dc1"
+    environment: "production"
+    node_type: "server"
+    specialty: "database"
+
+  # 心跳和超时配置
+  heartbeat_interval: "10s"
+  join_timeout: "30s"
+
+  # 节点发现配置
+  discovery:
+    # 启用发现方法
+    methods: 
+      - "static"
+      - "env"
+      - "multicast"
+    
+    # 静态节点配置
+    static_nodes:
+      - id: "cluster-node-a"
+        address: "192.168.1.100:7629"
+        labels:
+          role: "seed"
+          zone: "east"
+          datacenter: "dc1"
+        priority: 1
+      
+      - id: "cluster-node-c"
+        address: "192.168.1.102:7629"
+        labels:
+          role: "worker"
+          zone: "west"
+          datacenter: "dc1"
+        priority: 1
+    
+    # 环境变量发现配置
+    env:
+      enabled: true
+      nodes_env_var: "OUTPOSTNET_NODES"
+      cluster_env_var: "OUTPOSTNET_CLUSTER_NODES"
+      separator: ","
+    
+    # 多播发现配置
+    multicast:
+      enabled: true
+      group: "224.0.0.100"
+      port: 7630
+      interface: ""
+      ttl: 2
+      interval: "30s"
+    
+    # 发现时间配置
+    discovery_interval: "30s"
+    node_timeout: "5m"
+    health_check_interval: "30s"
+
+  # 服务同步配置
+  sync:
+    # 同步间隔
+    sync_interval: "30s"
+    gossip_interval: "10s"
+    
+    # Gossip 参数
+    gossip_fanout: 3
+    gossip_retransmit_mult: 4
+    
+    # 数据管理
+    max_sync_entries: 10000
+    entry_ttl: "10m"
+    conflict_resolution: "timestamp_wins"
+    
+    # 压缩配置
+    enable_compression: true
+    compression_threshold: 1024
+
+  # 性能配置
+  max_connections: 1000
+  buffer_size: 8192
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# 服务器配置
+server:
+  listen_addr: "0.0.0.0:7000"
+  auth_token: "mesh-cluster-secret-token-2024"
+
+# 预定义服务 (由 node-b 提供的服务)
+services:
+  - metadata:
+      name: "database-service"
+      namespace: "default"
+      labels:
+        app: "database"
+        tier: "data"
+        database: "postgresql"
+        version: "v13.8"
+        owner: "cluster-node-b"
+    spec:
+      selector:
+        app: "database"
+      ports:
+        - name: "postgres"
+          port: 5432
+          target_port: 5432
+          protocol: "tcp"
+        - name: "admin"
+          port: 8080
+          target_port: 8080
+          protocol: "tcp"
+      proxy_mode: "stcp"  # 数据库使用安全隧道
+      load_balancer: "consistent_hash"
+
+  - metadata:
+      name: "auth-service"
+      namespace: "default"
+      labels:
+        app: "auth-service"
+        tier: "security"
+        version: "v1.5"
+        owner: "cluster-node-b"
+    spec:
+      selector:
+        app: "auth-service"
+      ports:
+        - name: "http"
+          port: 8080
+          target_port: 8080
+          protocol: "tcp"
+        - name: "grpc"
+          port: 9090
+          target_port: 9090
+          protocol: "tcp"
+      proxy_mode: "stcp"  # 认证服务使用安全隧道
+      load_balancer: "round_robin"
+
+# K8s API 兼容性
+k8s_api:
+  enabled: true
+  port: 8443
+
+# 监控配置
+monitoring:
+  enabled: true
+  port: 9091  # 使用不同端口避免冲突
+  address: "0.0.0.0"
+  metrics_path: "/metrics"
+
+# 健康检查配置
+health_check:
+  enabled: true
+  interval: "30s"
+  timeout: "10s"
+  retries: 3
