@@ -130,6 +130,13 @@ e2e-k8s:
 e2e-k8s-cleanup:
 	./hack/e2e-k8s.sh cleanup
 
+e2e-controller:
+	@echo "Running Controller E2E test..."
+	./hack/e2e-controller.sh
+
+e2e-controller-cleanup:
+	./hack/e2e-controller.sh cleanup
+
 # Release targets
 release: clean fmt vet test
 	@echo "Building release binaries..."

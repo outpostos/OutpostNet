@@ -1,0 +1,36 @@
+# Example: Echo client Deployment with OutpostNet annotations.
+#
+# Imports "echo-service" on localhost:9090. The sidecar is auto-injected
+# by the controller webhook.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-client
+  namespace: default
+  labels:
+    app: echo-client
+    app.kubernetes.io/part-of: outpostnet-example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-client
+  template:
+    metadata:
+      labels:
+        app: echo-client
+      annotations:
+        outpostnet.io/inject: "true"
+        outpostnet.io/imports: "echo-service:9090:tcp"
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.37
+          command: ["sh", "-c", "echo 'echo-client ready'; sleep 3600"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

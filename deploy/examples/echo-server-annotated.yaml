@@ -1,0 +1,41 @@
+# Example: Echo server Deployment with OutpostNet annotations.
+#
+# The controller webhook automatically injects the sidecar container.
+# The controller reconciler automatically generates the ConfigMap.
+# No manual sidecar or ConfigMap definition needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-server
+  namespace: default
+  labels:
+    app: echo-server
+    app.kubernetes.io/part-of: outpostnet-example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-server
+  template:
+    metadata:
+      labels:
+        app: echo-server
+      annotations:
+        outpostnet.io/inject: "true"
+        outpostnet.io/exports: "echo-service:8080:tcp"
+    spec:
+      containers:
+        - name: app
+          image: hashicorp/http-echo:latest
+          args:
+            - "-listen=:8080"
+            - "-text=Hello from echo-server via OutpostNet!"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
