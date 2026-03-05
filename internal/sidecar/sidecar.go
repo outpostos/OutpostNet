@@ -50,7 +50,13 @@ type Sidecar struct {
 	codec  *protocol.Codec
 
 	mu      sync.RWMutex
-	streams map[uint32]net.Conn // streamID -> local TCP connection (for exports)
+	streams map[uint32]net.Conn // streamID -> local TCP/UDP connection
+
+	// Connect serialization: only one Connect request in flight at a time.
+	connectMu sync.Mutex
+	connectCh chan *protocol.ConnectAckPayload
+
+	importListeners []net.Listener
 
 	done chan struct{}
 }
@@ -58,9 +64,10 @@ type Sidecar struct {
 // New creates a new Sidecar.
 func New(config Config) *Sidecar {
 	return &Sidecar{
-		config:  config,
-		streams: make(map[uint32]net.Conn),
-		done:    make(chan struct{}),
+		config:    config,
+		streams:   make(map[uint32]net.Conn),
+		connectCh: make(chan *protocol.ConnectAckPayload, 1),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -87,10 +94,17 @@ func (s *Sidecar) Run() error {
 		}
 	}
 
-	// Step 3: Start heartbeat.
+	// Step 3: Start import listeners.
+	for _, imp := range s.config.Imports {
+		if err := s.startImportListener(imp); err != nil {
+			return fmt.Errorf("start import listener %s: %w", imp.Name, err)
+		}
+	}
+
+	// Step 4: Start heartbeat.
 	go s.heartbeatLoop()
 
-	// Step 4: Message loop.
+	// Step 5: Message loop (blocks).
 	s.messageLoop()
 
 	return nil
@@ -98,7 +112,24 @@ func (s *Sidecar) Run() error {
 
 // Stop gracefully shuts down the sidecar.
 func (s *Sidecar) Stop() {
-	close(s.done)
+	select {
+	case <-s.done:
+		return // already stopped
+	default:
+		close(s.done)
+	}
+
+	for _, ln := range s.importListeners {
+		ln.Close()
+	}
+
+	s.mu.Lock()
+	for sid, conn := range s.streams {
+		conn.Close()
+		delete(s.streams, sid)
+	}
+	s.mu.Unlock()
+
 	if s.codec != nil {
 		s.codec.Close()
 	}
@@ -169,6 +200,95 @@ func (s *Sidecar) registerExport(exp ExportEntry) error {
 	return nil
 }
 
+// --- Import side (S3) ---
+
+func (s *Sidecar) startImportListener(imp ImportEntry) error {
+	if imp.Protocol != protocol.ProtoTCP {
+		// UDP import listeners will be added in S4.
+		return nil
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", imp.ListenPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	s.importListeners = append(s.importListeners, ln)
+	log.Printf("[sidecar] import listener: %s -> %s", imp.Name, addr)
+
+	go s.acceptImportConnections(ln, imp)
+	return nil
+}
+
+func (s *Sidecar) acceptImportConnections(ln net.Listener, imp ImportEntry) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-s.done:
+			default:
+				log.Printf("[sidecar] accept import %s: %v", imp.Name, err)
+			}
+			return
+		}
+		go s.handleImportConnection(conn, imp)
+	}
+}
+
+func (s *Sidecar) handleImportConnection(appConn net.Conn, imp ImportEntry) {
+	// Send Connect to Server and get a StreamID.
+	streamID, err := s.requestConnect(imp.Name, imp.Protocol)
+	if err != nil {
+		log.Printf("[sidecar] connect request for %s: %v", imp.Name, err)
+		appConn.Close()
+		return
+	}
+
+	// Register stream for data relay.
+	s.mu.Lock()
+	s.streams[streamID] = appConn
+	s.mu.Unlock()
+
+	log.Printf("[sidecar] import stream %d: app -> %s", streamID, imp.Name)
+
+	// Relay local app data to server (blocks until connection closes).
+	s.relayLocalToServer(streamID, appConn)
+}
+
+// requestConnect sends a Connect message and waits for ConnectAck.
+// Uses a mutex to serialize concurrent Connect requests.
+func (s *Sidecar) requestConnect(serviceName string, proto protocol.ServiceProtocol) (uint32, error) {
+	s.connectMu.Lock()
+	defer s.connectMu.Unlock()
+
+	if err := s.codec.WriteFrame(&protocol.Frame{
+		Type:     protocol.MsgTypeConnect,
+		StreamID: protocol.StreamIDControl,
+		Payload: protocol.EncodeConnect(&protocol.ConnectPayload{
+			ServiceName: serviceName,
+			Protocol:    proto,
+		}),
+	}); err != nil {
+		return 0, err
+	}
+
+	// Wait for ConnectAck from messageLoop.
+	select {
+	case ack := <-s.connectCh:
+		if ack.Status != protocol.StatusOK {
+			return 0, fmt.Errorf("connect rejected: %s", ack.Message)
+		}
+		return ack.StreamID, nil
+	case <-s.done:
+		return 0, fmt.Errorf("sidecar shutting down")
+	case <-time.After(10 * time.Second):
+		return 0, fmt.Errorf("connect timeout")
+	}
+}
+
+// --- Heartbeat ---
+
 func (s *Sidecar) heartbeatLoop() {
 	ticker := time.NewTicker(s.config.HeartbeatInterval)
 	defer ticker.Stop()
@@ -192,6 +312,8 @@ func (s *Sidecar) heartbeatLoop() {
 	}
 }
 
+// --- Message loop ---
+
 func (s *Sidecar) messageLoop() {
 	for {
 		frame, err := s.codec.ReadFrame()
@@ -206,7 +328,7 @@ func (s *Sidecar) messageLoop() {
 
 		switch frame.Type {
 		case protocol.MsgTypeHeartbeatAck:
-			// Heartbeat response received, nothing to do.
+			// Heartbeat response received.
 		case protocol.MsgTypeOpenStream:
 			s.handleOpenStream(frame)
 		case protocol.MsgTypeData:
@@ -214,7 +336,7 @@ func (s *Sidecar) messageLoop() {
 		case protocol.MsgTypeStreamClose:
 			s.handleStreamClose(frame)
 		case protocol.MsgTypeConnectAck:
-			// Handled inline by import listeners (S3).
+			s.handleConnectAck(frame)
 		case protocol.MsgTypeRegisterAck:
 			// Late ack, already handled during registration.
 		default:
@@ -222,6 +344,22 @@ func (s *Sidecar) messageLoop() {
 		}
 	}
 }
+
+func (s *Sidecar) handleConnectAck(frame *protocol.Frame) {
+	ack, err := protocol.DecodeConnectAck(frame.Payload)
+	if err != nil {
+		log.Printf("[sidecar] decode connect_ack: %v", err)
+		return
+	}
+	// Deliver to the waiting requestConnect goroutine.
+	select {
+	case s.connectCh <- ack:
+	default:
+		log.Printf("[sidecar] connect_ack dropped (no waiter): service=%s", ack.ServiceName)
+	}
+}
+
+// --- Export side (OpenStream handling) ---
 
 func (s *Sidecar) handleOpenStream(frame *protocol.Frame) {
 	os, err := protocol.DecodeOpenStream(frame.Payload)
@@ -286,6 +424,8 @@ func (s *Sidecar) handleOpenStream(frame *protocol.Frame) {
 	// Start reading from local conn and sending to server.
 	go s.relayLocalToServer(os.StreamID, localConn)
 }
+
+// --- Data handling (shared by import and export sides) ---
 
 func (s *Sidecar) handleData(frame *protocol.Frame) {
 	s.mu.RLock()
