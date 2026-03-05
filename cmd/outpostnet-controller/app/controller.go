@@ -7,9 +7,11 @@ import (
 
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/outpostos/OutpostNet/internal/controller/webhook"
 	"github.com/outpostos/OutpostNet/pkg/version"
 )
 
@@ -71,6 +73,9 @@ func runController(opts Options) error {
 		LeaderElection:         opts.EnableLeaderElection,
 		LeaderElectionID:       "outpostnet-controller-leader",
 		HealthProbeBindAddress: opts.HealthProbeAddr,
+		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
+			Port: opts.WebhookPort,
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
@@ -87,7 +92,13 @@ func runController(opts Options) error {
 		os.Exit(1)
 	}
 
-	// TODO: Register webhook and reconcilers in subsequent stories (S8-S11).
+	// Register sidecar injection webhook.
+	mgr.GetWebhookServer().Register("/mutate-pods", &ctrlwebhook.Admission{
+		Handler: &webhook.SidecarInjector{SidecarImage: opts.SidecarImage},
+	})
+	setupLog.Info("registered sidecar injection webhook", "path", "/mutate-pods")
+
+	// TODO: Register reconcilers in subsequent stories (S10-S11).
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
