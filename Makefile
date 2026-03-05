@@ -11,6 +11,7 @@ GOMOD=$(GOCMD) mod
 # Binary names
 SERVER_BINARY=outpostnet-server
 SIDECAR_BINARY=outpostnet-sidecar
+CONTROLLER_BINARY=outpostnet-controller
 
 # Build directory
 BUILD_DIR=build
@@ -32,7 +33,7 @@ LDFLAGS = -ldflags "-X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gi
 all: clean fmt vet test build
 
 # Build targets
-build: build-server build-sidecar
+build: build-server build-sidecar build-controller
 
 build-server:
 	@echo "Building $(SERVER_BINARY)..."
@@ -43,6 +44,11 @@ build-sidecar:
 	@echo "Building $(SIDECAR_BINARY)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(SIDECAR_BINARY) ./cmd/outpostnet-sidecar
+
+build-controller:
+	@echo "Building $(CONTROLLER_BINARY)..."
+	@mkdir -p $(BUILD_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(CONTROLLER_BINARY) ./cmd/outpostnet-controller
 
 # Install builds binaries to project root for easy testing
 install: build
@@ -95,7 +101,7 @@ deps:
 clean:
 	@echo "Cleaning..."
 	$(GOCLEAN)
-	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY)
+	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 
@@ -112,6 +118,9 @@ docker-build:
 	docker build -t outpostnet-sidecar:$(VERSION) -t outpostnet-sidecar:latest \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-f build/docker/Dockerfile.sidecar .
+	docker build -t outpostnet-controller:$(VERSION) -t outpostnet-controller:latest \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f build/docker/Dockerfile.controller .
 
 # K8s E2E test
 e2e-k8s:
@@ -140,9 +149,10 @@ help:
 	@echo "OutpostNet v2 Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  build           - Build server and sidecar binaries"
+	@echo "  build           - Build all binaries"
 	@echo "  build-server    - Build server binary only"
 	@echo "  build-sidecar   - Build sidecar binary only"
+	@echo "  build-controller - Build controller binary only"
 	@echo "  install         - Build and install binaries to project root"
 	@echo ""
 	@echo "  test            - Run all tests"
