@@ -126,6 +126,15 @@ func validateProtocol(p string) error {
 	}
 }
 
+// MarshalSidecarConfig serializes a SidecarConfig to YAML string.
+func MarshalSidecarConfig(cfg *SidecarConfig) (string, error) {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal sidecar config: %w", err)
+	}
+	return string(data), nil
+}
+
 // ParseProtocol converts a string protocol to protocol.ServiceProtocol value (0=TCP, 1=UDP).
 func ParseProtocol(s string) uint8 {
 	if strings.ToLower(s) == "udp" {

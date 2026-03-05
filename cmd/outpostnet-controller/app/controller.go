@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/outpostos/OutpostNet/internal/controller/reconciler"
 	"github.com/outpostos/OutpostNet/internal/controller/webhook"
 	"github.com/outpostos/OutpostNet/pkg/version"
 )
@@ -98,7 +99,14 @@ func runController(opts Options) error {
 	})
 	setupLog.Info("registered sidecar injection webhook", "path", "/mutate-pods")
 
-	// TODO: Register reconcilers in subsequent stories (S10-S11).
+	// Register Pod reconciler for ConfigMap generation.
+	if err := (&reconciler.PodReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to set up pod reconciler")
+		os.Exit(1)
+	}
+	setupLog.Info("registered pod reconciler")
+
+	// TODO: Register EndpointSlice reconciler in S11.
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
