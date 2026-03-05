@@ -12,11 +12,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/outpostos/OutpostNet/internal/server"
+	"github.com/outpostos/OutpostNet/pkg/config"
 	"github.com/outpostos/OutpostNet/pkg/version"
 )
 
 // NewServerCommand creates the `outpostnet-server` command.
 func NewServerCommand() *cobra.Command {
+	var configFile string
 	cfg := server.DefaultConfig()
 
 	cmd := &cobra.Command{
@@ -24,10 +26,25 @@ func NewServerCommand() *cobra.Command {
 		Short: "OutpostNet node-level server",
 		Long:  "OutpostNet Server runs on each edge node, managing sidecar registration and service routing via Unix domain socket.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if configFile != "" {
+				fileCfg, err := config.LoadServerConfig(configFile)
+				if err != nil {
+					return fmt.Errorf("load config: %w", err)
+				}
+				cfg.SocketPath = fileCfg.Listen
+				if fileCfg.HeartbeatTimeout != "" {
+					d, err := time.ParseDuration(fileCfg.HeartbeatTimeout)
+					if err != nil {
+						return fmt.Errorf("parse heartbeat_timeout: %w", err)
+					}
+					cfg.HeartbeatTimeout = d
+				}
+			}
 			return runServer(cfg)
 		},
 	}
 
+	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
 	cmd.Flags().StringVar(&cfg.SocketPath, "socket", cfg.SocketPath, "Unix socket path")
 	cmd.Flags().DurationVar(&cfg.HeartbeatTimeout, "heartbeat-timeout", cfg.HeartbeatTimeout, "Heartbeat timeout duration")
 	cmd.AddCommand(newVersionCommand())
@@ -52,7 +69,6 @@ func runServer(cfg server.Config) error {
 
 	srv := server.New(cfg)
 
-	// Handle signals for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -65,7 +81,6 @@ func runServer(cfg server.Config) error {
 	case sig := <-sigCh:
 		log.Printf("received signal %v, shutting down...", sig)
 		srv.Stop()
-		// Give ongoing connections a moment to clean up.
 		time.Sleep(100 * time.Millisecond)
 		return nil
 	case err := <-errCh:
