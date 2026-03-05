@@ -446,13 +446,227 @@ S12: E2E 集成验证
 
 **目标：** 构建 QUIC 隧道库，Service 级 Stream 多路复用
 
-**覆盖 PRD：** FR-2, FR-6(部分), NFR-3
+**覆盖 PRD：** FR-2, FR-6(部分), NFR-3, AC-4
 
 **交付物：** `pkg/tunnel`
 
-**验收：** 单元测试 + 基准测试
+**验收：** 单元测试 + 基准测试（≥100 Mbps 吞吐，10 Service 多路复用 ≤10% 退化）
 
-*Stories TBD*
+### Architecture
+
+```
+区域 A (边缘)                                    区域 B (云端/其他边缘)
+┌──────────────────────┐                        ┌──────────────────────┐
+│  Sidecar (import)    │                        │  Sidecar (export)    │
+│  localhost:3306 ◄────┤                        ├────► App :3306       │
+│                      │                        │                      │
+│  Tunnel Client       │                        │  Tunnel Server       │
+│  ┌─────────────────┐ │     QUIC Connection    │ ┌─────────────────┐ │
+│  │ Stream 1: svc-a ├─┼────────────────────────┼─┤ Stream 1: svc-a │ │
+│  │ Stream 2: svc-b ├─┼────────────────────────┼─┤ Stream 2: svc-b │ │
+│  │ Stream 3: svc-c ├─┼────────────────────────┼─┤ Stream 3: svc-c │ │
+│  │ ...              │ │   Single QUIC Conn     │ │ ...              │ │
+│  └─────────────────┘ │   (TLS 1.3 built-in)   │ └─────────────────┘ │
+└──────────────────────┘                        └──────────────────────┘
+```
+
+**核心设计原则：**
+- **单连接多路复用：** 一条 QUIC 连接承载所有 Service，每个 Service 映射到独立 QUIC Stream
+- **无队头阻塞：** QUIC Stream 互相独立，一个 Service 丢包不影响其他
+- **内置加密：** QUIC 内置 TLS 1.3，无需额外加密层
+- **连接迁移：** 边缘设备 IP 变化时无缝切换
+- **0-RTT 重连：** 断线后快速恢复
+
+**Stream 协议（QUIC Stream 内）：**
+```
+新 Stream 打开时，Client 发送 ServiceHeader:
+┌──────────────┬──────────────────┐
+│ NameLen (2B) │ ServiceName (var)│
+└──────────────┴──────────────────┘
+
+Server 解析 ServiceHeader → 路由到对应本地服务
+之后 Stream 上的数据为透明的双向字节流（L4 转发）
+```
+
+**与 Epic 1 的关系：**
+- Epic 1 的 `pkg/protocol` 是节点内 Unix socket 通信协议
+- Epic 3 的 `pkg/tunnel` 是跨节点 QUIC 隧道协议
+- 两者在 Epic 4 中通过 Agent 集成：Agent 读取配置 → 建立 QUIC 隧道 → 连接本地 Server
+
+### Components
+
+| 组件 | 说明 |
+|------|------|
+| `pkg/tunnel` | QUIC 隧道核心库 |
+| `pkg/tunnel/tlsutil` | TLS 证书工具（生成自签名证书、加载证书） |
+| `pkg/tunnel/server.go` | Tunnel Server — 接受 QUIC 连接，路由 Stream 到本地服务 |
+| `pkg/tunnel/client.go` | Tunnel Client — 拨号 QUIC，为每个导入 Service 打开 Stream |
+| `pkg/tunnel/stream.go` | Stream 多路复用管理，ServiceHeader 编解码 |
+| `pkg/tunnel/lifecycle.go` | 连接生命周期：keepalive、自动重连、优雅关闭 |
+
+### Stories
+
+---
+
+#### S13: QUIC 隧道库脚手架与 TLS 工具
+
+**内容：**
+- 添加 `quic-go` 依赖
+- `pkg/tunnel/tlsutil/` — TLS 证书工具：
+  - `GenerateSelfSignedCert()` — 生成自签名 TLS 证书（开发/测试用）
+  - `LoadTLSConfig(certFile, keyFile)` — 从文件加载证书
+  - `InsecureTLSConfig()` — 跳过验证的客户端配置（测试用）
+- `pkg/tunnel/` — 基础类型定义：
+  - `ServerConfig` — 监听地址、TLS 配置、keepalive 参数
+  - `ClientConfig` — 远端地址、TLS 配置、重连参数
+  - `ServiceRoute` — 服务名 → 本地地址映射
+- 基础 QUIC listener 和 dialer（仅建立连接，不传输数据）
+- 单元测试：证书生成、连接建立/关闭
+
+**依赖：** S12 (Epic 2)
+
+**验收：** `go test ./pkg/tunnel/...` 通过，QUIC 连接可建立和关闭
+
+---
+
+#### S14: Tunnel Server — 接受连接与 Stream 路由
+
+**内容：**
+- `pkg/tunnel/server.go` — Tunnel Server 实现：
+  - `NewServer(cfg ServerConfig)` — 创建 Server 实例
+  - `ListenAndServe(ctx)` — 监听 QUIC 连接
+  - `handleConnection(conn)` — 接受新连接，循环接受 Stream
+  - `handleStream(stream)` — 读取 ServiceHeader，路由到对应本地服务
+  - `AddRoute(serviceName, localAddr)` — 注册服务路由
+  - `RemoveRoute(serviceName)` — 移除服务路由
+- Stream 路由逻辑：
+  1. 接受 QUIC Stream
+  2. 读取 ServiceHeader（ServiceName）
+  3. 查找本地服务地址
+  4. 建立 TCP 连接到本地服务
+  5. 双向数据转发（Stream ↔ TCP）
+- 单元测试：mock QUIC connection，验证 Stream 路由
+
+**依赖：** S13
+
+**验收：** Tunnel Server 可接受连接，正确路由 Stream 到本地 TCP 服务
+
+---
+
+#### S15: Tunnel Client — 拨号与 Stream 转发
+
+**内容：**
+- `pkg/tunnel/client.go` — Tunnel Client 实现：
+  - `NewClient(cfg ClientConfig)` — 创建 Client 实例
+  - `Connect(ctx)` — 拨号 QUIC 连接
+  - `OpenServiceStream(serviceName)` — 打开一个新 Stream，发送 ServiceHeader
+  - `ServeImport(ctx, serviceName, listenAddr)` — 在本地地址监听，每个 TCP 连接打开一个 Stream
+- 数据流（每个导入连接）：
+  1. 本地 App 连接到 listenAddr
+  2. Client 打开 QUIC Stream，发送 ServiceHeader
+  3. 双向转发：App TCP ↔ QUIC Stream
+- `pkg/tunnel/stream.go` — ServiceHeader 编解码：
+  - `WriteServiceHeader(stream, serviceName)` — 写入 ServiceHeader
+  - `ReadServiceHeader(stream)` — 读取 ServiceHeader
+- 单元测试：端到端测试（Client → Server → echo service）
+
+**依赖：** S14
+
+**验收：** Client 拨号 Server，打开 Stream，数据通过隧道双向传输
+
+---
+
+#### S16: Service-Stream 多路复用
+
+**内容：**
+- 多 Service 并发 Stream 管理：
+  - 同一 QUIC 连接上同时打开多个 Stream（每个连接对应一个 Service 实例）
+  - 并发安全的 Stream 计数和跟踪
+  - Stream 生命周期管理（打开、转发、关闭、错误处理）
+- 无队头阻塞验证测试：
+  - Stream A 大量数据传输时，Stream B 的延迟不受影响
+  - 一个 Stream 失败不影响其他 Stream
+- 并发测试：
+  - 10 个 Service 同时通过 1 条连接传输
+  - 数据无串扰验证（FR-2 测试标准）
+  - 高并发 Stream 打开/关闭
+
+**依赖：** S15
+
+**验收：** 1 条 QUIC 连接同时传输 10 个 Service，数据无串扰，Stream 互不阻塞
+
+---
+
+#### S17: 连接生命周期 — Keepalive、重连、优雅关闭
+
+**内容：**
+- `pkg/tunnel/lifecycle.go` — 连接生命周期管理：
+  - **Keepalive：** 利用 QUIC 内置 keepalive + 应用层心跳（可选）
+  - **自动重连：** 连接断开后指数退避重连（初始 1s，最大 30s）
+  - **0-RTT 重连：** 启用 QUIC 0-RTT，断线后快速恢复
+  - **连接迁移：** 利用 QUIC 连接迁移特性，IP 变化时不断连
+  - **优雅关闭：** 收到 shutdown 信号后，等待进行中的 Stream 完成再关闭
+- Client 包装层 `ManagedClient`：
+  - 自动管理连接生命周期
+  - 连接断开时自动重连
+  - 重连后恢复所有 Import listener
+  - 连接状态回调（Connected/Disconnected/Reconnecting）
+- 单元测试：
+  - 模拟连接中断 → 验证自动重连
+  - 优雅关闭 → 验证进行中 Stream 完成
+  - 重连延迟不超过 10 秒（FR-6 标准）
+
+**依赖：** S16
+
+**验收：** 隧道断开后 10 秒内自动重连；优雅关闭完成所有进行中 Stream
+
+---
+
+#### S18: 吞吐基准测试与集成测试
+
+**内容：**
+- `pkg/tunnel/tunnel_bench_test.go` — 基准测试：
+  - 单 Stream 吞吐量测试（目标：≥100 Mbps）
+  - 10 Service 多路复用吞吐测试（目标：退化 ≤10%）
+  - Stream 打开/关闭延迟测试
+  - 连接建立延迟测试
+- `pkg/tunnel/tunnel_integration_test.go` — 集成测试：
+  - 端到端：Client → QUIC Tunnel → Server → TCP echo service → 验证数据一致性
+  - 多 Service 并发：10 个 Service 同时通信
+  - 大数据传输：传输 100MB 数据验证完整性
+  - 重连场景：断开 → 重连 → 恢复通信
+  - 优雅关闭：shutdown 期间不丢数据
+- Makefile 增加 `bench-tunnel` 目标
+
+**依赖：** S17
+
+**验收：**
+- 单 Stream 吞吐 ≥100 Mbps（千兆网络）
+- 10 Service 多路复用退化 ≤10%
+- 所有集成测试通过
+
+---
+
+### Story Dependency Graph
+
+```
+S13: QUIC 隧道库脚手架 + TLS
+  │
+  ▼
+S14: Tunnel Server（Stream 路由）
+  │
+  ▼
+S15: Tunnel Client（Stream 转发）
+  │
+  ▼
+S16: Service-Stream 多路复用
+  │
+  ▼
+S17: 连接生命周期（Keepalive/重连/关闭）
+  │
+  ▼
+S18: 吞吐基准测试 + 集成测试
+```
 
 ---
 
