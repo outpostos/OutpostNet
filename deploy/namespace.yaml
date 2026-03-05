@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: outpostnet-system
+  labels:
+    app.kubernetes.io/name: outpostnet
+    app.kubernetes.io/part-of: outpostnet

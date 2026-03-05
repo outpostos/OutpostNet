@@ -1,0 +1,76 @@
+# Example: Echo server pod (Pod B) with sidecar exporting TCP service
+#
+# This pod runs a simple echo server on port 8080 and the sidecar
+# exports it as "echo-service" through the OutpostNet server.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-server-sidecar-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: echo-server
+    app.kubernetes.io/part-of: outpostnet-example
+data:
+  sidecar.yaml: |
+    server: "/var/run/outpostnet/server.sock"
+    sidecar_id: "echo-server"
+    heartbeat_interval: "10s"
+    exports:
+      - name: "echo-service"
+        local_port: 8080
+        protocol: "tcp"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: echo-server
+  namespace: default
+  labels:
+    app.kubernetes.io/name: echo-server
+    app.kubernetes.io/part-of: outpostnet-example
+spec:
+  containers:
+    # Application container - simple echo server
+    - name: app
+      image: hashicorp/http-echo:latest
+      args:
+        - "-listen=:8080"
+        - "-text=Hello from echo-server!"
+      ports:
+        - containerPort: 8080
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+    # OutpostNet sidecar - exports echo-service
+    - name: sidecar
+      image: outpostnet-sidecar:latest
+      imagePullPolicy: IfNotPresent
+      args:
+        - --config=/etc/outpostnet/sidecar.yaml
+      volumeMounts:
+        - name: sidecar-config
+          mountPath: /etc/outpostnet
+          readOnly: true
+        - name: outpostnet-socket
+          mountPath: /var/run/outpostnet
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+  volumes:
+    - name: sidecar-config
+      configMap:
+        name: echo-server-sidecar-config
+    - name: outpostnet-socket
+      hostPath:
+        path: /var/run/outpostnet
+        type: DirectoryOrCreate

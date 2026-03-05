@@ -1,0 +1,72 @@
+# Example: Echo client pod (Pod A) with sidecar importing TCP service
+#
+# This pod imports "echo-service" on local port 9090. The application
+# can connect to localhost:9090 to reach the echo server via OutpostNet.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-client-sidecar-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: echo-client
+    app.kubernetes.io/part-of: outpostnet-example
+data:
+  sidecar.yaml: |
+    server: "/var/run/outpostnet/server.sock"
+    sidecar_id: "echo-client"
+    heartbeat_interval: "10s"
+    imports:
+      - name: "echo-service"
+        listen_port: 9090
+        protocol: "tcp"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: echo-client
+  namespace: default
+  labels:
+    app.kubernetes.io/name: echo-client
+    app.kubernetes.io/part-of: outpostnet-example
+spec:
+  containers:
+    # Application container - busybox for manual testing
+    - name: app
+      image: busybox:1.37
+      command: ["sh", "-c", "echo 'echo-client ready'; sleep 3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+    # OutpostNet sidecar - imports echo-service on :9090
+    - name: sidecar
+      image: outpostnet-sidecar:latest
+      imagePullPolicy: IfNotPresent
+      args:
+        - --config=/etc/outpostnet/sidecar.yaml
+      volumeMounts:
+        - name: sidecar-config
+          mountPath: /etc/outpostnet
+          readOnly: true
+        - name: outpostnet-socket
+          mountPath: /var/run/outpostnet
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+  volumes:
+    - name: sidecar-config
+      configMap:
+        name: echo-client-sidecar-config
+    - name: outpostnet-socket
+      hostPath:
+        path: /var/run/outpostnet
+        type: DirectoryOrCreate

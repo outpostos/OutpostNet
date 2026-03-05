@@ -106,8 +106,20 @@ clean-all: clean
 # Docker targets
 docker-build:
 	@echo "Building Docker images..."
-	@docker build -t outpostnet-server:$(VERSION) -f docker/Dockerfile.server .
-	@docker build -t outpostnet-sidecar:$(VERSION) -f docker/Dockerfile.sidecar .
+	docker build -t outpostnet-server:$(VERSION) -t outpostnet-server:latest \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f build/docker/Dockerfile.server .
+	docker build -t outpostnet-sidecar:$(VERSION) -t outpostnet-sidecar:latest \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f build/docker/Dockerfile.sidecar .
+
+# K8s E2E test
+e2e-k8s:
+	@echo "Running K8s E2E test..."
+	./hack/e2e-k8s.sh
+
+e2e-k8s-cleanup:
+	./hack/e2e-k8s.sh cleanup
 
 # Release targets
 release: clean fmt vet test

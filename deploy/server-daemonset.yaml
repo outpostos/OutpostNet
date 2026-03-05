@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: outpostnet-server
+  namespace: outpostnet-system
+  labels:
+    app.kubernetes.io/name: outpostnet-server
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: outpostnet
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outpostnet-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outpostnet-server
+        app.kubernetes.io/component: server
+        app.kubernetes.io/part-of: outpostnet
+    spec:
+      hostPID: false
+      hostNetwork: false
+      containers:
+        - name: server
+          image: outpostnet-server:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/outpostnet/server.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/outpostnet
+              readOnly: true
+            - name: socket-dir
+              mountPath: /var/run/outpostnet
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            exec:
+              command:
+                - test
+                - -S
+                - /var/run/outpostnet/server.sock
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: outpostnet-server-config
+        - name: socket-dir
+          hostPath:
+            path: /var/run/outpostnet
+            type: DirectoryOrCreate
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
