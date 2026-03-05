@@ -106,7 +106,12 @@ func runController(opts Options) error {
 	}
 	setupLog.Info("registered pod reconciler")
 
-	// TODO: Register EndpointSlice reconciler in S11.
+	// Register EndpointSlice reconciler for service discovery.
+	if err := (&reconciler.EndpointSliceReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to set up endpointslice reconciler")
+		os.Exit(1)
+	}
+	setupLog.Info("registered endpointslice reconciler")
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
