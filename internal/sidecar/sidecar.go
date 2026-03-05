@@ -52,22 +52,35 @@ type Sidecar struct {
 	mu      sync.RWMutex
 	streams map[uint32]net.Conn // streamID -> local TCP/UDP connection
 
+	// UDP session tracking for import side.
+	udpMu       sync.RWMutex
+	udpSessions map[string]*udpSession // "srcAddr" -> session (import side)
+
 	// Connect serialization: only one Connect request in flight at a time.
 	connectMu sync.Mutex
 	connectCh chan *protocol.ConnectAckPayload
 
 	importListeners []net.Listener
+	importUDPConns  []net.PacketConn
 
 	done chan struct{}
+}
+
+// udpSession tracks a UDP "connection" on the import side, identified by source address.
+type udpSession struct {
+	streamID uint32
+	srcAddr  net.Addr
+	lastSeen time.Time
 }
 
 // New creates a new Sidecar.
 func New(config Config) *Sidecar {
 	return &Sidecar{
-		config:    config,
-		streams:   make(map[uint32]net.Conn),
-		connectCh: make(chan *protocol.ConnectAckPayload, 1),
-		done:      make(chan struct{}),
+		config:      config,
+		streams:     make(map[uint32]net.Conn),
+		udpSessions: make(map[string]*udpSession),
+		connectCh:   make(chan *protocol.ConnectAckPayload, 1),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -121,6 +134,9 @@ func (s *Sidecar) Stop() {
 
 	for _, ln := range s.importListeners {
 		ln.Close()
+	}
+	for _, pc := range s.importUDPConns {
+		pc.Close()
 	}
 
 	s.mu.Lock()
@@ -203,21 +219,28 @@ func (s *Sidecar) registerExport(exp ExportEntry) error {
 // --- Import side (S3) ---
 
 func (s *Sidecar) startImportListener(imp ImportEntry) error {
-	if imp.Protocol != protocol.ProtoTCP {
-		// UDP import listeners will be added in S4.
-		return nil
-	}
-
 	addr := fmt.Sprintf("127.0.0.1:%d", imp.ListenPort)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+
+	switch imp.Protocol {
+	case protocol.ProtoTCP:
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen tcp %s: %w", addr, err)
+		}
+		s.importListeners = append(s.importListeners, ln)
+		log.Printf("[sidecar] import listener (tcp): %s -> %s", imp.Name, addr)
+		go s.acceptImportConnections(ln, imp)
+
+	case protocol.ProtoUDP:
+		pc, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			return fmt.Errorf("listen udp %s: %w", addr, err)
+		}
+		s.importUDPConns = append(s.importUDPConns, pc)
+		log.Printf("[sidecar] import listener (udp): %s -> %s", imp.Name, addr)
+		go s.handleUDPImport(pc, imp)
 	}
 
-	s.importListeners = append(s.importListeners, ln)
-	log.Printf("[sidecar] import listener: %s -> %s", imp.Name, addr)
-
-	go s.acceptImportConnections(ln, imp)
 	return nil
 }
 
@@ -286,6 +309,80 @@ func (s *Sidecar) requestConnect(serviceName string, proto protocol.ServiceProto
 		return 0, fmt.Errorf("connect timeout")
 	}
 }
+
+// --- UDP import side (S4) ---
+
+func (s *Sidecar) handleUDPImport(pc net.PacketConn, imp ImportEntry) {
+	buf := make([]byte, 65535)
+	for {
+		n, srcAddr, err := pc.ReadFrom(buf)
+		if err != nil {
+			select {
+			case <-s.done:
+			default:
+				log.Printf("[sidecar] udp import read %s: %v", imp.Name, err)
+			}
+			return
+		}
+
+		key := srcAddr.String()
+
+		s.udpMu.RLock()
+		session, ok := s.udpSessions[key]
+		s.udpMu.RUnlock()
+
+		if !ok {
+			// New UDP session: request a stream from Server.
+			streamID, err := s.requestConnect(imp.Name, protocol.ProtoUDP)
+			if err != nil {
+				log.Printf("[sidecar] udp connect for %s from %s: %v", imp.Name, key, err)
+				continue
+			}
+			session = &udpSession{
+				streamID: streamID,
+				srcAddr:  srcAddr,
+				lastSeen: time.Now(),
+			}
+			s.udpMu.Lock()
+			s.udpSessions[key] = session
+			s.udpMu.Unlock()
+
+			// Store the PacketConn as the stream's "connection" for reverse data.
+			// We use a udpImportConn wrapper to route replies back to the right srcAddr.
+			wrapper := &udpImportConn{pc: pc, srcAddr: srcAddr}
+			s.mu.Lock()
+			s.streams[streamID] = wrapper
+			s.mu.Unlock()
+
+			log.Printf("[sidecar] udp session %s -> stream %d (service=%s)", key, streamID, imp.Name)
+		}
+
+		session.lastSeen = time.Now()
+
+		// Forward datagram to server.
+		s.codec.WriteFrame(&protocol.Frame{
+			Type:     protocol.MsgTypeData,
+			StreamID: session.streamID,
+			Payload:  buf[:n],
+		})
+	}
+}
+
+// udpImportConn wraps a PacketConn for the import side,
+// allowing handleData to write replies back to the correct source address.
+type udpImportConn struct {
+	pc      net.PacketConn
+	srcAddr net.Addr
+}
+
+func (u *udpImportConn) Read(b []byte) (int, error)         { return 0, fmt.Errorf("not used") }
+func (u *udpImportConn) Write(b []byte) (int, error)        { return u.pc.WriteTo(b, u.srcAddr) }
+func (u *udpImportConn) Close() error                       { return nil } // Don't close shared PacketConn.
+func (u *udpImportConn) LocalAddr() net.Addr                { return u.pc.LocalAddr() }
+func (u *udpImportConn) RemoteAddr() net.Addr               { return u.srcAddr }
+func (u *udpImportConn) SetDeadline(t time.Time) error      { return nil }
+func (u *udpImportConn) SetReadDeadline(t time.Time) error  { return nil }
+func (u *udpImportConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // --- Heartbeat ---
 
@@ -391,7 +488,17 @@ func (s *Sidecar) handleOpenStream(frame *protocol.Frame) {
 
 	// Connect to local app.
 	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
-	localConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	var localConn net.Conn
+
+	switch os.Protocol {
+	case protocol.ProtoTCP:
+		localConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+	case protocol.ProtoUDP:
+		localConn, err = net.Dial("udp", addr)
+	default:
+		err = fmt.Errorf("unsupported protocol %d", os.Protocol)
+	}
+
 	if err != nil {
 		log.Printf("[sidecar] connect to local %s: %v", addr, err)
 		s.codec.WriteFrame(&protocol.Frame{
@@ -410,7 +517,7 @@ func (s *Sidecar) handleOpenStream(frame *protocol.Frame) {
 	s.streams[os.StreamID] = localConn
 	s.mu.Unlock()
 
-	log.Printf("[sidecar] opened stream %d -> local %s (service=%s)", os.StreamID, addr, os.ServiceName)
+	log.Printf("[sidecar] opened stream %d -> local %s (service=%s, proto=%d)", os.StreamID, addr, os.ServiceName, os.Protocol)
 
 	s.codec.WriteFrame(&protocol.Frame{
 		Type:     protocol.MsgTypeOpenStreamAck,
