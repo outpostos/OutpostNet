@@ -236,7 +236,209 @@ S6: K8s 部署
 
 **验收：** Pod 添加注解后，Sidecar 自动注入，Service DNS 可达
 
-*Stories TBD — 在 Epic 1 完成后细化*
+### Architecture
+
+```
+用户操作：在 Pod/Deployment 上添加 OutpostNet 注解
+                    │
+                    ▼
+┌──────────────────────────────────────────────────┐
+│         OutpostNet Controller (Deployment)        │
+│                                                  │
+│  1. Mutating Webhook                             │
+│     - 拦截 Pod 创建请求                            │
+│     - 解析注解 → 注入 Sidecar 容器 + Volume        │
+│                                                  │
+│  2. Pod Reconciler                               │
+│     - 监听带注解的 Pod                              │
+│     - 自动生成 Sidecar ConfigMap                   │
+│     - 清理已删除 Pod 的 ConfigMap                   │
+│                                                  │
+│  3. EndpointSlice Reconciler                     │
+│     - 为导出的服务创建 K8s Service                  │
+│     - 管理 EndpointSlice → CoreDNS 可解析          │
+└──────────────────────────────────────────────────┘
+```
+
+**注解格式：**
+```yaml
+metadata:
+  annotations:
+    outpostnet.io/inject: "true"
+    outpostnet.io/exports: "web-service:8080:tcp,metrics:9090:tcp"
+    outpostnet.io/imports: "db-service:3306:tcp,cache:6379:tcp"
+```
+
+**自动化数据流：**
+```
+1. 用户创建带注解的 Pod
+   → Webhook 拦截，注入 Sidecar 容器 + socket volume
+2. Pod 调度到节点
+   → Pod Reconciler 检测，生成 ConfigMap（含 exports/imports）
+3. Sidecar 启动，读取 ConfigMap，连接节点上的 Server
+   → 注册导出服务 / 监听导入端口
+4. EndpointSlice Reconciler 检测导出服务
+   → 创建 K8s Service + EndpointSlice
+   → CoreDNS 可解析服务名
+```
+
+### Components
+
+| 组件 | 说明 |
+|------|------|
+| `cmd/outpostnet-controller` | Controller Manager，包含 Webhook + Reconcilers |
+| `pkg/annotations` | 注解解析与验证库 |
+| `internal/controller/webhook` | Mutating Webhook 实现 |
+| `internal/controller/reconciler` | Pod + EndpointSlice Reconciler |
+
+### Stories
+
+---
+
+#### S7: Controller 项目脚手架
+
+**内容：**
+- 添加 `controller-runtime` 和 `client-go` 依赖
+- `cmd/outpostnet-controller/main.go` + `cmd/outpostnet-controller/app/controller.go`
+  - Cobra CLI + controller-runtime Manager 启动
+  - 健康检查端点 (/healthz, /readyz)
+- RBAC 清单：
+  - ServiceAccount, ClusterRole, ClusterRoleBinding
+  - 权限：Pods (get/list/watch), ConfigMaps (get/list/watch/create/update/delete), Services (create/update/delete), EndpointSlices (create/update/delete)
+- Controller Deployment 清单
+- Makefile 增加 `build-controller` 目标
+- Dockerfile
+
+**依赖：** S6 (Epic 1)
+
+**验收：** `make build-controller` 编译成功，Controller 进程启动后健康检查端点可达
+
+---
+
+#### S8: 注解规范与解析库
+
+**内容：**
+- 定义注解格式：
+  ```
+  outpostnet.io/inject: "true"                           # 是否注入 Sidecar
+  outpostnet.io/exports: "name:port:protocol,..."        # 导出服务列表
+  outpostnet.io/imports: "name:listenPort:protocol,..."  # 导入服务列表
+  outpostnet.io/sidecar-id: "custom-id"                  # 可选：自定义 Sidecar ID
+  ```
+- `pkg/annotations/` 包：
+  - `Parse(pod)` → 解析 Pod 注解为结构化数据
+  - `HasOutpostNet(pod)` → 是否标记了 OutpostNet 注解
+  - `Validate()` → 校验注解格式
+- 完整单元测试（正常值、边界值、非法值）
+
+**依赖：** S7
+
+**验收：** 注解解析库能正确解析各种注解格式，单元测试全部通过
+
+---
+
+#### S9: Mutating Webhook — Sidecar 自动注入
+
+**内容：**
+- Webhook Server 启动（TLS 证书通过 controller-runtime 内置 cert 管理或挂载 Secret）
+- MutatingWebhookConfiguration 清单
+- Pod 创建时拦截逻辑：
+  1. 检查 `outpostnet.io/inject: "true"` 注解
+  2. 解析 exports/imports 注解
+  3. 注入 Sidecar 容器（image、args、volumeMounts）
+  4. 注入共享 Volume（hostPath: `/var/run/outpostnet`）
+  5. 注入 ConfigMap Volume（由 S10 的 Reconciler 创建）
+  6. 添加 label `outpostnet.io/injected: "true"` 标记已注入
+- 幂等性：已注入的 Pod 不重复注入
+- 单元测试：mock admission request
+
+**依赖：** S8
+
+**验收：** 创建带注解的 Pod 时，Webhook 自动注入 Sidecar 容器和必要的 Volume
+
+---
+
+#### S10: ConfigMap 自动生成
+
+**内容：**
+- Pod Reconciler：
+  1. Watch 带 `outpostnet.io/injected: "true"` label 的 Pod
+  2. Pod 创建/更新时，从注解生成 Sidecar YAML 配置
+  3. 创建 ConfigMap `outpostnet-sidecar-{pod-name}`，内容为 sidecar.yaml
+  4. ConfigMap 设置 OwnerReference → Pod 删除时自动 GC
+- 配置生成逻辑：
+  ```yaml
+  server: "/var/run/outpostnet/server.sock"
+  sidecar_id: "{pod-name}"
+  heartbeat_interval: "10s"
+  exports: [从注解解析]
+  imports: [从注解解析]
+  ```
+- 处理 Pod 重建场景（ConfigMap 已存在时更新）
+
+**依赖：** S9
+
+**验收：** 带注解的 Pod 创建后，对应的 ConfigMap 自动生成；Pod 删除后 ConfigMap 自动清理
+
+---
+
+#### S11: EndpointSlice 与 Service 管理
+
+**内容：**
+- EndpointSlice Reconciler：
+  1. Watch 带导出注解的 Pod
+  2. 为每个唯一的导出服务名创建 headless Service（`{service-name}.{namespace}`）
+  3. 创建 EndpointSlice，端点指向 Pod IP + Sidecar 导入端口
+  4. Pod 就绪/删除时更新 EndpointSlice
+- Service 标签：`app.kubernetes.io/managed-by: outpostnet-controller`
+- CoreDNS 集成验证：`nslookup {service-name}.{namespace}.svc.cluster.local`
+- 处理多 Pod 导出同一服务的场景（聚合端点）
+
+**依赖：** S10
+
+**验收：** 导出服务的 Pod 创建后，K8s Service 和 EndpointSlice 自动创建；其他 Pod 通过 Service DNS 名称可解析到正确端点
+
+---
+
+#### S12: K8s E2E 集成验证
+
+**内容：**
+- 部署 Controller 到集群
+- 测试场景：
+  1. 创建带注解的 echo-server Deployment → 验证 Sidecar 注入
+  2. 验证 ConfigMap 自动生成
+  3. 创建带注解的 echo-client Deployment → 验证 Sidecar 注入
+  4. 验证 echo-client 通过 Service DNS 访问 echo-server
+  5. 删除 Pod → 验证 ConfigMap 和 EndpointSlice 清理
+- E2E 测试脚本 `hack/e2e-controller.sh`
+- 示例 Deployment YAML（取代 Epic 1 手动 Pod YAML）
+
+**依赖：** S11
+
+**验收：** 用户只需在 Deployment 上添加 OutpostNet 注解，无需手动编写 ConfigMap 或 Sidecar 容器定义，服务通过 DNS 名称可达
+
+---
+
+### Story Dependency Graph
+
+```
+S7: Controller 脚手架
+  │
+  ▼
+S8: 注解规范与解析
+  │
+  ▼
+S9: Webhook Sidecar 注入
+  │
+  ▼
+S10: ConfigMap 自动生成
+  │
+  ▼
+S11: EndpointSlice 管理
+  │
+  ▼
+S12: E2E 集成验证
+```
 
 ---
 
