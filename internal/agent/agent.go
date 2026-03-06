@@ -18,9 +18,11 @@ type Agent struct {
 	cfg    *agentconfig.Config
 	logger *slog.Logger
 
-	tunnels      *TunnelManager
-	persistence  *Persistence
-	healthServer *http.Server
+	tunnels       *TunnelManager
+	persistence   *Persistence
+	metrics       *Metrics
+	healthServer  *http.Server
+	metricsServer *http.Server
 
 	mu     sync.Mutex
 	ready  bool
@@ -58,6 +60,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		return fmt.Errorf("start health server: %w", err)
 	}
 	defer a.stopHealthServer()
+
+	// Start metrics server.
+	a.metrics = NewMetrics()
+	if err := a.startMetricsServer(); err != nil {
+		return fmt.Errorf("start metrics server: %w", err)
+	}
+	defer a.stopMetricsServer()
 
 	// Initialize persistence if enabled.
 	if a.cfg.Persistence.IsEnabled() {
@@ -126,6 +135,40 @@ func (a *Agent) startHealthServer() error {
 		return err
 	case <-time.After(100 * time.Millisecond):
 		return nil
+	}
+}
+
+func (a *Agent) startMetricsServer() error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", a.metrics.Handler())
+
+	a.metricsServer = &http.Server{
+		Addr:              a.cfg.Metrics.Addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := a.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(100 * time.Millisecond):
+		a.logger.Info("metrics server started", "addr", a.cfg.Metrics.Addr)
+		return nil
+	}
+}
+
+func (a *Agent) stopMetricsServer() {
+	if a.metricsServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		a.metricsServer.Shutdown(ctx)
 	}
 }
 

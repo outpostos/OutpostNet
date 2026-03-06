@@ -25,10 +25,11 @@ func freePort(t *testing.T) int {
 
 func TestAgentHealthEndpoints(t *testing.T) {
 	port := freePort(t)
+	metricsPort := freePort(t)
 	cfg := &agentconfig.Config{
 		Region:     "test-region",
 		HealthAddr: fmt.Sprintf("127.0.0.1:%d", port),
-		Metrics:    agentconfig.MetricsConfig{Addr: ":0"},
+		Metrics:    agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", metricsPort)},
 		Persistence: agentconfig.PersistenceConfig{
 			Dir: t.TempDir(),
 		},
