@@ -146,6 +146,13 @@ e2e-controller:
 e2e-controller-cleanup:
 	./hack/e2e-controller.sh cleanup
 
+e2e-cross-region:
+	@echo "Running Cross-Region E2E test..."
+	./hack/e2e-cross-region.sh
+
+e2e-cross-region-cleanup:
+	./hack/e2e-cross-region.sh cleanup
+
 # Tunnel benchmarks
 bench-tunnel:
 	@echo "Running QUIC tunnel benchmarks..."
