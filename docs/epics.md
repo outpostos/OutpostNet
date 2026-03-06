@@ -680,7 +680,267 @@ S18: 吞吐基准测试 + 集成测试
 
 **验收：** 两区域端到端：注解 → 隧道 → 跨区域 Service DNS 可达
 
-*Stories TBD*
+### Architecture
+
+```
+区域 A (边缘)                                    区域 B (云端)
+┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
+│  Pod (app + sidecar)                 │        │  Pod (app + sidecar)                 │
+│  annotations:                        │        │  annotations:                        │
+│    outpostnet.io/exports: svc-a:80   │        │    outpostnet.io/exports: svc-b:3306 │
+│    outpostnet.io/region: edge-a      │        │    outpostnet.io/region: cloud       │
+│           │                          │        │           │                          │
+│           ▼                          │        │           ▼                          │
+│  OutpostNet Server (DaemonSet)       │        │  OutpostNet Server (DaemonSet)       │
+│  /var/run/outpostnet/server.sock     │        │  /var/run/outpostnet/server.sock     │
+│           │                          │        │           │                          │
+│           ▼                          │        │           ▼                          │
+│  OutpostNet Agent (DaemonSet)        │        │  OutpostNet Agent (DaemonSet)        │
+│  ┌─────────────────────────────┐     │        │  ┌─────────────────────────────┐     │
+│  │ Tunnel Client → svc-b      │─────┼────────┼──│ Tunnel Server ← streams     │     │
+│  │ Tunnel Server ← streams    │◄────┼────────┼──│ Tunnel Client → svc-a       │     │
+│  └─────────────────────────────┘     │        │  └─────────────────────────────┘     │
+└──────────────────────────────────────┘        └──────────────────────────────────────┘
+                    ▲                                            ▲
+                    │         Controller (云端)                   │
+                    │    ┌──────────────────────────┐            │
+                    └────│  Region Reconciler        │────────────┘
+                         │  - 检测跨区域注解          │
+                         │  - 生成 Agent ConfigMap    │
+                         │  - 管理跨区域 Service/EP   │
+                         └──────────────────────────┘
+```
+
+**跨区域数据流：**
+```
+Region A App 访问 svc-b (Region B 的服务):
+  1. App → Sidecar A (import svc-b, localhost:3306)
+  2. Sidecar A → Server A (Unix socket)
+  3. Server A → Agent A (本地注册的 svc-b 由 Agent tunnel-client 导出)
+  4. Agent A Tunnel Client → QUIC Stream → Agent B Tunnel Server
+  5. Agent B → Server B (Unix socket, 转发到 svc-b 导出方)
+  6. Server B → Sidecar B → App B (:3306)
+```
+
+**区域标识：**
+```yaml
+# Node label 标识区域
+metadata:
+  labels:
+    outpostnet.io/region: "edge-a"
+
+# Pod 注解声明跨区域服务
+metadata:
+  annotations:
+    outpostnet.io/inject: "true"
+    outpostnet.io/region: "edge-a"
+    outpostnet.io/exports: "my-api:8080:tcp"
+    outpostnet.io/imports: "cloud-db:3306:tcp@cloud"  # @region 表示跨区域导入
+```
+
+**Agent 配置格式（Controller 生成）：**
+```yaml
+region: "edge-a"
+tunnels:
+  - remote_region: "cloud"
+    remote_addr: "cloud-gateway.example.com:4242"
+    role: "client"  # 或 "server"
+    tls:
+      insecure: false
+      ca_cert: "/etc/outpostnet/ca.pem"
+exports:
+  - name: "my-api"
+    local_addr: "127.0.0.1:8080"
+    protocol: "tcp"
+imports:
+  - name: "cloud-db"
+    listen_addr: "127.0.0.1:3306"
+    remote_region: "cloud"
+    protocol: "tcp"
+persistence:
+  dir: "/var/lib/outpostnet"
+metrics:
+  addr: ":9090"
+```
+
+### Components
+
+| 组件 | 说明 |
+|------|------|
+| `cmd/outpostnet-agent` | 边缘节点 Agent，管理 QUIC 隧道，桥接本地 Server |
+| `internal/agent` | Agent 核心逻辑：隧道管理、配置监听、持久化 |
+| `internal/controller/reconciler/region_reconciler.go` | 跨区域 Service 关系检测与配置生成 |
+| `pkg/agentconfig` | Agent 配置格式定义与加载 |
+| `deploy/agent-daemonset.yaml` | Agent DaemonSet 部署清单 |
+
+### Stories
+
+---
+
+#### S19: Agent 脚手架与配置格式
+
+**内容：**
+- `cmd/outpostnet-agent/main.go` + `cmd/outpostnet-agent/app/agent.go`
+  - Cobra CLI，flags: --config, --region, --metrics-addr, --persistence-dir
+  - 健康检查端点 (/healthz, /readyz)
+  - 信号处理 (SIGTERM → graceful shutdown)
+- `pkg/agentconfig/` — Agent 配置定义：
+  - `AgentConfig` 结构体：region, tunnels, exports, imports, persistence, metrics
+  - `LoadConfig(path)` — 从 YAML 加载
+  - `ValidateConfig()` — 校验
+- Agent DaemonSet 部署清单 + RBAC
+- Dockerfile
+- Makefile 增加 `build-agent` 目标
+
+**依赖：** S18 (Epic 3)
+
+**验收：** `make build-agent` 编译成功，Agent 进程启动后健康检查可达
+
+---
+
+#### S20: Agent 隧道管理 — QUIC 隧道建立与桥接
+
+**内容：**
+- `internal/agent/tunnel_manager.go` — 隧道管理器：
+  - 根据配置创建 Tunnel Server 或 Tunnel Client
+  - Server 模式：接受远程连接，路由 Stream 到本地服务
+  - Client 模式：连接远端，为导入服务打开 Stream
+  - 使用 `pkg/tunnel.ManagedClient` 实现自动重连
+- `internal/agent/bridge.go` — 本地桥接：
+  - Agent 向本地 OutpostNet Server 注册导出服务（通过 Unix socket）
+  - Agent 作为代理：远程隧道 ↔ 本地 Server
+- Agent main 集成：启动 → 加载配置 → 建立隧道 → 注册服务
+- 优雅关闭：SIGTERM → 等待 Stream 完成 → 关闭隧道
+- 单元测试：隧道建立、桥接逻辑
+
+**依赖：** S19
+
+**验收：** Agent 启动后根据配置建立 QUIC 隧道，跨进程 TCP 通信通过隧道可达
+
+---
+
+#### S21: 配置持久化与断网恢复
+
+**内容：**
+- `internal/agent/persistence.go` — 配置持久化：
+  - 收到新配置时写入本地文件 (`/var/lib/outpostnet/config.yaml`)
+  - Agent 重启时优先从本地文件加载
+  - 配置版本号跟踪，避免回退
+- `internal/agent/config_watcher.go` — ConfigMap 监听：
+  - Watch K8s ConfigMap 变更
+  - 配置变更时热更新隧道（新增/删除隧道，不影响已有连接）
+  - 云端不可达时使用本地持久化配置
+- 测试场景：
+  - Agent 重启 → 从本地配置恢复
+  - 断网 → 使用最后有效配置继续运行
+
+**依赖：** S20
+
+**验收：** Agent 重启后 5 秒内恢复隧道；断网后使用本地配置正常运行 (FR-7, NFR-4)
+
+---
+
+#### S22: Controller 扩展 — 跨区域隧道配置生成
+
+**内容：**
+- 跨区域注解扩展：
+  - `outpostnet.io/region: "<region>"` — 标识 Pod 所在区域
+  - `outpostnet.io/imports: "svc:port:proto@region"` — `@region` 表示跨区域导入
+- `internal/controller/reconciler/region_reconciler.go` — Region Reconciler：
+  - Watch 带区域注解的 Pod
+  - 检测跨区域服务关系（A.imports 引用了 B.exports）
+  - 为每个区域生成 Agent ConfigMap（隧道配置）
+  - 为跨区域导入的服务创建本地 Service + EndpointSlice（指向 Agent 代理端口）
+- Agent ConfigMap 生成逻辑：
+  ```yaml
+  # 生成到 edge-a 区域的 Agent ConfigMap
+  region: edge-a
+  tunnels:
+    - remote_region: cloud
+      remote_addr: <cloud-agent-service>:4242
+      role: client
+  imports:
+    - name: cloud-db
+      listen_addr: "0.0.0.0:13306"
+      remote_region: cloud
+  ```
+- Controller main 注册新 Reconciler
+
+**依赖：** S21
+
+**验收：** 带跨区域注解的 Pod 创建后，Controller 自动生成 Agent ConfigMap 和代理 Service
+
+---
+
+#### S23: Prometheus 指标与可观测性
+
+**内容：**
+- Agent `/metrics` 端点（Prometheus 格式）：
+  - `outpostnet_tunnel_state` — 隧道连接状态 (gauge: 0=disconnected, 1=connected)
+  - `outpostnet_active_streams` — 当前活跃 Stream 数 (gauge)
+  - `outpostnet_bytes_sent_total` — 发送字节数 (counter)
+  - `outpostnet_bytes_received_total` — 接收字节数 (counter)
+  - `outpostnet_reconnect_total` — 重连次数 (counter)
+  - `outpostnet_stream_latency_seconds` — Stream 建立延迟 (histogram)
+  - `outpostnet_config_reload_total` — 配置重载次数 (counter)
+- `internal/agent/metrics.go` — 指标收集与注册
+- Agent DaemonSet 添加 Prometheus annotation
+- 单元测试：验证指标注册和更新
+
+**依赖：** S20
+
+**验收：** `curl agent:9090/metrics` 返回 Prometheus 格式指标，包含所有关键指标 (NFR-5)
+
+---
+
+#### S24: 跨区域端到端 E2E 测试
+
+**内容：**
+- 部署清单：
+  - Agent DaemonSet（每个区域）
+  - 示例 Deployment（跨区域注解）
+  - TLS 证书 Secret（测试用自签名证书）
+- `hack/e2e-cross-region.sh` — E2E 测试脚本：
+  1. 部署两个 "区域"（使用 namespace 模拟：`region-a`, `region-b`）
+  2. 在 region-a 部署导出服务（echo-server）
+  3. 在 region-b 部署导入服务（echo-client, 引用 region-a 的 echo-server）
+  4. Controller 生成 Agent 配置
+  5. Agent 建立 QUIC 隧道
+  6. 验证跨区域 TCP 连通性
+  7. 验证 Service DNS 可达
+  8. 断网测试：停止 Controller → 验证已建立隧道继续工作
+  9. 清理
+- SC-1~SC-4 验证：
+  - SC-1: 注解后 30s 内服务可达
+  - SC-2: 单隧道多路复用
+  - SC-3: 断网后通信不中断
+  - SC-4: iptables diff 为空
+
+**依赖：** S22, S23
+
+**验收：** 两区域端到端通信：添加注解 → 隧道自动建立 → Service DNS 可达 → 断网后不中断
+
+---
+
+### Story Dependency Graph
+
+```
+S19: Agent 脚手架
+  │
+  ▼
+S20: Agent 隧道管理
+  │
+  ├──────────────────┐
+  ▼                  ▼
+S21: 配置持久化     S23: Prometheus 指标
+  │
+  ▼
+S22: Controller 跨区域扩展
+  │
+  └──────────────────┐
+                     ▼
+                   S24: 跨区域 E2E 测试
+```
 
 ---
 
