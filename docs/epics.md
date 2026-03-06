@@ -950,4 +950,209 @@ S22: Controller 跨区域扩展
 
 **覆盖 PRD：** FR-8, UJ-4
 
-*Stories TBD*
+**交付物：** Relay 转发逻辑 + Controller 路径计算 + 3 区域 E2E 验证
+
+**验收：** Region A 通过 Region C 中转访问 Region B 的服务，延迟增长 ≤ 2x relay RTT
+
+### Architecture
+
+```
+区域 A (边缘)              区域 C (中继)              区域 B (云端)
+┌──────────────┐          ┌──────────────────┐        ┌──────────────┐
+│  App (import │          │  Agent C         │        │  App (export │
+│  svc-b)      │          │                  │        │  svc-b:3306) │
+│      │       │          │  Tunnel Server   │        │      │       │
+│  Agent A     │          │  ┌────────────┐  │        │  Agent B     │
+│  ┌────────┐  │   QUIC   │  │ Relay Rule │  │  QUIC  │  ┌────────┐ │
+│  │ Client ├──┼──────────┼──│ svc-b → B  ├──┼────────┼──│ Server │ │
+│  └────────┘  │          │  └────────────┘  │        │  └────────┘ │
+└──────────────┘          └──────────────────┘        └──────────────┘
+
+Data flow:
+  App A → Agent A (import proxy) → QUIC Stream → Agent C (relay) → QUIC Stream → Agent B → svc-b
+```
+
+**Relay 核心设计：**
+- Relay 是角色而非专用节点，任何可暴露端口的区域都可充当 Relay
+- Agent 的 Tunnel Server 收到 Stream 后，如果目标服务有 relay 规则，转发到目标区域的 Tunnel Client
+- Stream 级别转发：读 ServiceHeader → 查 relay 规则 → 打开下游 Stream → 双向转发
+- 配置驱动：Controller 计算可达路径，生成含 relay 规则的 Agent ConfigMap
+
+**Relay 配置格式（Controller 生成）：**
+```yaml
+# Region C (relay) 的 Agent 配置
+region: "relay-c"
+tunnels:
+  - remote_region: "edge-a"
+    role: server
+    listen_addr: "0.0.0.0:4242"
+  - remote_region: "cloud-b"
+    role: client
+    remote_addr: "cloud-b-gateway:4242"
+relays:
+  - service: "svc-b"
+    from_region: "edge-a"
+    to_region: "cloud-b"
+    max_hops: 3
+```
+
+### Components
+
+| 组件 | 说明 |
+|------|------|
+| `pkg/agentconfig` | 扩展 RelayConfig 配置 |
+| `internal/agent/relay.go` | Relay 转发逻辑：Stream 级别中继 |
+| `internal/controller/reconciler/region_reconciler.go` | 扩展路径计算，生成 relay 配置 |
+| `internal/agent/metrics.go` | 扩展 relay 相关指标 |
+
+### Stories
+
+---
+
+#### S25: Relay 配置模型
+
+**内容：**
+- `pkg/agentconfig/` — 扩展配置格式：
+  - 新增 `RelayConfig` 结构体：
+    ```go
+    type RelayConfig struct {
+        Service    string `yaml:"service"`      // 被中继的服务名
+        FromRegion string `yaml:"from_region"`  // 请求来源区域
+        ToRegion   string `yaml:"to_region"`    // 转发目标区域
+        MaxHops    int    `yaml:"max_hops"`     // 最大跳数（防环）
+    }
+    ```
+  - `Config.Relays []RelayConfig` — Agent 的 relay 规则列表
+- 配置验证：
+  - `from_region` ≠ `to_region`（不能自己转自己）
+  - `to_region` 必须对应一个已配置的 tunnel（client 角色）
+  - `max_hops` 默认 3，最大 5
+  - 检测循环引用
+- YAML 序列化/反序列化
+- 单元测试：解析、验证、边界值
+
+**依赖：** S24 (Epic 4)
+
+**验收：** Agent 可解析含 relay 规则的配置，验证通过，测试覆盖正常和异常场景
+
+---
+
+#### S26: Agent Relay 转发
+
+**内容：**
+- `internal/agent/relay.go` — Relay 转发器：
+  - `RelayManager` — 管理 relay 规则和转发逻辑
+  - 注册 relay 规则到 tunnel server 的 stream handler
+  - Stream 处理流程：
+    1. 读取 ServiceHeader（服务名）
+    2. 查找 relay 规则（匹配 service + from_region）
+    3. 在目标区域的 tunnel client 上打开新 Stream
+    4. 写入 ServiceHeader 到下游 Stream
+    5. 双向数据转发（上游 Stream ↔ 下游 Stream）
+  - Hop 计数：在 ServiceHeader 后附加 1 字节 hop count
+    - 每次 relay +1，超过 max_hops 时拒绝
+  - 错误处理：下游不可达时关闭上游 Stream 并记录日志
+- `internal/agent/tunnel_manager.go` — 集成 relay：
+  - Server 收到 stream 时，先查本地路由，再查 relay 规则
+  - 提供 `GetClient(region)` 方法供 relay 使用
+- `internal/agent/agent.go` — 集成 RelayManager 到 Agent 生命周期
+- 单元测试：3 个进程模拟 A→C→B relay
+
+**依赖：** S25
+
+**验收：** 3 进程测试：Region A 通过 Region C relay 访问 Region B 的 TCP 服务
+
+---
+
+#### S27: Controller Relay 路径计算
+
+**内容：**
+- `internal/controller/reconciler/region_reconciler.go` — 扩展 Region Reconciler：
+  - 区域可达性矩阵：
+    - 输入：每个区域的 tunnel 配置（已知连接）
+    - 输出：哪些区域对可以直连
+  - 路径计算算法（BFS 最短路径）：
+    - 对每个需要跨区域导入的服务：
+      1. 如果源区域和目标区域可直连：生成直连配置
+      2. 否则：BFS 找最短 relay 路径
+      3. 为路径中的每个 relay 节点生成 relay 规则
+  - Relay ConfigMap 生成：
+    - 为 relay 区域的 Agent 生成包含 relays 字段的配置
+    - 确保 relay 区域有到源和目标区域的 tunnel 配置
+  - 区域连通性注解（可选）：
+    - `outpostnet.io/reachable: "region-a,region-b"` — 声明可达区域
+- 单元测试：
+  - 直连场景（不需要 relay）
+  - 单跳 relay（A→C→B）
+  - 多跳 relay（A→C→D→B）
+  - 不可达场景（无路径）
+
+**依赖：** S26
+
+**验收：** Controller 自动检测不可直连的区域对，计算 relay 路径，生成正确的 Agent ConfigMap
+
+---
+
+#### S28: Relay 指标与可观测性
+
+**内容：**
+- `internal/agent/metrics.go` — 扩展指标：
+  - `outpostnet_relay_streams_total` — relay 处理的 stream 总数 (counter, labels: from_region, to_region, service)
+  - `outpostnet_relay_bytes_total` — relay 转发的字节数 (counter, labels: direction, from_region, to_region)
+  - `outpostnet_relay_active_streams` — 当前活跃的 relay stream 数 (gauge)
+  - `outpostnet_relay_latency_seconds` — relay stream 建立延迟 (histogram)
+  - `outpostnet_relay_errors_total` — relay 错误数 (counter, labels: error_type)
+- `internal/agent/relay.go` — 集成指标收集
+- 健康检查扩展：
+  - `/readyz` 报告 relay 路径健康状态
+  - relay 下游不可达时标记降级
+- 单元测试：验证指标注册和更新
+
+**依赖：** S26
+
+**验收：** `curl agent:9090/metrics` 返回 relay 相关指标，relay stream 计数和字节数准确
+
+---
+
+#### S29: Relay 端到端 E2E 测试
+
+**内容：**
+- `internal/agent/relay_test.go` — Go 集成测试：
+  - 3 个 Agent 进程：A（client）、C（relay）、B（server）
+  - Sub-tests：
+    1. `SC-1_RelayConnectivity` — A 通过 C 访问 B 的 echo 服务
+    2. `SC-2_RelayMultiStream` — 10 并发 stream 通过 relay
+    3. `SC-3_RelayLargeData` — 256KB 数据通过 relay
+    4. `SC-4_RelayHopLimit` — 超过 max_hops 时拒绝
+    5. `SC-5_DirectAndRelay` — 同时有直连和 relay 路径，各自独立工作
+- `hack/e2e-relay.sh` — K8s E2E 测试脚本：
+  - 3 namespace 模拟 3 个区域
+  - 部署 echo server + 3 个 Agent
+  - 验证 relay 连通性、指标、健康检查
+- Makefile 增加 `e2e-relay` 目标
+- FR-8 验证：延迟增长 ≤ 2x relay RTT
+
+**依赖：** S27, S28
+
+**验收：** 3 区域端到端：A→C→B relay 通信成功，指标准确，hop limit 生效
+
+---
+
+### Story Dependency Graph
+
+```
+S25: Relay 配置模型
+  │
+  ▼
+S26: Agent Relay 转发
+  │
+  ├──────────────────┐
+  ▼                  ▼
+S27: Controller     S28: Relay 指标
+ 路径计算
+  │                  │
+  └──────────────────┘
+           │
+           ▼
+         S29: Relay E2E 测试
+```
