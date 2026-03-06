@@ -23,6 +23,9 @@ const (
 	// SidecarIDAnnotation overrides the auto-generated sidecar ID.
 	SidecarIDAnnotation = "outpostnet.io/sidecar-id"
 
+	// RegionAnnotation specifies which edge region the Pod belongs to.
+	RegionAnnotation = "outpostnet.io/region"
+
 	// InjectedLabel is set on Pods that have been injected with a sidecar.
 	InjectedLabel = "outpostnet.io/injected"
 )
@@ -32,6 +35,7 @@ type ServiceEntry struct {
 	Name     string
 	Port     uint16
 	Protocol string // "tcp" or "udp"
+	Region   string // Optional: remote region for cross-region imports (e.g., "cloud")
 }
 
 // PodConfig holds the parsed OutpostNet configuration for a Pod.
@@ -67,6 +71,13 @@ func Parse(annotations map[string]string) (*PodConfig, error) {
 		imports, err := parseServiceList(v)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", ImportsAnnotation, err)
+		}
+		// Parse optional @region suffix from import names.
+		for i := range imports {
+			if name, region, ok := parseRegionSuffix(imports[i].Name); ok {
+				imports[i].Name = name
+				imports[i].Region = region
+			}
 		}
 		cfg.Imports = imports
 	}
@@ -116,6 +127,26 @@ func validateEntry(e ServiceEntry, kind string, idx int) error {
 		return fmt.Errorf("%s[%d] %q: protocol must be tcp or udp, got %q", kind, idx, e.Name, e.Protocol)
 	}
 	return nil
+}
+
+// HasRegion returns the region annotation value if present.
+func HasRegion(annotations map[string]string) (string, bool) {
+	v, ok := annotations[RegionAnnotation]
+	return v, ok && v != ""
+}
+
+// IsCrossRegion returns true if the import entry references a remote region.
+func IsCrossRegion(entry ServiceEntry) bool {
+	return entry.Region != ""
+}
+
+// parseRegionSuffix extracts region from "name@region" format.
+func parseRegionSuffix(name string) (string, string, bool) {
+	idx := strings.LastIndex(name, "@")
+	if idx <= 0 || idx == len(name)-1 {
+		return name, "", false
+	}
+	return name[:idx], name[idx+1:], true
 }
 
 // parseServiceList parses "name:port:protocol,name:port:protocol,..." into entries.

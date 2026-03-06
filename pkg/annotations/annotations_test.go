@@ -195,6 +195,67 @@ func TestParseEmptyAnnotations(t *testing.T) {
 	}
 }
 
+func TestParseCrossRegionImports(t *testing.T) {
+	annos := map[string]string{
+		InjectAnnotation:  "true",
+		ImportsAnnotation: "cloud-db@cloud:3306:tcp,local-svc:8080:tcp",
+	}
+	cfg, err := Parse(annos)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Imports) != 2 {
+		t.Fatalf("imports: got %d, want 2", len(cfg.Imports))
+	}
+	// Cross-region import.
+	if cfg.Imports[0].Name != "cloud-db" {
+		t.Errorf("import[0].Name = %q, want cloud-db", cfg.Imports[0].Name)
+	}
+	if cfg.Imports[0].Region != "cloud" {
+		t.Errorf("import[0].Region = %q, want cloud", cfg.Imports[0].Region)
+	}
+	if cfg.Imports[0].Port != 3306 {
+		t.Errorf("import[0].Port = %d, want 3306", cfg.Imports[0].Port)
+	}
+	// Local import (no region).
+	if cfg.Imports[1].Name != "local-svc" {
+		t.Errorf("import[1].Name = %q, want local-svc", cfg.Imports[1].Name)
+	}
+	if cfg.Imports[1].Region != "" {
+		t.Errorf("import[1].Region = %q, want empty", cfg.Imports[1].Region)
+	}
+}
+
+func TestHasRegion(t *testing.T) {
+	tests := []struct {
+		name   string
+		annos  map[string]string
+		want   string
+		wantOK bool
+	}{
+		{"present", map[string]string{RegionAnnotation: "edge-a"}, "edge-a", true},
+		{"empty", map[string]string{RegionAnnotation: ""}, "", false},
+		{"missing", map[string]string{}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := HasRegion(tt.annos)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("HasRegion() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestIsCrossRegion(t *testing.T) {
+	if IsCrossRegion(ServiceEntry{Name: "svc", Region: ""}) {
+		t.Error("local service should not be cross-region")
+	}
+	if !IsCrossRegion(ServiceEntry{Name: "svc", Region: "cloud"}) {
+		t.Error("service with region should be cross-region")
+	}
+}
+
 func TestParseWithSpaces(t *testing.T) {
 	annos := map[string]string{
 		ExportsAnnotation: " web : 8080 : tcp , dns : 53 : udp ",

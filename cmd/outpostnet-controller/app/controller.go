@@ -113,6 +113,16 @@ func runController(opts Options) error {
 	}
 	setupLog.Info("registered endpointslice reconciler")
 
+	// Register Region reconciler for cross-region Agent config generation.
+	if err := (&reconciler.RegionReconciler{
+		Client:            mgr.GetClient(),
+		DefaultTunnelPort: 4242,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to set up region reconciler")
+		os.Exit(1)
+	}
+	setupLog.Info("registered region reconciler")
+
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited with error")
