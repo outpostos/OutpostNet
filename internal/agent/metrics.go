@@ -18,6 +18,13 @@ type Metrics struct {
 	StreamLatency     prometheus.Histogram
 	ConfigReloadTotal prometheus.Counter
 
+	// Relay metrics.
+	RelayStreamsTotal  *prometheus.CounterVec
+	RelayBytesTotal   *prometheus.CounterVec
+	RelayActiveStreams prometheus.Gauge
+	RelayLatency      prometheus.Histogram
+	RelayErrorsTotal  *prometheus.CounterVec
+
 	registry *prometheus.Registry
 }
 
@@ -62,6 +69,32 @@ func NewMetrics() *Metrics {
 			Help: "Total number of configuration reloads",
 		}),
 
+		RelayStreamsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outpostnet_relay_streams_total",
+			Help: "Total relay streams processed",
+		}, []string{"from_region", "to_region", "service"}),
+
+		RelayBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outpostnet_relay_bytes_total",
+			Help: "Total bytes relayed",
+		}, []string{"direction", "from_region", "to_region"}),
+
+		RelayActiveStreams: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "outpostnet_relay_active_streams",
+			Help: "Current number of active relay streams",
+		}),
+
+		RelayLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "outpostnet_relay_latency_seconds",
+			Help:    "Relay stream establishment latency in seconds",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0},
+		}),
+
+		RelayErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "outpostnet_relay_errors_total",
+			Help: "Total relay errors",
+		}, []string{"error_type"}),
+
 		registry: reg,
 	}
 
@@ -73,6 +106,11 @@ func NewMetrics() *Metrics {
 		m.ReconnectTotal,
 		m.StreamLatency,
 		m.ConfigReloadTotal,
+		m.RelayStreamsTotal,
+		m.RelayBytesTotal,
+		m.RelayActiveStreams,
+		m.RelayLatency,
+		m.RelayErrorsTotal,
 	)
 
 	return m
@@ -125,4 +163,30 @@ func (m *Metrics) Reconnected(region string) {
 // ConfigReloaded increments the config reload counter.
 func (m *Metrics) ConfigReloaded() {
 	m.ConfigReloadTotal.Inc()
+}
+
+// RelayStreamStarted records a new relay stream.
+func (m *Metrics) RelayStreamStarted(fromRegion, toRegion, service string) {
+	m.RelayStreamsTotal.WithLabelValues(fromRegion, toRegion, service).Inc()
+	m.RelayActiveStreams.Inc()
+}
+
+// RelayStreamFinished decrements the active relay stream count.
+func (m *Metrics) RelayStreamFinished() {
+	m.RelayActiveStreams.Dec()
+}
+
+// ObserveRelayLatency records the relay stream establishment latency.
+func (m *Metrics) ObserveRelayLatency(d time.Duration) {
+	m.RelayLatency.Observe(d.Seconds())
+}
+
+// AddRelayBytes adds to the relay bytes counter.
+func (m *Metrics) AddRelayBytes(direction, fromRegion, toRegion string, n int64) {
+	m.RelayBytesTotal.WithLabelValues(direction, fromRegion, toRegion).Add(float64(n))
+}
+
+// RelayError increments the relay error counter.
+func (m *Metrics) RelayError(errorType string) {
+	m.RelayErrorsTotal.WithLabelValues(errorType).Inc()
 }

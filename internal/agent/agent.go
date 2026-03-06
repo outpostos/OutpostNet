@@ -79,7 +79,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// Start tunnel manager if tunnels are configured.
 	if len(a.cfg.Tunnels) > 0 {
-		a.tunnels = NewTunnelManager(a.cfg, a.logger)
+		a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
 		if err := a.tunnels.Start(ctx); err != nil {
 			return fmt.Errorf("start tunnels: %w", err)
 		}

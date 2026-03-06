@@ -22,8 +22,9 @@ import (
 //   - role=client: starts a tunnel.ManagedClient that connects to a remote
 //     server and serves imports as local TCP listeners.
 type TunnelManager struct {
-	cfg    *agentconfig.Config
-	logger *slog.Logger
+	cfg     *agentconfig.Config
+	logger  *slog.Logger
+	metrics *Metrics
 
 	mu            sync.Mutex
 	servers       []*tunnel.Server
@@ -33,13 +34,14 @@ type TunnelManager struct {
 }
 
 // NewTunnelManager creates a new TunnelManager.
-func NewTunnelManager(cfg *agentconfig.Config, logger *slog.Logger) *TunnelManager {
+func NewTunnelManager(cfg *agentconfig.Config, logger *slog.Logger, metrics *Metrics) *TunnelManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &TunnelManager{
 		cfg:             cfg,
 		logger:          logger,
+		metrics:         metrics,
 		clientsByRegion: make(map[string]*tunnel.ManagedClient),
 	}
 }
@@ -74,7 +76,7 @@ func (tm *TunnelManager) Start(ctx context.Context) error {
 }
 
 func (tm *TunnelManager) setupRelay() {
-	tm.relay = NewRelayManager(tm.logger)
+	tm.relay = NewRelayManager(tm.logger, tm.metrics)
 
 	for _, rc := range tm.cfg.Relays {
 		client, ok := tm.clientsByRegion[rc.ToRegion]

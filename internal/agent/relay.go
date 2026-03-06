@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 	"github.com/outpostos/OutpostNet/pkg/tunnel"
@@ -27,20 +30,22 @@ type relayRule struct {
 // a stream for a service with no local route, the RelayManager opens a new
 // stream on the downstream tunnel client and relays data bidirectionally.
 type RelayManager struct {
-	logger *slog.Logger
+	logger  *slog.Logger
+	metrics *Metrics
 
 	mu    sync.RWMutex
 	rules map[relayKey]*relayRule
 }
 
 // NewRelayManager creates a new RelayManager from agent config.
-func NewRelayManager(logger *slog.Logger) *RelayManager {
+func NewRelayManager(logger *slog.Logger, metrics *Metrics) *RelayManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &RelayManager{
-		logger: logger,
-		rules:  make(map[relayKey]*relayRule),
+		logger:  logger,
+		metrics: metrics,
+		rules:   make(map[relayKey]*relayRule),
 	}
 }
 
@@ -75,14 +80,18 @@ func (rm *RelayManager) HasRules() bool {
 // HandleStream is the StreamFallback handler for tunnel servers.
 // It is called when a stream arrives for a service with no local route.
 func (rm *RelayManager) HandleStream(ctx context.Context, stream *quic.Stream, hdr tunnel.StreamHeader) {
+	start := time.Now()
+
 	rm.mu.RLock()
 	// Try to find a rule matching the service name. The fromRegion is not
 	// available from the stream header (QUIC doesn't tell us), so we match
 	// on service name only. For multi-source relay, the first matching rule wins.
 	var matched *relayRule
+	var matchedFrom string
 	for key, rule := range rm.rules {
 		if key.service == hdr.ServiceName {
 			matched = rule
+			matchedFrom = key.fromRegion
 			break
 		}
 	}
@@ -90,6 +99,9 @@ func (rm *RelayManager) HandleStream(ctx context.Context, stream *quic.Stream, h
 
 	if matched == nil {
 		rm.logger.Warn("no relay rule for service", "service", hdr.ServiceName)
+		if rm.metrics != nil {
+			rm.metrics.RelayError("no_rule")
+		}
 		return
 	}
 
@@ -101,6 +113,9 @@ func (rm *RelayManager) HandleStream(ctx context.Context, stream *quic.Stream, h
 			"hops", hopCount,
 			"max_hops", matched.maxHops,
 		)
+		if rm.metrics != nil {
+			rm.metrics.RelayError("hop_limit")
+		}
 		return
 	}
 
@@ -118,11 +133,44 @@ func (rm *RelayManager) HandleStream(ctx context.Context, stream *quic.Stream, h
 			"to_region", matched.toRegion,
 			"error", err,
 		)
+		if rm.metrics != nil {
+			rm.metrics.RelayError("open_stream")
+		}
 		return
 	}
 	defer downstream.Close()
 	defer matched.client.StreamDone()
 
-	// Bidirectional relay between upstream and downstream.
-	biRelay(stream, downstream)
+	if rm.metrics != nil {
+		rm.metrics.ObserveRelayLatency(time.Since(start))
+		rm.metrics.RelayStreamStarted(matchedFrom, matched.toRegion, hdr.ServiceName)
+		defer rm.metrics.RelayStreamFinished()
+	}
+
+	// Bidirectional relay between upstream and downstream with byte counting.
+	sent, recv := countingBiRelay(stream, downstream)
+
+	if rm.metrics != nil {
+		rm.metrics.AddRelayBytes("sent", matchedFrom, matched.toRegion, sent)
+		rm.metrics.AddRelayBytes("recv", matchedFrom, matched.toRegion, recv)
+	}
+}
+
+// countingBiRelay copies data bidirectionally and returns bytes transferred
+// in each direction: sent (a→b) and received (b→a).
+func countingBiRelay(a, b io.ReadWriteCloser) (sent, recv int64) {
+	var sentCount, recvCount atomic.Int64
+	done := make(chan struct{}, 2)
+	go func() {
+		n, _ := io.Copy(b, a)
+		sentCount.Store(n)
+		done <- struct{}{}
+	}()
+	go func() {
+		n, _ := io.Copy(a, b)
+		recvCount.Store(n)
+		done <- struct{}{}
+	}()
+	<-done
+	return sentCount.Load(), recvCount.Load()
 }

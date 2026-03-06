@@ -64,7 +64,7 @@ func TestTunnelManagerServerMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tm := NewTunnelManager(cfg, nil)
+	tm := NewTunnelManager(cfg, nil, nil)
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestTunnelManagerClientMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tm := NewTunnelManager(cfg, nil)
+	tm := NewTunnelManager(cfg, nil, nil)
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestTunnelManagerStop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tm := NewTunnelManager(cfg, nil)
+	tm := NewTunnelManager(cfg, nil, nil)
 	if err := tm.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
