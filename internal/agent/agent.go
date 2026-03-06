@@ -18,6 +18,7 @@ type Agent struct {
 	cfg    *agentconfig.Config
 	logger *slog.Logger
 
+	tunnels      *TunnelManager
 	healthServer *http.Server
 
 	mu     sync.Mutex
@@ -57,7 +58,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	defer a.stopHealthServer()
 
-	// Mark ready after health server is up.
+	// Start tunnel manager if tunnels are configured.
+	if len(a.cfg.Tunnels) > 0 {
+		a.tunnels = NewTunnelManager(a.cfg, a.logger)
+		if err := a.tunnels.Start(ctx); err != nil {
+			return fmt.Errorf("start tunnels: %w", err)
+		}
+		defer a.tunnels.Stop()
+	}
+
+	// Mark ready after all components are up.
 	a.mu.Lock()
 	a.ready = true
 	a.mu.Unlock()
