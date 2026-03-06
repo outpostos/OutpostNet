@@ -153,6 +153,13 @@ e2e-cross-region:
 e2e-cross-region-cleanup:
 	./hack/e2e-cross-region.sh cleanup
 
+e2e-relay:
+	@echo "Running Relay E2E test..."
+	./hack/e2e-relay.sh
+
+e2e-relay-cleanup:
+	./hack/e2e-relay.sh cleanup
+
 # Tunnel benchmarks
 bench-tunnel:
 	@echo "Running QUIC tunnel benchmarks..."
