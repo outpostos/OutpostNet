@@ -137,6 +137,11 @@ e2e-controller:
 e2e-controller-cleanup:
 	./hack/e2e-controller.sh cleanup
 
+# Tunnel benchmarks
+bench-tunnel:
+	@echo "Running QUIC tunnel benchmarks..."
+	$(GOTEST) -bench=. -benchtime=3s -run=^$$ ./pkg/tunnel/
+
 # Release targets
 release: clean fmt vet test
 	@echo "Building release binaries..."
@@ -175,6 +180,7 @@ help:
 	@echo "  clean           - Clean build artifacts"
 	@echo "  clean-all       - Clean all generated files"
 	@echo ""
+	@echo "  bench-tunnel    - Run QUIC tunnel benchmarks"
 	@echo "  release         - Build release binaries for all platforms"
 	@echo "  docker-build    - Build Docker images"
 	@echo "  help            - Show this help"
