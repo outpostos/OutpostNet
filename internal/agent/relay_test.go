@@ -685,6 +685,26 @@ func TestRelayDirectAndRelay(t *testing.T) {
 	agentB.Stop()
 }
 
+// TestRelayManagerHasRules verifies HasRules returns false when empty and true after adding a rule.
+func TestRelayManagerHasRules(t *testing.T) {
+	rm := NewRelayManager(nil, nil)
+
+	if rm.HasRules() {
+		t.Fatal("expected HasRules() == false for empty RelayManager")
+	}
+
+	rm.AddRule(agentconfig.RelayConfig{
+		Service:    "test-svc",
+		FromRegion: "region-a",
+		ToRegion:   "region-b",
+		MaxHops:    3,
+	}, nil)
+
+	if !rm.HasRules() {
+		t.Fatal("expected HasRules() == true after adding a rule")
+	}
+}
+
 // TestRelayMetricsE2E verifies that relay metrics are populated after traffic.
 func TestRelayMetricsE2E(t *testing.T) {
 	echoLn := startTCPEchoServer(t)

@@ -97,3 +97,69 @@ func TestCodecDataFrame(t *testing.T) {
 		t.Errorf("Payload mismatch")
 	}
 }
+
+func TestCodecClose(t *testing.T) {
+	s1, s2 := net.Pipe()
+	defer s2.Close()
+
+	codec := NewCodec(s1)
+	if err := codec.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After closing, writing to s1 should fail because the connection is closed.
+	_, err := s1.Write([]byte("hello"))
+	if err == nil {
+		t.Fatal("expected error writing to closed connection")
+	}
+}
+
+func TestCodecReadFrameTooSmall(t *testing.T) {
+	s1, s2 := net.Pipe()
+	defer s1.Close()
+	defer s2.Close()
+
+	reader := NewCodec(s2)
+
+	// Write raw bytes: a 4-byte big-endian Length field with value 3 (< FrameHeaderSize=5).
+	go func() {
+		// Length = 3 which is less than FrameHeaderSize (5).
+		raw := []byte{0x00, 0x00, 0x00, 0x03}
+		s1.Write(raw)
+	}()
+
+	_, err := reader.ReadFrame()
+	if err == nil {
+		t.Fatal("expected error for frame too small")
+	}
+	if err.Error() != "frame too small" {
+		t.Fatalf("expected 'frame too small' error, got: %v", err)
+	}
+}
+
+func TestCodecReadFramePayloadTooLarge(t *testing.T) {
+	s1, s2 := net.Pipe()
+	defer s1.Close()
+	defer s2.Close()
+
+	reader := NewCodec(s2)
+
+	// Write raw bytes: a 4-byte big-endian Length field with value that makes
+	// payload exceed MaxFramePayload (1 << 20 = 1048576).
+	// payload = length - FrameHeaderSize(5), so length = MaxFramePayload + 5 + 1 = 1048582
+	go func() {
+		length := uint32(MaxFramePayload + FrameHeaderSize + 1) // 1048582
+		raw := []byte{
+			byte(length >> 24),
+			byte(length >> 16),
+			byte(length >> 8),
+			byte(length),
+		}
+		s1.Write(raw)
+	}()
+
+	_, err := reader.ReadFrame()
+	if err == nil {
+		t.Fatal("expected error for payload too large")
+	}
+}

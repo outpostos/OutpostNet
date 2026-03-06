@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 )
@@ -297,5 +300,91 @@ func TestManagedClientDefaults(t *testing.T) {
 	}
 	if mc.cfg.MaxReconnectDelay != 30*time.Second {
 		t.Errorf("expected 30s max delay, got %v", mc.cfg.MaxReconnectDelay)
+	}
+}
+
+func TestManagedClientOpenRelayStream(t *testing.T) {
+	srv, srvAddr := newTestServer(t)
+
+	// Set up a fallback that records the header and echoes data back.
+	fallbackCalled := make(chan StreamHeader, 1)
+	srv.SetStreamFallback(func(ctx context.Context, stream *quic.Stream, hdr StreamHeader) {
+		fallbackCalled <- hdr
+		io.Copy(stream, stream)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mc := NewManagedClient(ManagedClientConfig{
+		ClientConfig: ClientConfig{
+			ServerAddr: srvAddr,
+			TLS:        tlsutil.ClientTLSConfig(true),
+		},
+	}, nil)
+	defer mc.Close()
+
+	if err := mc.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	stream, err := mc.OpenRelayStream(ctx, "relay-target", 5)
+	if err != nil {
+		t.Fatalf("OpenRelayStream: %v", err)
+	}
+	defer func() {
+		stream.Close()
+		mc.StreamDone()
+	}()
+
+	// Verify the server fallback received the relay header.
+	select {
+	case hdr := <-fallbackCalled:
+		if hdr.ServiceName != "relay-target" {
+			t.Fatalf("expected service name %q, got %q", "relay-target", hdr.ServiceName)
+		}
+		if !hdr.IsRelay {
+			t.Fatal("expected IsRelay=true")
+		}
+		if hdr.HopCount != 5 {
+			t.Fatalf("expected HopCount=5, got %d", hdr.HopCount)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback was not called within 5 seconds")
+	}
+
+	// Verify the stream is usable for data transfer.
+	msg := []byte("relay-data")
+	if _, err := stream.Write(msg); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Fatalf("expected %q, got %q", msg, buf)
+	}
+}
+
+func TestManagedClientOpenRelayStreamNilConn(t *testing.T) {
+	mc := NewManagedClient(ManagedClientConfig{
+		ClientConfig: ClientConfig{
+			ServerAddr: "127.0.0.1:19999",
+			TLS:        tlsutil.ClientTLSConfig(true),
+		},
+	}, nil)
+	// Do NOT call mc.Connect — conn stays nil.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := mc.OpenRelayStream(ctx, "some-service", 1)
+	if err == nil {
+		t.Fatal("expected error when connection is nil")
+	}
+	if err != net.ErrClosed {
+		t.Fatalf("expected net.ErrClosed, got %v", err)
 	}
 }

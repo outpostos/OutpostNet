@@ -7,8 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 )
@@ -258,5 +261,200 @@ func TestServiceHeaderTooLong(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteServiceHeader(&buf, string(longName)); err == nil {
 		t.Fatal("expected error for too-long service name")
+	}
+}
+
+func TestSetStreamFallback(t *testing.T) {
+	srv, srvAddr := newTestServer(t)
+	// Don't add any routes — unknown service will trigger the fallback.
+
+	fallbackCalled := make(chan StreamHeader, 1)
+	srv.SetStreamFallback(func(ctx context.Context, stream *quic.Stream, hdr StreamHeader) {
+		fallbackCalled <- hdr
+		// Echo back through the stream to prove we received it.
+		io.Copy(stream, stream)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := Dial(ctx, ClientConfig{
+		ServerAddr: srvAddr,
+		TLS:        tlsutil.ClientTLSConfig(true),
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseWithError(0, "done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+
+	// Write a standard service header for an unregistered service.
+	if err := WriteServiceHeader(stream, "unknown-svc"); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+
+	// Send data through the stream.
+	msg := []byte("fallback-test")
+	if _, err := stream.Write(msg); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	// Wait for the fallback to be called.
+	select {
+	case hdr := <-fallbackCalled:
+		if hdr.ServiceName != "unknown-svc" {
+			t.Fatalf("expected service name %q, got %q", "unknown-svc", hdr.ServiceName)
+		}
+		if hdr.IsRelay {
+			t.Fatal("expected IsRelay=false for standard header")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback was not called within 5 seconds")
+	}
+
+	// Read echo response to verify the fallback handled the stream.
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Fatalf("expected %q, got %q", msg, buf)
+	}
+}
+
+func TestServerStreamFallbackRelay(t *testing.T) {
+	srv, srvAddr := newTestServer(t)
+	// No routes — all traffic goes to fallback.
+
+	fallbackCalled := make(chan StreamHeader, 1)
+	srv.SetStreamFallback(func(ctx context.Context, stream *quic.Stream, hdr StreamHeader) {
+		fallbackCalled <- hdr
+		io.Copy(stream, stream)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := Dial(ctx, ClientConfig{
+		ServerAddr: srvAddr,
+		TLS:        tlsutil.ClientTLSConfig(true),
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseWithError(0, "done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+
+	// Write a relay header with hop count.
+	if err := WriteRelayHeader(stream, "relay-svc", 3); err != nil {
+		t.Fatalf("write relay header: %v", err)
+	}
+
+	msg := []byte("relay-test")
+	if _, err := stream.Write(msg); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	select {
+	case hdr := <-fallbackCalled:
+		if hdr.ServiceName != "relay-svc" {
+			t.Fatalf("expected service name %q, got %q", "relay-svc", hdr.ServiceName)
+		}
+		if !hdr.IsRelay {
+			t.Fatal("expected IsRelay=true for relay header")
+		}
+		if hdr.HopCount != 3 {
+			t.Fatalf("expected HopCount=3, got %d", hdr.HopCount)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback was not called within 5 seconds")
+	}
+
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Fatalf("expected %q, got %q", msg, buf)
+	}
+}
+
+func TestRelayHeaderRoundtrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		hopCount uint8
+	}{
+		{"echo-service", 0},
+		{"my-relay-svc", 1},
+		{"edge-node-42", 255},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_hop%d", tt.name, tt.hopCount), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteRelayHeader(&buf, tt.name, tt.hopCount); err != nil {
+				t.Fatalf("write relay header: %v", err)
+			}
+
+			hdr, err := ReadStreamHeader(&buf)
+			if err != nil {
+				t.Fatalf("read stream header: %v", err)
+			}
+
+			if hdr.ServiceName != tt.name {
+				t.Fatalf("expected service name %q, got %q", tt.name, hdr.ServiceName)
+			}
+			if !hdr.IsRelay {
+				t.Fatal("expected IsRelay=true")
+			}
+			if hdr.HopCount != tt.hopCount {
+				t.Fatalf("expected HopCount=%d, got %d", tt.hopCount, hdr.HopCount)
+			}
+		})
+	}
+}
+
+func TestRelayHeaderEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteRelayHeader(&buf, "", 1); err == nil {
+		t.Fatal("expected error for empty service name")
+	}
+}
+
+func TestRelayHeaderTooLong(t *testing.T) {
+	longName := strings.Repeat("a", maxServiceNameLen+1)
+	var buf bytes.Buffer
+	if err := WriteRelayHeader(&buf, longName, 1); err == nil {
+		t.Fatal("expected error for too-long service name")
+	}
+}
+
+func TestReadStreamHeaderRelay(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteRelayHeader(&buf, "forwarded-svc", 7); err != nil {
+		t.Fatalf("write relay header: %v", err)
+	}
+
+	hdr, err := ReadStreamHeader(&buf)
+	if err != nil {
+		t.Fatalf("read stream header: %v", err)
+	}
+
+	if hdr.ServiceName != "forwarded-svc" {
+		t.Fatalf("expected service name %q, got %q", "forwarded-svc", hdr.ServiceName)
+	}
+	if !hdr.IsRelay {
+		t.Fatal("expected IsRelay=true")
+	}
+	if hdr.HopCount != 7 {
+		t.Fatalf("expected HopCount=7, got %d", hdr.HopCount)
 	}
 }

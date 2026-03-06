@@ -1,7 +1,16 @@
 package reconciler
 
 import (
+	"context"
+	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/outpostos/OutpostNet/pkg/annotations"
 )
@@ -271,5 +280,279 @@ func TestComputeRelayConfigsUnreachable(t *testing.T) {
 	relays := ComputeRelayConfigs(g, "A", "C", "svc")
 	if relays != nil {
 		t.Errorf("expected nil relays for unreachable, got %v", relays)
+	}
+}
+
+// newRegionScheme creates a runtime.Scheme with core types for RegionReconciler tests.
+func newRegionScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	_ = corev1.AddToScheme(s)
+	return s
+}
+
+func TestRegionReconciler_Reconcile_NotFound(t *testing.T) {
+	scheme := newRegionScheme()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &RegionReconciler{
+		Client:            fakeClient,
+		DefaultTunnelPort: 4242,
+	}
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "nonexistent-pod",
+			Namespace: "default",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+}
+
+func TestRegionReconciler_Reconcile_NoRegion(t *testing.T) {
+	scheme := newRegionScheme()
+
+	// Pod without region annotation — should be a no-op.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "plain-pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation:  "true",
+				annotations.ExportsAnnotation: "web:8080:tcp",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	r := &RegionReconciler{
+		Client:            fakeClient,
+		DefaultTunnelPort: 4242,
+	}
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "plain-pod",
+			Namespace: "default",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify no agent ConfigMap was created.
+	cm := &corev1.ConfigMap{}
+	cmErr := fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "outpostnet-agent-edge-a",
+		Namespace: "default",
+	}, cm)
+	if cmErr == nil {
+		t.Error("expected no agent configmap to exist, but it was found")
+	}
+}
+
+func TestRegionReconciler_Reconcile_NoCrossRegionImports(t *testing.T) {
+	scheme := newRegionScheme()
+
+	// Pod with region but only local imports (no @region suffix) — should be a no-op.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "local-pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation:  "true",
+				annotations.RegionAnnotation:  "edge-a",
+				annotations.ImportsAnnotation: "db:3306:tcp",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	r := &RegionReconciler{
+		Client:            fakeClient,
+		DefaultTunnelPort: 4242,
+	}
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "local-pod",
+			Namespace: "default",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify no agent ConfigMap was created.
+	cm := &corev1.ConfigMap{}
+	cmErr := fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "outpostnet-agent-edge-a",
+		Namespace: "default",
+	}, cm)
+	if cmErr == nil {
+		t.Error("expected no agent configmap for local-only imports")
+	}
+}
+
+func TestRegionReconciler_Reconcile_CreatesAgentConfigMap(t *testing.T) {
+	scheme := newRegionScheme()
+
+	// Pod with region annotation and cross-region import (name@region format).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "edge-pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation:  "true",
+				annotations.RegionAnnotation:  "edge-a",
+				annotations.ImportsAnnotation: "cloud-db@cloud:3306:tcp",
+				annotations.ExportsAnnotation: "sensor:9000:tcp",
+			},
+			UID: "uid-edge-123",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	r := &RegionReconciler{
+		Client:            fakeClient,
+		DefaultTunnelPort: 4242,
+	}
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "edge-pod",
+			Namespace: "default",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify agent ConfigMap was created.
+	cm := &corev1.ConfigMap{}
+	cmErr := fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "outpostnet-agent-edge-a",
+		Namespace: "default",
+	}, cm)
+	if cmErr != nil {
+		t.Fatalf("expected agent configmap to exist, got error: %v", cmErr)
+	}
+
+	// Verify ConfigMap labels.
+	if cm.Labels["app.kubernetes.io/managed-by"] != agentManagedByLabel {
+		t.Errorf("expected managed-by label %q, got %q", agentManagedByLabel, cm.Labels["app.kubernetes.io/managed-by"])
+	}
+	if cm.Labels["app.kubernetes.io/component"] != agentComponentLabel {
+		t.Errorf("expected component label %q, got %q", agentComponentLabel, cm.Labels["app.kubernetes.io/component"])
+	}
+	if cm.Labels["outpostnet.io/region"] != "edge-a" {
+		t.Errorf("expected region label 'edge-a', got %q", cm.Labels["outpostnet.io/region"])
+	}
+
+	// Verify ConfigMap data contains agent config YAML.
+	agentYAML, ok := cm.Data["agent.yaml"]
+	if !ok {
+		t.Fatal("expected agent.yaml key in configmap data")
+	}
+	if !strings.Contains(agentYAML, "region: edge-a") {
+		t.Errorf("expected 'region: edge-a' in agent config YAML:\n%s", agentYAML)
+	}
+	if !strings.Contains(agentYAML, "remote_region: cloud") {
+		t.Errorf("expected tunnel remote_region 'cloud' in agent config YAML:\n%s", agentYAML)
+	}
+	if !strings.Contains(agentYAML, "outpostnet-agent-cloud.default.svc:4242") {
+		t.Errorf("expected remote_addr in agent config YAML:\n%s", agentYAML)
+	}
+	if !strings.Contains(agentYAML, "name: cloud-db") {
+		t.Errorf("expected import 'cloud-db' in agent config YAML:\n%s", agentYAML)
+	}
+	if !strings.Contains(agentYAML, "name: sensor") {
+		t.Errorf("expected export 'sensor' in agent config YAML:\n%s", agentYAML)
+	}
+}
+
+func TestRegionReconciler_Reconcile_UpdatesAgentConfigMap(t *testing.T) {
+	scheme := newRegionScheme()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "edge-pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation:  "true",
+				annotations.RegionAnnotation:  "edge-a",
+				annotations.ImportsAnnotation: "cloud-db@cloud:3306:tcp",
+			},
+			UID: "uid-edge-456",
+		},
+	}
+
+	// Pre-create a ConfigMap with old data.
+	existingCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "outpostnet-agent-edge-a",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": agentManagedByLabel,
+				"app.kubernetes.io/component":  agentComponentLabel,
+				"outpostnet.io/region":         "edge-a",
+			},
+		},
+		Data: map[string]string{
+			"agent.yaml": "old-agent-config",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, existingCM).Build()
+	r := &RegionReconciler{
+		Client:            fakeClient,
+		DefaultTunnelPort: 4242,
+	}
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "edge-pod",
+			Namespace: "default",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify ConfigMap was updated.
+	cm := &corev1.ConfigMap{}
+	cmErr := fakeClient.Get(context.Background(), types.NamespacedName{
+		Name:      "outpostnet-agent-edge-a",
+		Namespace: "default",
+	}, cm)
+	if cmErr != nil {
+		t.Fatalf("expected agent configmap to exist, got error: %v", cmErr)
+	}
+
+	agentYAML := cm.Data["agent.yaml"]
+	if agentYAML == "old-agent-config" {
+		t.Error("expected configmap to be updated, but it still has old data")
+	}
+	if !strings.Contains(agentYAML, "region: edge-a") {
+		t.Errorf("expected 'region: edge-a' in updated agent config YAML:\n%s", agentYAML)
+	}
+	if !strings.Contains(agentYAML, "name: cloud-db") {
+		t.Errorf("expected import 'cloud-db' in updated agent config YAML:\n%s", agentYAML)
 	}
 }
