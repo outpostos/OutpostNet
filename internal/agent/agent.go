@@ -19,6 +19,7 @@ type Agent struct {
 	logger *slog.Logger
 
 	tunnels      *TunnelManager
+	persistence  *Persistence
 	healthServer *http.Server
 
 	mu     sync.Mutex
@@ -57,6 +58,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		return fmt.Errorf("start health server: %w", err)
 	}
 	defer a.stopHealthServer()
+
+	// Initialize persistence if enabled.
+	if a.cfg.Persistence.IsEnabled() {
+		a.persistence = NewPersistence(a.cfg.Persistence.Dir, a.logger)
+		// Persist initial config.
+		if err := a.persistence.Save(a.cfg, 1); err != nil {
+			a.logger.Warn("failed to persist initial config", "error", err)
+		}
+	}
 
 	// Start tunnel manager if tunnels are configured.
 	if len(a.cfg.Tunnels) > 0 {
