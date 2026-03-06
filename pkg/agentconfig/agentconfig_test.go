@@ -280,6 +280,194 @@ exports:
 	}
 }
 
+func TestRelayConfig(t *testing.T) {
+	yamlData := `
+region: relay-c
+tunnels:
+  - remote_region: edge-a
+    role: server
+    listen_addr: "0.0.0.0:4242"
+  - remote_region: cloud-b
+    role: client
+    remote_addr: "cloud-b-gateway:4242"
+  - remote_region: edge-a
+    role: client
+    remote_addr: "edge-a-gateway:4242"
+relays:
+  - service: svc-b
+    from_region: edge-a
+    to_region: cloud-b
+  - service: svc-a
+    from_region: cloud-b
+    to_region: edge-a
+    max_hops: 2
+`
+	cfg, err := ParseConfig([]byte(yamlData))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if len(cfg.Relays) != 2 {
+		t.Fatalf("relays len = %d, want 2", len(cfg.Relays))
+	}
+
+	r0 := cfg.Relays[0]
+	if r0.Service != "svc-b" {
+		t.Errorf("relay[0].service = %q, want svc-b", r0.Service)
+	}
+	if r0.FromRegion != "edge-a" {
+		t.Errorf("relay[0].from_region = %q, want edge-a", r0.FromRegion)
+	}
+	if r0.ToRegion != "cloud-b" {
+		t.Errorf("relay[0].to_region = %q, want cloud-b", r0.ToRegion)
+	}
+	if r0.MaxHops != DefaultMaxHops {
+		t.Errorf("relay[0].max_hops = %d, want default %d", r0.MaxHops, DefaultMaxHops)
+	}
+
+	r1 := cfg.Relays[1]
+	if r1.MaxHops != 2 {
+		t.Errorf("relay[1].max_hops = %d, want 2", r1.MaxHops)
+	}
+}
+
+func TestRelayConfigValidation(t *testing.T) {
+	// The second relay rule needs a client tunnel to edge-a to be valid.
+	// But we only test individual validation cases below.
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "relay missing service",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: b
+    role: client
+    remote_addr: "1.2.3.4:4242"
+relays:
+  - from_region: a
+    to_region: b`,
+			want: "relays[0].service is required",
+		},
+		{
+			name: "relay missing from_region",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: b
+    role: client
+    remote_addr: "1.2.3.4:4242"
+relays:
+  - service: svc
+    to_region: b`,
+			want: "relays[0].from_region is required",
+		},
+		{
+			name: "relay missing to_region",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: b
+    role: client
+    remote_addr: "1.2.3.4:4242"
+relays:
+  - service: svc
+    from_region: a`,
+			want: "relays[0].to_region is required",
+		},
+		{
+			name: "relay from equals to",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: a
+    role: client
+    remote_addr: "1.2.3.4:4242"
+relays:
+  - service: svc
+    from_region: a
+    to_region: a`,
+			want: "from_region and to_region must differ",
+		},
+		{
+			name: "relay to_region no client tunnel",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: a
+    role: server
+    listen_addr: "0.0.0.0:4242"
+relays:
+  - service: svc
+    from_region: a
+    to_region: b`,
+			want: "to_region \"b\" has no matching client tunnel",
+		},
+		{
+			name: "relay max_hops too high",
+			yaml: `
+region: relay
+tunnels:
+  - remote_region: b
+    role: client
+    remote_addr: "1.2.3.4:4242"
+relays:
+  - service: svc
+    from_region: a
+    to_region: b
+    max_hops: 10`,
+			want: "max_hops must be 1-5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseConfig([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if got := err.Error(); !contains(got, tt.want) {
+				t.Errorf("error = %q, want to contain %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRelayMarshalRoundTrip(t *testing.T) {
+	cfg := &Config{
+		Region: "relay-c",
+		Tunnels: []TunnelConfig{
+			{RemoteRegion: "edge-a", Role: "server", ListenAddr: "0.0.0.0:4242"},
+			{RemoteRegion: "cloud-b", Role: "client", RemoteAddr: "1.2.3.4:4242"},
+		},
+		Relays: []RelayConfig{
+			{Service: "svc-b", FromRegion: "edge-a", ToRegion: "cloud-b", MaxHops: 3},
+		},
+		HealthAddr:  ":8082",
+		Metrics:     MetricsConfig{Addr: ":9090"},
+		Persistence: PersistenceConfig{Dir: "/var/lib/outpostnet"},
+	}
+
+	data, err := MarshalConfig(cfg)
+	if err != nil {
+		t.Fatalf("MarshalConfig: %v", err)
+	}
+
+	cfg2, err := ParseConfig(data)
+	if err != nil {
+		t.Fatalf("ParseConfig round-trip: %v", err)
+	}
+	if len(cfg2.Relays) != 1 {
+		t.Fatalf("round-trip relays len = %d, want 1", len(cfg2.Relays))
+	}
+	r := cfg2.Relays[0]
+	if r.Service != "svc-b" || r.FromRegion != "edge-a" || r.ToRegion != "cloud-b" || r.MaxHops != 3 {
+		t.Errorf("round-trip relay mismatch: %+v", r)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchSubstr(s, substr)
 }

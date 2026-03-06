@@ -23,6 +23,11 @@ type Config struct {
 	// Imports lists services this region imports from remote regions.
 	Imports []ImportConfig `yaml:"imports"`
 
+	// Relays defines relay forwarding rules for this Agent.
+	// When a stream arrives for a service matching a relay rule, the Agent
+	// forwards it to the target region instead of handling it locally.
+	Relays []RelayConfig `yaml:"relays"`
+
 	// Persistence configures local config persistence for offline recovery.
 	Persistence PersistenceConfig `yaml:"persistence"`
 
@@ -77,6 +82,29 @@ type ImportConfig struct {
 	// Protocol is "tcp" or "udp".
 	Protocol string `yaml:"protocol"`
 }
+
+// RelayConfig describes a relay forwarding rule. When the Agent's tunnel server
+// receives a stream for Service from FromRegion, it opens a new stream on the
+// tunnel client connected to ToRegion and relays data bidirectionally.
+type RelayConfig struct {
+	// Service is the name of the service to relay.
+	Service string `yaml:"service"`
+
+	// FromRegion is the region the incoming stream originates from.
+	FromRegion string `yaml:"from_region"`
+
+	// ToRegion is the region to forward the stream to.
+	ToRegion string `yaml:"to_region"`
+
+	// MaxHops is the maximum number of relay hops allowed (default 3, max 5).
+	MaxHops int `yaml:"max_hops"`
+}
+
+// DefaultMaxHops is the default maximum relay hop count.
+const DefaultMaxHops = 3
+
+// MaxAllowedHops is the absolute maximum relay hop count.
+const MaxAllowedHops = 5
 
 // PersistenceConfig configures local config persistence.
 type PersistenceConfig struct {
@@ -145,6 +173,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Persistence.Dir == "" {
 		cfg.Persistence.Dir = "/var/lib/outpostnet"
 	}
+	for i := range cfg.Relays {
+		if cfg.Relays[i].MaxHops == 0 {
+			cfg.Relays[i].MaxHops = DefaultMaxHops
+		}
+	}
 }
 
 // ValidateConfig checks that the config is well-formed.
@@ -195,6 +228,35 @@ func ValidateConfig(cfg *Config) error {
 		}
 		if err := validateProtocol(imp.Protocol); err != nil {
 			return fmt.Errorf("imports[%d].protocol: %w", i, err)
+		}
+	}
+
+	// Build set of client-role tunnel regions for relay validation.
+	clientRegions := make(map[string]bool)
+	for _, t := range cfg.Tunnels {
+		if strings.ToLower(t.Role) == "client" {
+			clientRegions[t.RemoteRegion] = true
+		}
+	}
+
+	for i, r := range cfg.Relays {
+		if r.Service == "" {
+			return fmt.Errorf("relays[%d].service is required", i)
+		}
+		if r.FromRegion == "" {
+			return fmt.Errorf("relays[%d].from_region is required", i)
+		}
+		if r.ToRegion == "" {
+			return fmt.Errorf("relays[%d].to_region is required", i)
+		}
+		if r.FromRegion == r.ToRegion {
+			return fmt.Errorf("relays[%d]: from_region and to_region must differ", i)
+		}
+		if !clientRegions[r.ToRegion] {
+			return fmt.Errorf("relays[%d]: to_region %q has no matching client tunnel", i, r.ToRegion)
+		}
+		if r.MaxHops < 1 || r.MaxHops > MaxAllowedHops {
+			return fmt.Errorf("relays[%d].max_hops must be 1-%d, got %d", i, MaxAllowedHops, r.MaxHops)
 		}
 	}
 
