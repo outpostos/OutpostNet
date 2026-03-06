@@ -133,3 +133,143 @@ func TestMapKeys(t *testing.T) {
 		t.Errorf("mapKeys returned %d keys, want 2", len(keys))
 	}
 }
+
+func TestRegionGraphDirectPath(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"edge-a": "cloud",
+		"cloud":  "edge-a",
+	})
+
+	path := g.FindPath("edge-a", "cloud")
+	if len(path) != 2 {
+		t.Fatalf("path len = %d, want 2", len(path))
+	}
+	if path[0] != "edge-a" || path[1] != "cloud" {
+		t.Errorf("path = %v, want [edge-a cloud]", path)
+	}
+}
+
+func TestRegionGraphSingleHopRelay(t *testing.T) {
+	// A and B can't reach each other directly, but both can reach C.
+	g := NewRegionGraph(map[string]string{
+		"edge-a":  "relay-c",
+		"cloud-b": "relay-c",
+	})
+
+	path := g.FindPath("edge-a", "cloud-b")
+	if len(path) != 3 {
+		t.Fatalf("path len = %d, want 3: %v", len(path), path)
+	}
+	if path[0] != "edge-a" || path[1] != "relay-c" || path[2] != "cloud-b" {
+		t.Errorf("path = %v, want [edge-a relay-c cloud-b]", path)
+	}
+}
+
+func TestRegionGraphMultiHopRelay(t *testing.T) {
+	// A → C → D → B
+	g := NewRegionGraph(map[string]string{
+		"A": "C",
+		"C": "D",
+		"D": "B",
+	})
+
+	path := g.FindPath("A", "B")
+	if len(path) != 4 {
+		t.Fatalf("path len = %d, want 4: %v", len(path), path)
+	}
+	if path[0] != "A" || path[3] != "B" {
+		t.Errorf("path = %v, want [A C D B]", path)
+	}
+}
+
+func TestRegionGraphUnreachable(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"A": "B",
+		"C": "D",
+	})
+
+	path := g.FindPath("A", "C")
+	if path != nil {
+		t.Errorf("expected nil path, got %v", path)
+	}
+}
+
+func TestComputeRelayConfigsDirect(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"edge-a": "cloud",
+	})
+
+	relays := ComputeRelayConfigs(g, "edge-a", "cloud", "svc-b")
+	if relays != nil {
+		t.Errorf("expected nil relays for direct path, got %v", relays)
+	}
+}
+
+func TestComputeRelayConfigsSingleHop(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"edge-a":  "relay-c",
+		"cloud-b": "relay-c",
+	})
+
+	relays := ComputeRelayConfigs(g, "edge-a", "cloud-b", "svc-b")
+	if relays == nil {
+		t.Fatal("expected relay configs, got nil")
+	}
+
+	rc, ok := relays["relay-c"]
+	if !ok {
+		t.Fatal("expected relay config for relay-c")
+	}
+	if len(rc) != 1 {
+		t.Fatalf("relay-c rules = %d, want 1", len(rc))
+	}
+	if rc[0].Service != "svc-b" {
+		t.Errorf("service = %q, want svc-b", rc[0].Service)
+	}
+	if rc[0].FromRegion != "edge-a" {
+		t.Errorf("from_region = %q, want edge-a", rc[0].FromRegion)
+	}
+	if rc[0].ToRegion != "cloud-b" {
+		t.Errorf("to_region = %q, want cloud-b", rc[0].ToRegion)
+	}
+}
+
+func TestComputeRelayConfigsMultiHop(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"A": "C",
+		"C": "D",
+		"D": "B",
+	})
+
+	relays := ComputeRelayConfigs(g, "A", "B", "svc")
+	if relays == nil {
+		t.Fatal("expected relay configs, got nil")
+	}
+
+	// Should have relay rules for C and D.
+	if len(relays) != 2 {
+		t.Fatalf("relay regions = %d, want 2", len(relays))
+	}
+
+	rcC := relays["C"]
+	if len(rcC) != 1 || rcC[0].FromRegion != "A" || rcC[0].ToRegion != "D" {
+		t.Errorf("C relay = %+v, want A→D", rcC)
+	}
+
+	rcD := relays["D"]
+	if len(rcD) != 1 || rcD[0].FromRegion != "C" || rcD[0].ToRegion != "B" {
+		t.Errorf("D relay = %+v, want C→B", rcD)
+	}
+}
+
+func TestComputeRelayConfigsUnreachable(t *testing.T) {
+	g := NewRegionGraph(map[string]string{
+		"A": "B",
+		"C": "D",
+	})
+
+	relays := ComputeRelayConfigs(g, "A", "C", "svc")
+	if relays != nil {
+		t.Errorf("expected nil relays for unreachable, got %v", relays)
+	}
+}

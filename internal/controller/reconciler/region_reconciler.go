@@ -223,3 +223,98 @@ func mapKeys(m map[string][]annotations.ServiceEntry) []string {
 func AgentServiceName(region string) string {
 	return "outpostnet-agent-" + strings.ToLower(region)
 }
+
+// RegionGraph represents the connectivity between regions.
+// Each key is a region; values are the set of regions it can directly reach.
+type RegionGraph map[string]map[string]bool
+
+// NewRegionGraph creates a RegionGraph from a map of region → reachable regions.
+// The reachable string is comma-separated: "region1,region2,region3".
+// Connectivity is bidirectional.
+func NewRegionGraph(regions map[string]string) RegionGraph {
+	g := make(RegionGraph)
+	for region, reachable := range regions {
+		if g[region] == nil {
+			g[region] = make(map[string]bool)
+		}
+		for _, r := range strings.Split(reachable, ",") {
+			r = strings.TrimSpace(r)
+			if r == "" || r == region {
+				continue
+			}
+			g[region][r] = true
+			if g[r] == nil {
+				g[r] = make(map[string]bool)
+			}
+			g[r][region] = true
+		}
+	}
+	return g
+}
+
+// FindPath returns the shortest path from src to dst using BFS.
+// Returns nil if no path exists. The returned path includes src and dst.
+func (g RegionGraph) FindPath(src, dst string) []string {
+	if src == dst {
+		return []string{src}
+	}
+	if g[src][dst] {
+		return []string{src, dst}
+	}
+
+	type node struct {
+		region string
+		path   []string
+	}
+	visited := map[string]bool{src: true}
+	queue := []node{{region: src, path: []string{src}}}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		for neighbor := range g[cur.region] {
+			if visited[neighbor] {
+				continue
+			}
+			newPath := make([]string, len(cur.path)+1)
+			copy(newPath, cur.path)
+			newPath[len(cur.path)] = neighbor
+
+			if neighbor == dst {
+				return newPath
+			}
+			visited[neighbor] = true
+			queue = append(queue, node{region: neighbor, path: newPath})
+		}
+	}
+
+	return nil
+}
+
+// ComputeRelayConfigs determines relay rules needed for a service between two
+// regions that cannot connect directly. Returns a map of relayRegion → relay rules.
+// Returns nil if a direct connection is possible or no path exists.
+func ComputeRelayConfigs(graph RegionGraph, srcRegion, dstRegion, service string) map[string][]agentconfig.RelayConfig {
+	path := graph.FindPath(srcRegion, dstRegion)
+	if path == nil || len(path) <= 2 {
+		return nil
+	}
+
+	// Path: [src, relay1, relay2, ..., dst]
+	relays := make(map[string][]agentconfig.RelayConfig)
+	for i := 1; i < len(path)-1; i++ {
+		relayRegion := path[i]
+		fromRegion := path[i-1]
+		toRegion := path[i+1]
+
+		relays[relayRegion] = append(relays[relayRegion], agentconfig.RelayConfig{
+			Service:    service,
+			FromRegion: fromRegion,
+			ToRegion:   toRegion,
+			MaxHops:    agentconfig.DefaultMaxHops,
+		})
+	}
+
+	return relays
+}
