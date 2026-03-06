@@ -10,6 +10,11 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// StreamFallback is called when a stream arrives for a service with no local
+// route. The handler receives the stream header (including hop count for
+// relay streams) and the raw QUIC stream for bidirectional forwarding.
+type StreamFallback func(ctx context.Context, stream *quic.Stream, hdr StreamHeader)
+
 // Server is a QUIC tunnel server that accepts connections and routes
 // incoming streams to local TCP services based on the ServiceHeader.
 type Server struct {
@@ -17,8 +22,9 @@ type Server struct {
 	listener *quic.Listener
 	logger   *slog.Logger
 
-	mu     sync.RWMutex
-	routes map[string]string // serviceName → localAddr
+	mu       sync.RWMutex
+	routes   map[string]string // serviceName → localAddr
+	fallback StreamFallback
 }
 
 // NewServer creates a new tunnel server with the given configuration.
@@ -48,6 +54,20 @@ func (s *Server) RemoveRoute(serviceName string) {
 	defer s.mu.Unlock()
 	delete(s.routes, serviceName)
 	s.logger.Info("removed route", "service", serviceName)
+}
+
+// SetStreamFallback registers a handler that is called when a stream arrives
+// for a service with no local route. This is used by the relay manager.
+func (s *Server) SetStreamFallback(fn StreamFallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fallback = fn
+}
+
+func (s *Server) getFallback() StreamFallback {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fallback
 }
 
 // getRoute returns the local address for a service, or empty string if not found.
@@ -133,25 +153,30 @@ func (s *Server) handleConnection(ctx context.Context, conn *quic.Conn) {
 func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 	defer stream.Close()
 
-	// Read service header.
-	serviceName, err := ReadServiceHeader(stream)
+	// Read service header (handles both standard and relay headers).
+	hdr, err := ReadStreamHeader(stream)
 	if err != nil {
 		s.logger.Error("read service header", "error", err)
 		return
 	}
 
-	localAddr, ok := s.getRoute(serviceName)
+	localAddr, ok := s.getRoute(hdr.ServiceName)
 	if !ok {
-		s.logger.Warn("no route for service", "service", serviceName)
+		// No local route — try the fallback (relay handler).
+		if fb := s.getFallback(); fb != nil {
+			fb(ctx, stream, hdr)
+			return
+		}
+		s.logger.Warn("no route for service", "service", hdr.ServiceName)
 		return
 	}
 
-	s.logger.Debug("routing stream", "service", serviceName, "addr", localAddr)
+	s.logger.Debug("routing stream", "service", hdr.ServiceName, "addr", localAddr)
 
 	// Connect to local service.
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
-		s.logger.Error("dial local service", "service", serviceName, "addr", localAddr, "error", err)
+		s.logger.Error("dial local service", "service", hdr.ServiceName, "addr", localAddr, "error", err)
 		return
 	}
 	defer localConn.Close()

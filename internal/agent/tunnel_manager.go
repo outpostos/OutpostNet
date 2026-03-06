@@ -25,9 +25,11 @@ type TunnelManager struct {
 	cfg    *agentconfig.Config
 	logger *slog.Logger
 
-	mu      sync.Mutex
-	servers []*tunnel.Server
-	clients []*tunnel.ManagedClient
+	mu            sync.Mutex
+	servers       []*tunnel.Server
+	clients       []*tunnel.ManagedClient
+	clientsByRegion map[string]*tunnel.ManagedClient
+	relay         *RelayManager
 }
 
 // NewTunnelManager creates a new TunnelManager.
@@ -36,8 +38,9 @@ func NewTunnelManager(cfg *agentconfig.Config, logger *slog.Logger) *TunnelManag
 		logger = slog.Default()
 	}
 	return &TunnelManager{
-		cfg:    cfg,
-		logger: logger,
+		cfg:             cfg,
+		logger:          logger,
+		clientsByRegion: make(map[string]*tunnel.ManagedClient),
 	}
 }
 
@@ -62,7 +65,33 @@ func (tm *TunnelManager) Start(ctx context.Context) error {
 		}
 	}
 
+	// Set up relay forwarding rules if configured.
+	if len(tm.cfg.Relays) > 0 {
+		tm.setupRelay()
+	}
+
 	return nil
+}
+
+func (tm *TunnelManager) setupRelay() {
+	tm.relay = NewRelayManager(tm.logger)
+
+	for _, rc := range tm.cfg.Relays {
+		client, ok := tm.clientsByRegion[rc.ToRegion]
+		if !ok {
+			tm.logger.Warn("relay rule skipped: no client for to_region",
+				"service", rc.Service, "to_region", rc.ToRegion)
+			continue
+		}
+		tm.relay.AddRule(rc, client)
+	}
+
+	// Set the relay handler as the stream fallback on all servers.
+	tm.mu.Lock()
+	for _, srv := range tm.servers {
+		srv.SetStreamFallback(tm.relay.HandleStream)
+	}
+	tm.mu.Unlock()
 }
 
 func (tm *TunnelManager) buildTLSConfig() (*tls.Config, error) {
@@ -133,6 +162,7 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 
 	tm.mu.Lock()
 	tm.clients = append(tm.clients, mc)
+	tm.clientsByRegion[tc.RemoteRegion] = mc
 	tm.mu.Unlock()
 
 	// Start import proxies for services from this remote region.

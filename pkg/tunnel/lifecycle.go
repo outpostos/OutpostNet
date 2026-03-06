@@ -214,8 +214,33 @@ func (mc *ManagedClient) OpenServiceStream(ctx context.Context, serviceName stri
 	return stream, nil
 }
 
+// OpenRelayStream opens a stream with a relay header (includes hop count).
+// Tracks the stream for graceful shutdown, so call StreamDone when finished.
+func (mc *ManagedClient) OpenRelayStream(ctx context.Context, serviceName string, hopCount uint8) (*quic.Stream, error) {
+	mc.mu.RLock()
+	conn := mc.conn
+	mc.mu.RUnlock()
+
+	if conn == nil {
+		return nil, net.ErrClosed
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := WriteRelayHeader(stream, serviceName, hopCount); err != nil {
+		stream.Close()
+		return nil, err
+	}
+
+	mc.streamWg.Add(1)
+	return stream, nil
+}
+
 // StreamDone signals that a stream has completed. Call this after closing
-// a stream obtained from OpenServiceStream.
+// a stream obtained from OpenServiceStream or OpenRelayStream.
 func (mc *ManagedClient) StreamDone() {
 	mc.streamWg.Done()
 }
