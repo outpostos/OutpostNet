@@ -12,6 +12,7 @@ GOMOD=$(GOCMD) mod
 SERVER_BINARY=outpostnet-server
 SIDECAR_BINARY=outpostnet-sidecar
 CONTROLLER_BINARY=outpostnet-controller
+AGENT_BINARY=outpostnet-agent
 
 # Build directory
 BUILD_DIR=build
@@ -33,7 +34,7 @@ LDFLAGS = -ldflags "-X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gi
 all: clean fmt vet test build
 
 # Build targets
-build: build-server build-sidecar build-controller
+build: build-server build-sidecar build-controller build-agent
 
 build-server:
 	@echo "Building $(SERVER_BINARY)..."
@@ -49,6 +50,11 @@ build-controller:
 	@echo "Building $(CONTROLLER_BINARY)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(CONTROLLER_BINARY) ./cmd/outpostnet-controller
+
+build-agent:
+	@echo "Building $(AGENT_BINARY)..."
+	@mkdir -p $(BUILD_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(AGENT_BINARY) ./cmd/outpostnet-agent
 
 # Install builds binaries to project root for easy testing
 install: build
@@ -101,7 +107,7 @@ deps:
 clean:
 	@echo "Cleaning..."
 	$(GOCLEAN)
-	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY)
+	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY) $(AGENT_BINARY)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 
@@ -121,6 +127,9 @@ docker-build:
 	docker build -t outpostnet-controller:$(VERSION) -t outpostnet-controller:latest \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		-f build/docker/Dockerfile.controller .
+	docker build -t outpostnet-agent:$(VERSION) -t outpostnet-agent:latest \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f build/docker/Dockerfile.agent .
 
 # K8s E2E test
 e2e-k8s:
@@ -153,7 +162,11 @@ release: clean fmt vet test
 	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-darwin-arm64 ./cmd/outpostnet-server
 	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-darwin-arm64 ./cmd/outpostnet-sidecar
 	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-windows-amd64.exe ./cmd/outpostnet-server
+	@GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-linux-amd64 ./cmd/outpostnet-agent
+	@GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-darwin-amd64 ./cmd/outpostnet-agent
+	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-darwin-arm64 ./cmd/outpostnet-agent
 	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-windows-amd64.exe ./cmd/outpostnet-sidecar
+	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-windows-amd64.exe ./cmd/outpostnet-agent
 	@echo "Release binaries built in $(BUILD_DIR)/release/"
 
 # Help
@@ -165,6 +178,7 @@ help:
 	@echo "  build-server    - Build server binary only"
 	@echo "  build-sidecar   - Build sidecar binary only"
 	@echo "  build-controller - Build controller binary only"
+	@echo "  build-agent     - Build agent binary only"
 	@echo "  install         - Build and install binaries to project root"
 	@echo ""
 	@echo "  test            - Run all tests"
