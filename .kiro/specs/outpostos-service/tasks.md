@@ -96,7 +96,7 @@
 
 ### Phase 2: 实现区域服务网格功能
 
-- [ ] 5. 实现 Cluster 内服务协同
+- [x] 5. 实现 Cluster 内服务协同
   - 实现 `pkg/mesh/cluster.go` 中的集群管理功能
   - 实现 Site 内多个 OutpostNet Server 的自动发现和组网
   - 实现集群内服务数据同步机制

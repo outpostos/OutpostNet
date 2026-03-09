@@ -89,6 +89,10 @@ type ForwardingMetrics struct {
 	IncomingActive   atomic.Int64
 }
 
+// ConnHandler is called for connections that are not forwarding requests.
+// It is used by the Manager to handle sync connections on the same listener.
+type ConnHandler func(conn net.Conn)
+
 // Forwarder handles cross-node service request forwarding within a cluster.
 // It maintains a forwarding listener for incoming requests from peers,
 // and provides a Forward method for outbound forwarding to peer nodes.
@@ -98,6 +102,10 @@ type Forwarder struct {
 	cluster *ClusterState
 	handler LocalServiceHandler
 	Metrics ForwardingMetrics
+
+	// SyncHandler is called when a connection starts with the sync magic byte.
+	// If nil, sync connections are dropped.
+	SyncHandler ConnHandler
 
 	// Round-robin index for load balancing across endpoints.
 	rrIndex atomic.Uint64
@@ -164,19 +172,55 @@ func (f *Forwarder) Addr() net.Addr {
 	return f.listener.Addr()
 }
 
-// handleIncoming processes an incoming forwarding request from a peer server.
+// handleIncoming processes an incoming connection. It peeks the first
+// two bytes to determine if this is a forwarding request or a sync
+// connection (distinguished by the sync magic byte 0xAA as the high
+// byte of the service name length field, which is invalid for forwarding
+// since max name length is 4096).
 func (f *Forwarder) handleIncoming(conn net.Conn) {
 	defer conn.Close()
+
+	// Peek the first byte to check for sync magic.
+	var peek [1]byte
+	if _, err := io.ReadFull(conn, peek[:]); err != nil {
+		f.logger.Error("peek first byte", "error", err)
+		return
+	}
+
+	if peek[0] == syncMagic {
+		if f.SyncHandler != nil {
+			f.SyncHandler(conn)
+		}
+		return
+	}
+
+	// It's a forwarding request. The first byte is the high byte of
+	// the name length. Read the second byte and reassemble.
 	f.Metrics.IncomingTotal.Add(1)
 	f.Metrics.IncomingActive.Add(1)
 	defer f.Metrics.IncomingActive.Add(-1)
 
-	serviceName, err := readForwardHeader(conn)
-	if err != nil {
-		f.logger.Error("read forward header", "error", err)
+	var peek2 [1]byte
+	if _, err := io.ReadFull(conn, peek2[:]); err != nil {
+		f.logger.Error("read name length second byte", "error", err)
 		f.Metrics.IncomingErrors.Add(1)
 		return
 	}
+
+	nameLen := binary.BigEndian.Uint16([]byte{peek[0], peek2[0]})
+	if nameLen == 0 || nameLen > 4096 {
+		f.logger.Error("invalid service name length", "len", nameLen)
+		f.Metrics.IncomingErrors.Add(1)
+		return
+	}
+
+	nameBuf := make([]byte, nameLen)
+	if _, err := io.ReadFull(conn, nameBuf); err != nil {
+		f.logger.Error("read service name", "error", err)
+		f.Metrics.IncomingErrors.Add(1)
+		return
+	}
+	serviceName := string(nameBuf)
 
 	f.logger.Debug("incoming forward request", "service", serviceName, "remote", conn.RemoteAddr())
 
