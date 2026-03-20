@@ -147,7 +147,7 @@
 
 ### Phase 3: 实现跨区域联邦功能
 
-- [ ] 7. 实现跨 Cluster 服务协同
+- [x] 7. 实现跨 Cluster 服务协同
   - 实现 `pkg/mesh/federation.go` 中的联邦管理功能
   - 实现跨 Cluster 的服务发现和请求转发
   - 实现联邦 Leader 选举和故障转移机制
@@ -175,7 +175,7 @@
   - 添加跨 Cluster 服务发现的性能优化
   - _Requirements: 4.3, 4.4, 4.5_
 
-- [ ] 7.4 实现跨 Cluster 请求转发
+- [x] 7.4 实现跨 Cluster 请求转发
   - 实现本 Cluster 内无服务时的跨 Cluster 转发
   - 支持简单的请求转发（不涉及负载均衡）
   - 实现跨 Cluster 请求的路由和代理
