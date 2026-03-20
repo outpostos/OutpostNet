@@ -161,7 +161,7 @@
   - 添加联邦状态监控和健康检查
   - _Requirements: 4.1, 4.2_
 
-- [ ] 7.2 实现联邦 Leader 选举
+- [x] 7.2 实现联邦 Leader 选举
   - 在每个 Cluster 内实现 Leader 选举机制
   - 支持 Leader 故障时的自动切换
   - 实现 Leader 状态的集群内同步

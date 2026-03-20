@@ -111,6 +111,10 @@ type Forwarder struct {
 	// magic byte (0xBB). If nil, federation connections are dropped.
 	FederationHandler ConnHandler
 
+	// ElectionHandler is called when a connection starts with the election
+	// magic byte (0xCC). If nil, election connections are dropped.
+	ElectionHandler ConnHandler
+
 	// Round-robin index for load balancing across endpoints.
 	rrIndex atomic.Uint64
 
@@ -201,6 +205,13 @@ func (f *Forwarder) handleIncoming(conn net.Conn) {
 	if peek[0] == federationMagic {
 		if f.FederationHandler != nil {
 			f.FederationHandler(conn)
+		}
+		return
+	}
+
+	if peek[0] == electionMagic {
+		if f.ElectionHandler != nil {
+			f.ElectionHandler(conn)
 		}
 		return
 	}
