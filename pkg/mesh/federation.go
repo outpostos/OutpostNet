@@ -235,6 +235,10 @@ type FederationManager struct {
 	// localManager provides access to local cluster's services.
 	localManager *Manager
 
+	// QueryHandler is called when a service query message is received.
+	// Set by ServiceDiscovery after creation.
+	QueryHandler ConnHandler
+
 	// listener for incoming federation connections.
 	listener net.Listener
 
@@ -493,6 +497,10 @@ func (fm *FederationManager) handleFederationConn(conn net.Conn) {
 		fm.handleIncomingForward(conn)
 	case fedMsgPing:
 		fm.handleIncomingPing(conn)
+	case fedMsgQuery:
+		if fm.QueryHandler != nil {
+			fm.QueryHandler(conn)
+		}
 	default:
 		fm.logger.Warn("unknown federation message type", "type", msgType[0])
 	}

@@ -168,7 +168,7 @@
   - 添加选举过程的监控和日志
   - _Requirements: 4.2_
 
-- [ ] 7.3 实现跨 Cluster 服务发现
+- [x] 7.3 实现跨 Cluster 服务发现
   - 实现跨 Cluster 的服务查询和响应机制
   - 支持服务信息的跨 Cluster 缓存
   - 实现跨 Cluster 服务状态同步
