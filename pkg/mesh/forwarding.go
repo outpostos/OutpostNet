@@ -107,6 +107,10 @@ type Forwarder struct {
 	// If nil, sync connections are dropped.
 	SyncHandler ConnHandler
 
+	// FederationHandler is called when a connection starts with the federation
+	// magic byte (0xBB). If nil, federation connections are dropped.
+	FederationHandler ConnHandler
+
 	// Round-robin index for load balancing across endpoints.
 	rrIndex atomic.Uint64
 
@@ -190,6 +194,13 @@ func (f *Forwarder) handleIncoming(conn net.Conn) {
 	if peek[0] == syncMagic {
 		if f.SyncHandler != nil {
 			f.SyncHandler(conn)
+		}
+		return
+	}
+
+	if peek[0] == federationMagic {
+		if f.FederationHandler != nil {
+			f.FederationHandler(conn)
 		}
 		return
 	}
