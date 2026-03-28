@@ -82,15 +82,10 @@ development_status:
   5-s29-relay-e2e: done                # feat: relay E2E tests and K8s test script
 
   # ─────────────────────────────────────────────────────────────────
-  # Epic 6: 负载均衡引擎
-  # 目标: 可插拔的负载均衡框架，支持地理感知路由
-  # 交付物: pkg/loadbalancer/, pkg/telemetry/
-  # 来源: 基于代码重建（SSOT）
+  # Epic 6: 已撤回
+  # 原因: pkg/loadbalancer 和 pkg/telemetry 为 v1 残留，违反 PRD 核心原则"分层不混"
+  #       负载均衡属于 K8s 原生能力，不在 OutpostNet 职责范围内
   # ─────────────────────────────────────────────────────────────────
-  epic-6: done
-  6-s30-loadbalancer-interface: done   # feat: LoadBalancer interface and Endpoint model
-  6-s31-geographic-lb: done            # feat: geographic-aware load balancer with distance scoring
-  6-s32-distance-calculator: done      # feat: BFS-based network topology distance calculator
 
   # ─────────────────────────────────────────────────────────────────
   # Epic 7: 集群内服务网格

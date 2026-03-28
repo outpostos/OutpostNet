@@ -1,7 +1,7 @@
 # OutpostNet v2 - Epic & Story Overview
 
 **Based on:** [PRD](./prd.md)
-**Date:** 2026-03-02 (Epic 1-5), 2026-03-29 (Epic 6-8, code-based rebuild)
+**Date:** 2026-03-02 (Epic 1-5), 2026-03-29 (Epic 7-8, code-based rebuild)
 **Status:** All Epics Done
 
 ---
@@ -22,9 +22,6 @@ Epic 4: 跨区域服务访问                  ← 端到端
     │
     ▼
 Epic 5: Relay 中转 (Growth)            ← 不可直连区域中转
-    │
-    ▼
-Epic 6: 负载均衡引擎                    ← 智能路由基础
     │
     ├───────────────┐
     ▼               ▼
@@ -141,25 +138,6 @@ S25 → S26 → S27 → S29
 
 ---
 
-## Epic 6: 负载均衡引擎
-
-**目标：** 可插拔的负载均衡框架，支持地理感知路由
-**状态：** Done
-**交付物：** `pkg/loadbalancer/`, `pkg/telemetry/`
-**来源：** 基于代码重建（SSOT）
-
-| Story | 标题 | 文件 |
-|-------|------|------|
-| S30 | 负载均衡接口与端点模型 | [s30-loadbalancer-interface.md](./stories/epic-6/s30-loadbalancer-interface.md) |
-| S31 | 地理感知负载均衡 | [s31-geographic-lb.md](./stories/epic-6/s31-geographic-lb.md) |
-| S32 | 网络拓扑距离计算引擎 | [s32-distance-calculator.md](./stories/epic-6/s32-distance-calculator.md) |
-
-```
-S30 → S32 → S31
-```
-
----
-
 ## Epic 7: 集群内服务网格
 
 **目标：** 同 Site 内多节点服务发现、状态同步与请求转发
@@ -213,8 +191,6 @@ S36 → S37 → S38 → S39
 | `pkg/annotations` | Epic 2 |
 | `pkg/tunnel` | Epic 3 |
 | `pkg/agentconfig` | Epic 4, 5 |
-| `pkg/loadbalancer` | Epic 6 |
-| `pkg/telemetry` | Epic 6 |
 | `pkg/mesh` (cluster, forwarding, manager) | Epic 7 |
 | `pkg/mesh` (federation, election, discovery, router) | Epic 8 |
 | `pkg/version` | Epic 1 |
