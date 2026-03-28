@@ -1,0 +1,129 @@
+# Sprint Status - OutpostNet v2
+# generated: 2026-03-28
+# project: OutpostNet
+# project_key: OUT
+# tracking_system: file-system
+# story_location: docs/epics.md
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status: backlog | in-progress | done
+# Story Status: backlog | ready-for-dev | in-progress | review | done
+# Retrospective Status: optional | done
+
+generated: 2026-03-28
+project: OutpostNet v2
+project_key: OUT
+tracking_system: file-system
+story_location: "docs/epics.md"
+
+development_status:
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 1: 单节点 Pod 互通（手动配置）
+  # 目标: Server + Sidecar 架构，实现同一边缘节点上 Pod 间 TCP/UDP 服务互访
+  # ─────────────────────────────────────────────────────────────────
+  epic-1: done
+  1-s1-project-scaffold: done          # feat: rebuild project scaffold in K8s style (S1)
+  1-s2-protocol-connection: done       # feat(S2): Server-Sidecar protocol and connection management
+  1-s3-tcp-export-import: done         # feat(S3): TCP service export and import
+  1-s4-udp-export-import: done         # feat(S4): UDP service export and import
+  1-s5-config-file: done               # feat(S5): YAML config file loading and validation
+  1-s6-k8s-deployment: done            # feat(S6): K8s deployment manifests and E2E test script
+  epic-1-retrospective: optional
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 2: Controller + Webhook（自动化）
+  # 目标: 将 Epic 1 的手动配置过程自动化
+  # ─────────────────────────────────────────────────────────────────
+  epic-2: done
+  2-s7-controller-scaffold: done       # feat(S7): controller scaffolding with controller-runtime
+  2-s8-annotation-spec: done           # feat(S8): annotation spec and parsing library
+  2-s9-mutating-webhook: done          # feat(S9): Mutating Webhook for sidecar auto-injection
+  2-s10-pod-reconciler: done           # feat(S10): Pod reconciler for dynamic ConfigMap generation
+  2-s11-endpointslice: done            # feat(S11): EndpointSlice and headless Service management
+  2-s12-k8s-e2e: done                  # feat(S12): K8s E2E integration test and annotated examples
+  epic-2-retrospective: optional
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 3: QUIC Tunnel Core
+  # 目标: 跨区域通信的基础 QUIC 隧道库
+  # ─────────────────────────────────────────────────────────────────
+  epic-3: done
+  3-s13-quic-scaffold: done            # feat(S13): QUIC tunnel library scaffolding and TLS utilities
+  3-s14-tunnel-server: done            # feat(S14): Tunnel Server with stream routing
+  3-s15-tunnel-client: done            # feat(S15): Tunnel Client with stream forwarding
+  3-s16-service-stream-mux: done       # feat(S16): Service-Stream multiplexing verification
+  3-s17-connection-lifecycle: done     # feat(S17): connection lifecycle — keepalive, reconnect, graceful shutdown
+  3-s18-benchmarks: done               # feat(S18): throughput benchmarks and integration tests
+  epic-3-retrospective: optional
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 4: 跨区域服务访问（端到端）
+  # 目标: Agent + Controller 协同实现跨区域服务可达
+  # ─────────────────────────────────────────────────────────────────
+  epic-4: done
+  4-s19-agent-scaffold: done           # feat(S19): Agent scaffolding and config format
+  4-s20-agent-tunnel: done             # feat(S20): Agent tunnel management — QUIC establishment and bridging
+  4-s21-config-persistence: done       # feat(S21): config persistence and offline recovery
+  4-s22-controller-tunnel-config: done # feat(S22): Controller cross-region tunnel config generation
+  4-s23-prometheus-metrics: done       # feat(S23): Prometheus metrics and observability
+  4-s24-cross-region-e2e: done         # feat(S24): cross-region E2E test
+  epic-4-retrospective: optional
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 5: Relay 中转 (Growth)
+  # 目标: 支持不可直连区域通过中转区域通信
+  # ─────────────────────────────────────────────────────────────────
+  epic-5: done
+  5-s25-relay-config: done             # feat(S25): relay configuration model
+  5-s26-agent-relay-forwarding: done   # feat(S26): Agent relay forwarding
+  5-s27-controller-relay-path: done    # feat(S27): Controller relay path computation
+  5-s28-relay-metrics: done            # feat(S28): relay metrics and observability
+  5-s29-relay-e2e: done                # feat(S29): relay E2E tests and K8s test script
+  epic-5-retrospective: optional
+
+  # ─────────────────────────────────────────────────────────────────
+  # Kiro Tasks: Phase 1 — 完善单节点服务网格功能
+  # ─────────────────────────────────────────────────────────────────
+  kiro-phase-1: done
+  kiro-task-1-load-balancer: done      # feat: Phase 1 load balancer algorithms
+  kiro-task-1.1-weighted-rr: done      # weighted round robin
+  kiro-task-1.2-consistent-hash: done  # consistent hash
+  kiro-task-2-service-constraints: done
+  kiro-task-2.1-label-selector: done
+  kiro-task-2.2-health-filter: done
+  kiro-task-3-metadata-cleanup: done
+  kiro-task-3.1-ttl-expiry: done
+  kiro-task-4-remove-express-mode: done
+  kiro-task-4.1-smart-defaults: done
+  kiro-task-4.2-config-export: done
+
+  # ─────────────────────────────────────────────────────────────────
+  # Kiro Tasks: Phase 2 — 实现区域服务网格功能
+  # ─────────────────────────────────────────────────────────────────
+  kiro-phase-2: done
+  kiro-task-5-cluster-coordination: done   # feat(mesh): add ClusterManager
+  kiro-task-5.1-node-discovery: done
+  kiro-task-5.2-service-sync: done
+  kiro-task-5.3-cross-node-forwarding: done # feat(mesh): cross-node service request forwarding
+  kiro-task-6-geo-lb: done
+  kiro-task-6.1-distance-engine: done
+  kiro-task-6.2-geo-endpoint-sort: done
+
+  # ─────────────────────────────────────────────────────────────────
+  # Kiro Tasks: Phase 3 — 实现跨区域联邦功能
+  # ─────────────────────────────────────────────────────────────────
+  kiro-phase-3: done
+  kiro-task-7-federation: done             # feat(mesh): FederationManager
+  kiro-task-7.1-federation-manager: done   # feat(mesh): FederationManager for cross-cluster coordination
+  kiro-task-7.2-leader-election: done      # feat(mesh): LeaderElection for per-cluster leader selection
+  kiro-task-7.3-cross-cluster-discovery: done # feat(mesh): ServiceDiscovery for cross-cluster service lookup
+  kiro-task-7.4-cross-cluster-forwarding: done # feat(mesh): FederationRouter for cross-cluster request forwarding
+
+# ─────────────────────────────────────────────────────────────────
+# PENDING WORK
+# ─────────────────────────────────────────────────────────────────
+# Uncommitted changes detected:
+#   - internal/controller/webhook/sidecar_injector_test.go (+235 lines)
+#     Additional test cases for SidecarInjector (existing volumes, duplicate checks, etc.)
+#     Status: needs commit
