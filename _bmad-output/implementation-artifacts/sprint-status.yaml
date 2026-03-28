@@ -1,0 +1,116 @@
+# Sprint Status - OutpostNet v2
+# generated: 2026-03-29
+# project: OutpostNet
+# project_key: OUT
+# tracking_system: file-system
+# story_location: _bmad-output/epics.md
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status: backlog | in-progress | done
+# Story Status: backlog | ready-for-dev | in-progress | review | done
+
+generated: 2026-03-29
+project: OutpostNet v2
+project_key: OUT
+tracking_system: file-system
+story_location: "_bmad-output/epics.md"
+
+development_status:
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 1: 单节点 Pod 互通（手动配置）
+  # 目标: Server + Sidecar 架构，实现同一边缘节点上 Pod 间 TCP/UDP 服务互访
+  # 交付物: cmd/outpostnet-server, cmd/outpostnet-sidecar, pkg/proxy, pkg/protocol, pkg/config
+  # ─────────────────────────────────────────────────────────────────
+  epic-1: done
+  1-s1-project-scaffold: done          # feat: rebuild project scaffold in K8s style
+  1-s2-protocol-connection: done       # feat: Server-Sidecar protocol and connection management
+  1-s3-tcp-export-import: done         # feat: TCP service export and import
+  1-s4-udp-export-import: done         # feat: UDP service export and import
+  1-s5-config-file: done               # feat: YAML config file loading and validation
+  1-s6-k8s-deployment: done            # feat: K8s deployment manifests and E2E test script
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 2: Controller + Webhook（自动化）
+  # 目标: 将 Epic 1 的手动配置过程自动化
+  # 交付物: cmd/outpostnet-controller, pkg/annotations, internal/controller/
+  # ─────────────────────────────────────────────────────────────────
+  epic-2: done
+  2-s7-controller-scaffold: done       # feat: controller scaffolding with controller-runtime
+  2-s8-annotation-spec: done           # feat: annotation spec and parsing library
+  2-s9-mutating-webhook: done          # feat: Mutating Webhook for sidecar auto-injection
+  2-s10-configmap-reconciler: done     # feat: Pod reconciler for dynamic ConfigMap generation
+  2-s11-endpointslice: done            # feat: EndpointSlice and headless Service management
+  2-s12-k8s-e2e: done                  # feat: K8s E2E integration test
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 3: QUIC Tunnel Core
+  # 目标: 跨区域通信的基础 QUIC 隧道库
+  # 交付物: pkg/tunnel/
+  # ─────────────────────────────────────────────────────────────────
+  epic-3: done
+  3-s13-quic-scaffold: done            # feat: QUIC tunnel library scaffolding and TLS utilities
+  3-s14-tunnel-server: done            # feat: Tunnel Server with stream routing
+  3-s15-tunnel-client: done            # feat: Tunnel Client with stream forwarding
+  3-s16-service-stream-mux: done       # feat: Service-Stream multiplexing verification
+  3-s17-connection-lifecycle: done     # feat: connection lifecycle — keepalive, reconnect, graceful shutdown
+  3-s18-benchmarks: done               # feat: throughput benchmarks and integration tests
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 4: 跨区域服务访问（端到端）
+  # 目标: Agent + Controller 协同实现跨区域服务可达
+  # 交付物: cmd/outpostnet-agent, internal/agent/, pkg/agentconfig/
+  # ─────────────────────────────────────────────────────────────────
+  epic-4: done
+  4-s19-agent-scaffold: done           # feat: Agent scaffolding and config format
+  4-s20-agent-tunnel: done             # feat: Agent tunnel management — QUIC establishment and bridging
+  4-s21-config-persistence: done       # feat: config persistence and offline recovery
+  4-s22-controller-tunnel-config: done # feat: Controller cross-region tunnel config generation
+  4-s23-prometheus-metrics: done       # feat: Prometheus metrics and observability
+  4-s24-cross-region-e2e: done         # feat: cross-region E2E test
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 5: Relay 中转 (Growth)
+  # 目标: 支持不可直连区域通过中转区域通信
+  # 交付物: internal/agent/relay*, pkg/agentconfig (relay extensions)
+  # ─────────────────────────────────────────────────────────────────
+  epic-5: done
+  5-s25-relay-config: done             # feat: relay configuration model
+  5-s26-agent-relay-forwarding: done   # feat: Agent relay forwarding
+  5-s27-controller-relay-path: done    # feat: Controller relay path computation
+  5-s28-relay-metrics: done            # feat: relay metrics and observability
+  5-s29-relay-e2e: done                # feat: relay E2E tests and K8s test script
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 6: 负载均衡引擎
+  # 目标: 可插拔的负载均衡框架，支持地理感知路由
+  # 交付物: pkg/loadbalancer/, pkg/telemetry/
+  # 来源: 基于代码重建（SSOT）
+  # ─────────────────────────────────────────────────────────────────
+  epic-6: done
+  6-s30-loadbalancer-interface: done   # feat: LoadBalancer interface and Endpoint model
+  6-s31-geographic-lb: done            # feat: geographic-aware load balancer with distance scoring
+  6-s32-distance-calculator: done      # feat: BFS-based network topology distance calculator
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 7: 集群内服务网格
+  # 目标: 同 Site 内多节点服务发现、状态同步与请求转发
+  # 交付物: pkg/mesh/{cluster,forwarding,manager}.go
+  # 来源: 基于代码重建（SSOT）
+  # ─────────────────────────────────────────────────────────────────
+  epic-7: done
+  7-s33-cluster-state: done            # feat: ClusterState — node and service registry
+  7-s34-cross-node-forwarding: done    # feat: Forwarder — cross-node TCP forwarding with magic byte mux
+  7-s35-cluster-manager: done          # feat: Manager — cluster orchestration and periodic sync
+
+  # ─────────────────────────────────────────────────────────────────
+  # Epic 8: 跨集群联邦
+  # 目标: 跨 Cluster 服务发现、Leader 选举与三级路由
+  # 交付物: pkg/mesh/{federation,election,discovery,federation_router}.go
+  # 来源: 基于代码重建（SSOT）
+  # ─────────────────────────────────────────────────────────────────
+  epic-8: done
+  8-s36-federation-manager: done       # feat: FederationManager — cross-cluster coordination
+  8-s37-leader-election: done          # feat: LeaderElection — priority-based per-cluster leader
+  8-s38-cross-cluster-discovery: done  # feat: ServiceDiscovery — on-demand cross-cluster lookup with caching
+  8-s39-federation-router: done        # feat: FederationRouter — tiered routing (local → cluster → federation)

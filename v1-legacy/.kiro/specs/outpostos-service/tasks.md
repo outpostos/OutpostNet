@@ -96,7 +96,7 @@
 
 ### Phase 2: 实现区域服务网格功能
 
-- [ ] 5. 实现 Cluster 内服务协同
+- [x] 5. 实现 Cluster 内服务协同
   - 实现 `pkg/mesh/cluster.go` 中的集群管理功能
   - 实现 Site 内多个 OutpostNet Server 的自动发现和组网
   - 实现集群内服务数据同步机制
@@ -117,28 +117,28 @@
   - 实现同步状态的监控和告警
   - _Requirements: 3.2_
 
-- [ ] 5.3 实现跨节点服务请求转发
+- [x] 5.3 实现跨节点服务请求转发
   - 在 `pkg/mesh/forwarding.go` 中实现请求转发逻辑
   - 根据端点归属判断是否需要转发到其他节点
   - 实现转发的负载均衡和故障转移
   - 添加转发性能监控和优化
   - _Requirements: 3.3, 3.4_
 
-- [ ] 6. 实现地理位置感知负载均衡
+- [x] 6. 实现地理位置感知负载均衡
   - 完善 `pkg/loadbalancer/geographic.go` 中的地理感知算法实现
   - 集成地理位置权重计算到现有负载均衡器工厂
   - 添加基于 Site 距离的端点优先级排序功能
   - 编写地理感知负载均衡的单元测试
   - _Requirements: 2.2, 2.3_
 
-- [ ] 6.1 实现地理距离计算引擎
+- [x] 6.1 实现地理距离计算引擎
   - 在 `pkg/telemetry/distance.go` 中实现基于网络拓扑的距离计算
   - 支持 Site Hop Count 的逻辑距离计算
   - 集成到 `pkg/loadbalancer/geographic.go` 中
   - 添加距离缓存机制提升性能
   - _Requirements: 6.4_
 
-- [ ] 6.2 实现基于地理位置的端点排序
+- [x] 6.2 实现基于地理位置的端点排序
   - 在地理感知负载均衡器中实现端点距离排序
   - 支持优先选择同 Site 内的端点
   - 实现跨 Site 的距离权重计算
@@ -147,35 +147,35 @@
 
 ### Phase 3: 实现跨区域联邦功能
 
-- [ ] 7. 实现跨 Cluster 服务协同
+- [x] 7. 实现跨 Cluster 服务协同
   - 实现 `pkg/mesh/federation.go` 中的联邦管理功能
   - 实现跨 Cluster 的服务发现和请求转发
   - 实现联邦 Leader 选举和故障转移机制
   - 添加跨 Cluster 通信的安全认证
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7_
 
-- [ ] 7.1 实现联邦管理器
+- [x] 7.1 实现联邦管理器
   - 在 `pkg/mesh/federation.go` 中实现联邦管理逻辑
   - 支持从配置获取其他 Cluster 信息
   - 实现 Cluster 间的连接建立和维护
   - 添加联邦状态监控和健康检查
   - _Requirements: 4.1, 4.2_
 
-- [ ] 7.2 实现联邦 Leader 选举
+- [x] 7.2 实现联邦 Leader 选举
   - 在每个 Cluster 内实现 Leader 选举机制
   - 支持 Leader 故障时的自动切换
   - 实现 Leader 状态的集群内同步
   - 添加选举过程的监控和日志
   - _Requirements: 4.2_
 
-- [ ] 7.3 实现跨 Cluster 服务发现
+- [x] 7.3 实现跨 Cluster 服务发现
   - 实现跨 Cluster 的服务查询和响应机制
   - 支持服务信息的跨 Cluster 缓存
   - 实现跨 Cluster 服务状态同步
   - 添加跨 Cluster 服务发现的性能优化
   - _Requirements: 4.3, 4.4, 4.5_
 
-- [ ] 7.4 实现跨 Cluster 请求转发
+- [x] 7.4 实现跨 Cluster 请求转发
   - 实现本 Cluster 内无服务时的跨 Cluster 转发
   - 支持简单的请求转发（不涉及负载均衡）
   - 实现跨 Cluster 请求的路由和代理

@@ -226,3 +226,238 @@ func TestInjectAddsVolumesAndContainer(t *testing.T) {
 		t.Fatalf("expected 2 volume mounts, got %d", len(sidecar.VolumeMounts))
 	}
 }
+
+func TestInjectWithExistingVolumes(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:v1"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-app",
+			Namespace: "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation: "true",
+				annotations.ExportsAnnotation: "api:8000:tcp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+			// Pre-existing volumes with the same names.
+			Volumes: []corev1.Volume{
+				{
+					Name: "outpostnet-config",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "custom-config"},
+						},
+					},
+				},
+				{
+					Name: "outpostnet-socket",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{
+							Path: "/custom/socket/path",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cfg, _ := annotations.Parse(pod.Annotations)
+	injector.injectSidecar(pod, cfg)
+
+	// Should NOT add duplicate volumes.
+	if len(pod.Spec.Volumes) != 2 {
+		t.Errorf("expected 2 volumes (no duplicates), got %d", len(pod.Spec.Volumes))
+	}
+	// ConfigMap name should remain the original one.
+	if pod.Spec.Volumes[0].ConfigMap.Name != "custom-config" {
+		t.Errorf("config volume should preserve original ConfigMap name, got %q",
+			pod.Spec.Volumes[0].ConfigMap.Name)
+	}
+}
+
+func TestInjectWithGenerateName(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:v1"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "my-app-", // No Name, using GenerateName
+			Namespace:    "default",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation: "true",
+				annotations.ExportsAnnotation: "web:8080:tcp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "app", Image: "myapp:latest"},
+			},
+		},
+	}
+
+	cfg, _ := annotations.Parse(pod.Annotations)
+	injector.injectSidecar(pod, cfg)
+
+	// ConfigMap name should use GenerateName when Name is empty.
+	if len(pod.Spec.Volumes) == 0 {
+		t.Fatal("expected volumes to be added")
+	}
+	configVol := pod.Spec.Volumes[0]
+	if configVol.Name != "outpostnet-config" {
+		t.Errorf("expected outpostnet-config volume, got %q", configVol.Name)
+	}
+	if configVol.ConfigMap == nil {
+		t.Fatal("expected ConfigMap volume source")
+	}
+	expectedName := "outpostnet-sidecar-my-app-"
+	if configVol.ConfigMap.LocalObjectReference.Name != expectedName {
+		t.Errorf("expected ConfigMap name %q, got %q", expectedName, configVol.ConfigMap.LocalObjectReference.Name)
+	}
+}
+
+func TestInjectSidecarResources(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:v1"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-app",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation: "true",
+				annotations.ExportsAnnotation: "svc:8080:tcp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "app", Image: "app"}},
+		},
+	}
+
+	cfg, _ := annotations.Parse(pod.Annotations)
+	injector.injectSidecar(pod, cfg)
+
+	if len(pod.Spec.Containers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(pod.Spec.Containers))
+	}
+	sidecar := pod.Spec.Containers[1]
+
+	// Check CPU requests/limits.
+	cpuReq := sidecar.Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.String() != "10m" {
+		t.Errorf("expected CPU request 10m, got %q", cpuReq.String())
+	}
+	cpuLim := sidecar.Resources.Limits[corev1.ResourceCPU]
+	if cpuLim.String() != "100m" {
+		t.Errorf("expected CPU limit 100m, got %q", cpuLim.String())
+	}
+
+	// Check memory requests/limits.
+	memReq := sidecar.Resources.Requests[corev1.ResourceMemory]
+	if memReq.String() != "16Mi" {
+		t.Errorf("expected memory request 16Mi, got %q", memReq.String())
+	}
+	memLim := sidecar.Resources.Limits[corev1.ResourceMemory]
+	if memLim.String() != "64Mi" {
+		t.Errorf("expected memory limit 64Mi, got %q", memLim.String())
+	}
+}
+
+func TestInjectSidecarVolumeMounts(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:v1"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mount-test",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation: "true",
+				annotations.ExportsAnnotation: "test:9090:udp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "app", Image: "app"}},
+		},
+	}
+
+	cfg, _ := annotations.Parse(pod.Annotations)
+	injector.injectSidecar(pod, cfg)
+
+	sidecar := pod.Spec.Containers[1]
+	if len(sidecar.VolumeMounts) != 2 {
+		t.Fatalf("expected 2 volume mounts, got %d", len(sidecar.VolumeMounts))
+	}
+
+	// Find each mount and verify properties.
+	configMount, socketMount := false, false
+	for _, m := range sidecar.VolumeMounts {
+		switch m.Name {
+		case "outpostnet-config":
+			configMount = true
+			if m.MountPath != "/etc/outpostnet" {
+				t.Errorf("config mount path: expected /etc/outpostnet, got %q", m.MountPath)
+			}
+			if !m.ReadOnly {
+				t.Error("config mount should be read-only")
+			}
+		case "outpostnet-socket":
+			socketMount = true
+			if m.MountPath != "/var/run/outpostnet" {
+				t.Errorf("socket mount path: expected /var/run/outpostnet, got %q", m.MountPath)
+			}
+		}
+	}
+	if !configMount {
+		t.Error("config volume mount not found")
+	}
+	if !socketMount {
+		t.Error("socket volume mount not found")
+	}
+}
+
+func TestInjectSidecarArgs(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:latest"}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "args-test",
+			Annotations: map[string]string{
+				annotations.InjectAnnotation: "true",
+				annotations.ExportsAnnotation: "svc:80:tcp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "app", Image: "app"}},
+		},
+	}
+
+	cfg, _ := annotations.Parse(pod.Annotations)
+	injector.injectSidecar(pod, cfg)
+
+	sidecar := pod.Spec.Containers[1]
+	if len(sidecar.Args) != 1 {
+		t.Fatalf("expected 1 arg, got %d", len(sidecar.Args))
+	}
+	expectedArg := "--config=/etc/outpostnet/sidecar.yaml"
+	if sidecar.Args[0] != expectedArg {
+		t.Errorf("expected arg %q, got %q", expectedArg, sidecar.Args[0])
+	}
+}
+
+func TestHandleUnmarshalError(t *testing.T) {
+	injector := &SidecarInjector{SidecarImage: "outpostnet-sidecar:v1"}
+
+	// Invalid JSON in Object.Raw.
+	req := admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Object: runtime.RawExtension{Raw: []byte("invalid json")},
+		},
+	}
+
+	resp := injector.Handle(context.Background(), req)
+	if resp.Allowed {
+		t.Error("expected denied for invalid JSON")
+	}
+	if resp.Result.Code != 400 { // BadRequest
+		t.Errorf("expected status code 400, got %d", resp.Result.Code)
+	}
+}
