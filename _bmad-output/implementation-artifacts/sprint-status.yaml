@@ -88,24 +88,6 @@ development_status:
   # ─────────────────────────────────────────────────────────────────
 
   # ─────────────────────────────────────────────────────────────────
-  # Epic 7: 集群内服务网格
-  # 目标: 同 Site 内多节点服务发现、状态同步与请求转发
-  # 交付物: pkg/mesh/{cluster,forwarding,manager}.go
-  # 来源: 基于代码重建（SSOT）
+  # Epic 7/8: 已撤回
+  # 原因: pkg/mesh 未集成进任何二进制，为残留代码，随 pkg/mesh 一并删除
   # ─────────────────────────────────────────────────────────────────
-  epic-7: done
-  7-s33-cluster-state: done            # feat: ClusterState — node and service registry
-  7-s34-cross-node-forwarding: done    # feat: Forwarder — cross-node TCP forwarding with magic byte mux
-  7-s35-cluster-manager: done          # feat: Manager — cluster orchestration and periodic sync
-
-  # ─────────────────────────────────────────────────────────────────
-  # Epic 8: 跨集群联邦
-  # 目标: 跨 Cluster 服务发现、Leader 选举与三级路由
-  # 交付物: pkg/mesh/{federation,election,discovery,federation_router}.go
-  # 来源: 基于代码重建（SSOT）
-  # ─────────────────────────────────────────────────────────────────
-  epic-8: done
-  8-s36-federation-manager: done       # feat: FederationManager — cross-cluster coordination
-  8-s37-leader-election: done          # feat: LeaderElection — priority-based per-cluster leader
-  8-s38-cross-cluster-discovery: done  # feat: ServiceDiscovery — on-demand cross-cluster lookup with caching
-  8-s39-federation-router: done        # feat: FederationRouter — tiered routing (local → cluster → federation)

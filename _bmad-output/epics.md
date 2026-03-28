@@ -1,8 +1,8 @@
 # OutpostNet v2 - Epic & Story Overview
 
 **Based on:** [PRD](./prd.md)
-**Date:** 2026-03-02 (Epic 1-5), 2026-03-29 (Epic 7-8, code-based rebuild)
-**Status:** All Epics Done
+**Date:** 2026-03-02 (Epic 1-5)
+**Status:** Epics 1-5 Done
 
 ---
 
@@ -22,11 +22,6 @@ Epic 4: 跨区域服务访问                  ← 端到端
     │
     ▼
 Epic 5: Relay 中转 (Growth)            ← 不可直连区域中转
-    │
-    ├───────────────┐
-    ▼               ▼
-Epic 7: 集群内      Epic 8: 跨集群
-服务网格             联邦
 ```
 
 ---
@@ -35,7 +30,7 @@ Epic 7: 集群内      Epic 8: 跨集群
 
 **目标：** Server + Sidecar 架构，实现同一边缘节点上 Pod 间 TCP/UDP 服务互访
 **状态：** Done
-**交付物：** `cmd/outpostnet-server`, `cmd/outpostnet-sidecar`, `pkg/proxy`, `pkg/protocol`, `pkg/config`
+**交付物：** `cmd/outpostnet-server`, `cmd/outpostnet-sidecar`, `pkg/protocol`, `pkg/config`
 
 | Story | 标题 | 文件 |
 |-------|------|------|
@@ -138,45 +133,6 @@ S25 → S26 → S27 → S29
 
 ---
 
-## Epic 7: 集群内服务网格
-
-**目标：** 同 Site 内多节点服务发现、状态同步与请求转发
-**状态：** Done
-**交付物：** `pkg/mesh/{cluster,forwarding,manager}.go`
-**来源：** 基于代码重建（SSOT）
-
-| Story | 标题 | 文件 |
-|-------|------|------|
-| S33 | 集群状态管理 | [s33-cluster-state.md](./stories/epic-7/s33-cluster-state.md) |
-| S34 | 跨节点服务请求转发 | [s34-cross-node-forwarding.md](./stories/epic-7/s34-cross-node-forwarding.md) |
-| S35 | 集群管理器与服务同步 | [s35-cluster-manager.md](./stories/epic-7/s35-cluster-manager.md) |
-
-```
-S33 → S34 → S35
-```
-
----
-
-## Epic 8: 跨集群联邦
-
-**目标：** 跨 Cluster 服务发现、Leader 选举与三级路由
-**状态：** Done
-**交付物：** `pkg/mesh/{federation,election,discovery,federation_router}.go`
-**来源：** 基于代码重建（SSOT）
-
-| Story | 标题 | 文件 |
-|-------|------|------|
-| S36 | 联邦管理器 | [s36-federation-manager.md](./stories/epic-8/s36-federation-manager.md) |
-| S37 | Leader 选举 | [s37-leader-election.md](./stories/epic-8/s37-leader-election.md) |
-| S38 | 跨集群服务发现 | [s38-cross-cluster-discovery.md](./stories/epic-8/s38-cross-cluster-discovery.md) |
-| S39 | 联邦路由器 | [s39-federation-router.md](./stories/epic-8/s39-federation-router.md) |
-
-```
-S36 → S37 → S38 → S39
-```
-
----
-
 ## Component-Epic Mapping
 
 | 代码组件 | Epic |
@@ -185,14 +141,11 @@ S36 → S37 → S38 → S39
 | `cmd/outpostnet-sidecar` | Epic 1 |
 | `cmd/outpostnet-controller` | Epic 2 |
 | `cmd/outpostnet-agent` | Epic 4 |
-| `pkg/proxy` | Epic 1 |
 | `pkg/protocol` | Epic 1 |
 | `pkg/config` | Epic 1 |
 | `pkg/annotations` | Epic 2 |
 | `pkg/tunnel` | Epic 3 |
 | `pkg/agentconfig` | Epic 4, 5 |
-| `pkg/mesh` (cluster, forwarding, manager) | Epic 7 |
-| `pkg/mesh` (federation, election, discovery, router) | Epic 8 |
 | `pkg/version` | Epic 1 |
 | `internal/server` | Epic 1 |
 | `internal/sidecar` | Epic 1 |
