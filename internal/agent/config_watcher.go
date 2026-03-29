@@ -142,7 +142,6 @@ func ReloadAgent(a *Agent, newCfg *agentconfig.Config) error {
 	}
 
 	a.logger.Info("config reloaded",
-		"region", newCfg.Region,
 		"tunnels", len(newCfg.Tunnels),
 		"exports", len(newCfg.Exports),
 		"imports", len(newCfg.Imports),

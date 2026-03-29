@@ -8,10 +8,8 @@ import (
 
 func TestLoadConfig(t *testing.T) {
 	yaml := `
-region: edge-a
 tunnels:
-  - remote_region: cloud
-    remote_addr: "cloud-agent.example.com:4242"
+  - remote_addr: "cloud-agent.example.com:4242"
     role: client
 exports:
   - name: web-api
@@ -20,7 +18,6 @@ exports:
 imports:
   - name: cloud-db
     listen_addr: "0.0.0.0:13306"
-    remote_region: cloud
     protocol: tcp
 persistence:
   dir: /tmp/outpostnet-test
@@ -39,14 +36,8 @@ tls:
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if cfg.Region != "edge-a" {
-		t.Errorf("region = %q, want edge-a", cfg.Region)
-	}
 	if len(cfg.Tunnels) != 1 {
 		t.Fatalf("tunnels len = %d, want 1", len(cfg.Tunnels))
-	}
-	if cfg.Tunnels[0].RemoteRegion != "cloud" {
-		t.Errorf("tunnel remote_region = %q, want cloud", cfg.Tunnels[0].RemoteRegion)
 	}
 	if cfg.Tunnels[0].Role != "client" {
 		t.Errorf("tunnel role = %q, want client", cfg.Tunnels[0].Role)
@@ -60,9 +51,6 @@ tls:
 	if len(cfg.Imports) != 1 {
 		t.Fatalf("imports len = %d, want 1", len(cfg.Imports))
 	}
-	if cfg.Imports[0].RemoteRegion != "cloud" {
-		t.Errorf("import remote_region = %q, want cloud", cfg.Imports[0].RemoteRegion)
-	}
 	if cfg.Metrics.Addr != ":9091" {
 		t.Errorf("metrics addr = %q, want :9091", cfg.Metrics.Addr)
 	}
@@ -71,12 +59,41 @@ tls:
 	}
 }
 
+func TestLoadConfigWithRegion(t *testing.T) {
+	// Region is optional but still accepted when present.
+	yaml := `
+region: edge-a
+tunnels:
+  - remote_region: cloud
+    remote_addr: "cloud-agent.example.com:4242"
+    role: client
+imports:
+  - name: cloud-db
+    listen_addr: "0.0.0.0:13306"
+    remote_region: cloud
+    protocol: tcp
+persistence:
+  dir: /tmp/outpostnet-test
+`
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.Region != "edge-a" {
+		t.Errorf("region = %q, want edge-a", cfg.Region)
+	}
+	if cfg.Tunnels[0].RemoteRegion != "cloud" {
+		t.Errorf("tunnel remote_region = %q, want cloud", cfg.Tunnels[0].RemoteRegion)
+	}
+	if cfg.Imports[0].RemoteRegion != "cloud" {
+		t.Errorf("import remote_region = %q, want cloud", cfg.Imports[0].RemoteRegion)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	yaml := `
-region: test
 tunnels:
-  - remote_region: other
-    remote_addr: "1.2.3.4:4242"
+  - remote_addr: "1.2.3.4:4242"
     role: client
 `
 	cfg, err := ParseConfig([]byte(yaml))
@@ -121,50 +138,29 @@ func TestValidateConfigErrors(t *testing.T) {
 		want string
 	}{
 		{
-			name: "missing region",
-			yaml: `tunnels: []`,
-			want: "region is required",
-		},
-		{
-			name: "client tunnel missing remote_region",
-			yaml: `
-region: test
-tunnels:
-  - role: client
-    remote_addr: "1.2.3.4:4242"`,
-			want: "tunnels[0].remote_region is required",
-		},
-		{
 			name: "tunnel invalid role",
 			yaml: `
-region: test
 tunnels:
-  - remote_region: other
-    role: invalid`,
+  - role: invalid`,
 			want: "tunnels[0].role must be 'server' or 'client'",
 		},
 		{
 			name: "server tunnel missing listen_addr",
 			yaml: `
-region: test
 tunnels:
-  - remote_region: other
-    role: server`,
+  - role: server`,
 			want: "tunnels[0].listen_addr is required",
 		},
 		{
 			name: "client tunnel missing remote_addr",
 			yaml: `
-region: test
 tunnels:
-  - remote_region: other
-    role: client`,
+  - role: client`,
 			want: "tunnels[0].remote_addr is required",
 		},
 		{
 			name: "export missing name",
 			yaml: `
-region: test
 exports:
   - local_addr: "127.0.0.1:8080"
     protocol: tcp`,
@@ -173,7 +169,6 @@ exports:
 		{
 			name: "export missing local_addr",
 			yaml: `
-region: test
 exports:
   - name: svc
     protocol: tcp`,
@@ -182,7 +177,6 @@ exports:
 		{
 			name: "export invalid protocol",
 			yaml: `
-region: test
 exports:
   - name: svc
     local_addr: "127.0.0.1:8080"
@@ -190,22 +184,18 @@ exports:
 			want: "invalid protocol",
 		},
 		{
-			name: "import missing remote_region",
+			name: "import missing name",
 			yaml: `
-region: test
 imports:
-  - name: svc
-    listen_addr: "0.0.0.0:8080"
+  - listen_addr: "0.0.0.0:8080"
     protocol: tcp`,
-			want: "imports[0].remote_region is required",
+			want: "imports[0].name is required",
 		},
 		{
 			name: "import missing listen_addr",
 			yaml: `
-region: test
 imports:
   - name: svc
-    remote_region: cloud
     protocol: tcp`,
 			want: "imports[0].listen_addr is required",
 		},
@@ -226,9 +216,8 @@ imports:
 
 func TestMarshalConfig(t *testing.T) {
 	cfg := &Config{
-		Region: "edge-a",
 		Tunnels: []TunnelConfig{
-			{RemoteRegion: "cloud", RemoteAddr: "1.2.3.4:4242", Role: "client"},
+			{RemoteAddr: "1.2.3.4:4242", Role: "client"},
 		},
 		Exports: []ExportConfig{
 			{Name: "web", LocalAddr: "127.0.0.1:8080", Protocol: "tcp"},
@@ -248,9 +237,6 @@ func TestMarshalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseConfig round-trip: %v", err)
 	}
-	if cfg2.Region != cfg.Region {
-		t.Errorf("round-trip region = %q, want %q", cfg2.Region, cfg.Region)
-	}
 	if len(cfg2.Tunnels) != 1 {
 		t.Errorf("round-trip tunnels len = %d, want 1", len(cfg2.Tunnels))
 	}
@@ -258,10 +244,8 @@ func TestMarshalConfig(t *testing.T) {
 
 func TestServerRoleTunnel(t *testing.T) {
 	yaml := `
-region: cloud
 tunnels:
-  - remote_region: edge-a
-    role: server
+  - role: server
     listen_addr: "0.0.0.0:4242"
 exports:
   - name: cloud-db
@@ -280,11 +264,9 @@ exports:
 	}
 }
 
-func TestServerRoleTunnelWithoutRemoteRegion(t *testing.T) {
-	// Server-role tunnels do not need remote_region — the server accepts any
-	// authenticated client regardless of region.
-	yaml := `
-region: site-a
+// TestFRPStyleConfig verifies the 1.0 target config — no region on either side.
+func TestFRPStyleConfig(t *testing.T) {
+	serverYAML := `
 auth:
   token: changeme
 tunnels:
@@ -295,21 +277,45 @@ exports:
     local_addr: 127.0.0.1:8080
     protocol: tcp
 `
-	cfg, err := ParseConfig([]byte(yaml))
+	cfg, err := ParseConfig([]byte(serverYAML))
 	if err != nil {
-		t.Fatalf("ParseConfig: %v", err)
+		t.Fatalf("server config ParseConfig: %v", err)
+	}
+	if cfg.Region != "" {
+		t.Errorf("server region should be empty, got %q", cfg.Region)
 	}
 	if cfg.Tunnels[0].Role != "server" {
 		t.Errorf("role = %q, want server", cfg.Tunnels[0].Role)
 	}
-	if cfg.Tunnels[0].RemoteRegion != "" {
-		t.Errorf("remote_region should be empty, got %q", cfg.Tunnels[0].RemoteRegion)
+
+	clientYAML := `
+auth:
+  token: changeme
+tunnels:
+  - role: client
+    remote_addr: 10.0.1.1:4242
+imports:
+  - name: my-http
+    listen_addr: 127.0.0.1:9080
+    protocol: tcp
+`
+	cfgC, err := ParseConfig([]byte(clientYAML))
+	if err != nil {
+		t.Fatalf("client config ParseConfig: %v", err)
+	}
+	if cfgC.Region != "" {
+		t.Errorf("client region should be empty, got %q", cfgC.Region)
+	}
+	if cfgC.Tunnels[0].RemoteRegion != "" {
+		t.Errorf("tunnel remote_region should be empty, got %q", cfgC.Tunnels[0].RemoteRegion)
+	}
+	if cfgC.Imports[0].RemoteRegion != "" {
+		t.Errorf("import remote_region should be empty, got %q", cfgC.Imports[0].RemoteRegion)
 	}
 }
 
 func TestRelayConfig(t *testing.T) {
 	yamlData := `
-region: relay-c
 tunnels:
   - remote_region: edge-a
     role: server
@@ -368,7 +374,6 @@ func TestRelayConfigValidation(t *testing.T) {
 		{
 			name: "relay missing service",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: b
     role: client
@@ -381,7 +386,6 @@ relays:
 		{
 			name: "relay missing from_region",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: b
     role: client
@@ -394,7 +398,6 @@ relays:
 		{
 			name: "relay missing to_region",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: b
     role: client
@@ -407,7 +410,6 @@ relays:
 		{
 			name: "relay from equals to",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: a
     role: client
@@ -421,7 +423,6 @@ relays:
 		{
 			name: "relay to_region no client tunnel",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: a
     role: server
@@ -435,7 +436,6 @@ relays:
 		{
 			name: "relay max_hops too high",
 			yaml: `
-region: relay
 tunnels:
   - remote_region: b
     role: client
@@ -464,7 +464,6 @@ relays:
 
 func TestRelayMarshalRoundTrip(t *testing.T) {
 	cfg := &Config{
-		Region: "relay-c",
 		Tunnels: []TunnelConfig{
 			{RemoteRegion: "edge-a", Role: "server", ListenAddr: "0.0.0.0:4242"},
 			{RemoteRegion: "cloud-b", Role: "client", RemoteAddr: "1.2.3.4:4242"},

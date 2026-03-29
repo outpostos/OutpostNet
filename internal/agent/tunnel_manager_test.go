@@ -43,12 +43,10 @@ func TestTunnelManagerServerMode(t *testing.T) {
 	echoLn := startTCPEchoServer(t)
 
 	cfg := &agentconfig.Config{
-		Region: "cloud",
 		Tunnels: []agentconfig.TunnelConfig{
 			{
-				RemoteRegion: "edge-a",
-				Role:         "server",
-				ListenAddr:   "127.0.0.1:0",
+				Role:       "server",
+				ListenAddr: "127.0.0.1:0",
 			},
 		},
 		Exports: []agentconfig.ExportConfig{
@@ -147,20 +145,17 @@ func TestTunnelManagerClientMode(t *testing.T) {
 	tmpLn.Close()
 
 	cfg := &agentconfig.Config{
-		Region: "edge-a",
 		Tunnels: []agentconfig.TunnelConfig{
 			{
-				RemoteRegion: "cloud",
-				Role:         "client",
-				RemoteAddr:   srvAddr,
+				Role:       "client",
+				RemoteAddr: srvAddr,
 			},
 		},
 		Imports: []agentconfig.ImportConfig{
 			{
-				Name:         "remote-echo",
-				ListenAddr:   fmt.Sprintf("127.0.0.1:%d", importPort),
-				RemoteRegion: "cloud",
-				Protocol:     "tcp",
+				Name:       "remote-echo",
+				ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort),
+				Protocol:   "tcp",
 			},
 		},
 		TLS: agentconfig.TLSConfig{Insecure: true},
@@ -210,12 +205,10 @@ func TestTunnelManagerStop(t *testing.T) {
 	echoLn := startTCPEchoServer(t)
 
 	cfg := &agentconfig.Config{
-		Region: "test",
 		Tunnels: []agentconfig.TunnelConfig{
 			{
-				RemoteRegion: "other",
-				Role:         "server",
-				ListenAddr:   "127.0.0.1:0",
+				Role:       "server",
+				ListenAddr: "127.0.0.1:0",
 			},
 		},
 		Exports: []agentconfig.ExportConfig{

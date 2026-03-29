@@ -49,7 +49,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer cancel()
 
 	a.logger.Info("agent starting",
-		"region", a.cfg.Region,
 		"tunnels", len(a.cfg.Tunnels),
 		"exports", len(a.cfg.Exports),
 		"imports", len(a.cfg.Imports),

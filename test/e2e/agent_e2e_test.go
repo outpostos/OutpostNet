@@ -126,6 +126,16 @@ func agentCfg(t *testing.T, region string) *agentconfig.Config {
 	}
 }
 
+// agentCfgNoRegion builds a minimal agent config with no region set (FRP-style).
+func agentCfgNoRegion(t *testing.T) *agentconfig.Config {
+	return &agentconfig.Config{
+		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", freePortE2E(t)),
+		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", freePortE2E(t))},
+		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
+		TLS:         agentconfig.TLSConfig{Insecure: true},
+	}
+}
+
 // ─── SC1: Basic QUIC tunnel — TCP forwarding ─────────────────────────────────
 
 // TestSC1_BasicTunnel_TCP verifies:
@@ -160,6 +170,43 @@ func TestSC1_BasicTunnel_TCP(t *testing.T) {
 
 	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC1: basic tunnel OK"))
 	t.Log("PASS SC1: basic QUIC tunnel TCP forwarding")
+}
+
+// ─── SC2b: FRP-style — no region on either side ──────────────────────────────
+
+// TestSC2b_FRPStyle_NoRegion verifies the 1.0 target config where neither
+// server nor client specifies a region.
+func TestSC2b_FRPStyle_NoRegion(t *testing.T) {
+	echoLn := startEchoSrv(t)
+
+	// Server side (frps equivalent) — no region.
+	tunnelPort := freePortE2E(t)
+	cfgS := agentCfgNoRegion(t)
+	cfgS.Auth = agentconfig.AuthConfig{Token: "changeme"}
+	cfgS.Tunnels = []agentconfig.TunnelConfig{
+		{Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+	}
+	cfgS.Exports = []agentconfig.ExportConfig{
+		{Name: "my-http", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
+	}
+	startAgent(t, cfgS)
+
+	// Client side (frpc equivalent) — no region.
+	importPort := freePortE2E(t)
+	cfgC := agentCfgNoRegion(t)
+	cfgC.Auth = agentconfig.AuthConfig{Token: "changeme"}
+	cfgC.Tunnels = []agentconfig.TunnelConfig{
+		{Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+	}
+	cfgC.Imports = []agentconfig.ImportConfig{
+		{Name: "my-http", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), Protocol: "tcp"},
+	}
+	startAgent(t, cfgC)
+
+	time.Sleep(300 * time.Millisecond)
+
+	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC2b: FRP-style no-region OK"))
+	t.Log("PASS SC2b: FRP-style no-region tunnel")
 }
 
 // ─── SC3: Multi-service mux — 10+ services on a single QUIC connection ───────

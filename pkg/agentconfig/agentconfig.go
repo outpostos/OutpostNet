@@ -11,8 +11,8 @@ import (
 
 // Config is the top-level Agent configuration.
 type Config struct {
-	// Region identifies which edge region this Agent belongs to.
-	Region string `yaml:"region"`
+	// Region optionally identifies this agent (used for relay routing).
+	Region string `yaml:"region,omitempty"`
 
 	// Tunnels defines QUIC tunnel connections to other regions.
 	Tunnels []TunnelConfig `yaml:"tunnels"`
@@ -46,8 +46,8 @@ type Config struct {
 
 // TunnelConfig describes a QUIC tunnel to another region.
 type TunnelConfig struct {
-	// RemoteRegion is the name of the remote region.
-	RemoteRegion string `yaml:"remote_region"`
+	// RemoteRegion optionally names the remote side (used for relay routing).
+	RemoteRegion string `yaml:"remote_region,omitempty"`
 
 	// RemoteAddr is the remote Agent's address (host:port).
 	RemoteAddr string `yaml:"remote_addr"`
@@ -79,8 +79,9 @@ type ImportConfig struct {
 	// ListenAddr is the local address to listen on for incoming connections.
 	ListenAddr string `yaml:"listen_addr"`
 
-	// RemoteRegion identifies which region exports this service.
-	RemoteRegion string `yaml:"remote_region"`
+	// RemoteRegion optionally identifies which tunnel carries this service.
+	// When omitted, the import is served by whichever client tunnel is available.
+	RemoteRegion string `yaml:"remote_region,omitempty"`
 
 	// Protocol is "tcp" or "udp".
 	Protocol string `yaml:"protocol"`
@@ -192,10 +193,6 @@ func applyDefaults(cfg *Config) {
 
 // ValidateConfig checks that the config is well-formed.
 func ValidateConfig(cfg *Config) error {
-	if cfg.Region == "" {
-		return fmt.Errorf("region is required")
-	}
-
 	for i, t := range cfg.Tunnels {
 		switch strings.ToLower(t.Role) {
 		case "server":
@@ -203,9 +200,6 @@ func ValidateConfig(cfg *Config) error {
 				return fmt.Errorf("tunnels[%d].listen_addr is required when role=server", i)
 			}
 		case "client":
-			if t.RemoteRegion == "" {
-				return fmt.Errorf("tunnels[%d].remote_region is required", i)
-			}
 			if t.RemoteAddr == "" {
 				return fmt.Errorf("tunnels[%d].remote_addr is required when role=client", i)
 			}
@@ -232,9 +226,6 @@ func ValidateConfig(cfg *Config) error {
 		}
 		if imp.ListenAddr == "" {
 			return fmt.Errorf("imports[%d].listen_addr is required", i)
-		}
-		if imp.RemoteRegion == "" {
-			return fmt.Errorf("imports[%d].remote_region is required", i)
 		}
 		if err := validateProtocol(imp.Protocol); err != nil {
 			return fmt.Errorf("imports[%d].protocol: %w", i, err)

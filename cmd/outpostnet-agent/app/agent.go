@@ -42,7 +42,7 @@ func NewAgentCommand() *cobra.Command {
 
 	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
-	cmd.Flags().StringVar(&region, "region", "", "Region name (overrides config file)")
+	cmd.Flags().StringVar(&region, "region", "", "Optional region name (overrides config file; used for relay routing)")
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Metrics endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&healthAddr, "health-addr", "", "Health check endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&persistenceDir, "persistence-dir", "", "Directory for config persistence (overrides config file)")
@@ -94,17 +94,13 @@ func loadAgentConfig(configFile, region, metricsAddr, healthAddr, persistenceDir
 		cfg.Persistence.Dir = persistenceDir
 	}
 
-	if cfg.Region == "" {
-		return nil, fmt.Errorf("region is required (via --region flag or config file)")
-	}
-
 	return cfg, nil
 }
 
 func runAgent(cfg *agentconfig.Config) error {
 	v := version.Get()
 	log.Printf("outpostnet-agent %s starting...", v.GitVersion)
-	log.Printf("region: %s, health: %s, metrics: %s", cfg.Region, cfg.HealthAddr, cfg.Metrics.Addr)
+	log.Printf("health: %s, metrics: %s", cfg.HealthAddr, cfg.Metrics.Addr)
 
 	a := agent.New(cfg, nil)
 
