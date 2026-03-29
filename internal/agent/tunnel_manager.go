@@ -115,6 +115,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 	srv := tunnel.NewServer(tunnel.ServerConfig{
 		ListenAddr: tc.ListenAddr,
 		TLS:        tlsCfg,
+		Token:      tm.cfg.Auth.Token,
 	}, tm.logger.With("tunnel", "server", "remote_region", tc.RemoteRegion))
 
 	// Register all exports as routes on this server.
@@ -150,6 +151,7 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 		ClientConfig: tunnel.ClientConfig{
 			ServerAddr: tc.RemoteAddr,
 			TLS:        tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
+			Token:      tm.cfg.Auth.Token,
 		},
 		InitialReconnectDelay: 1 * time.Second,
 		MaxReconnectDelay:     30 * time.Second,

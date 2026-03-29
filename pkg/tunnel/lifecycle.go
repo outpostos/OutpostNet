@@ -108,7 +108,7 @@ func (mc *ManagedClient) State() ConnState {
 func (mc *ManagedClient) Connect(ctx context.Context) error {
 	mc.setState(StateConnecting)
 
-	conn, err := Dial(ctx, mc.cfg.ClientConfig)
+	conn, err := dialAndAuth(ctx, mc.cfg.ClientConfig)
 	if err != nil {
 		mc.setState(StateDisconnected)
 		return err
@@ -169,7 +169,7 @@ func (mc *ManagedClient) reconnect(ctx context.Context) {
 		attempt++
 		mc.logger.Info("reconnect attempt", "attempt", attempt, "delay", delay)
 
-		conn, err := Dial(ctx, mc.cfg.ClientConfig)
+		conn, err := dialAndAuth(ctx, mc.cfg.ClientConfig)
 		if err != nil {
 			mc.logger.Error("reconnect failed", "attempt", attempt, "error", err)
 			// Exponential backoff.
