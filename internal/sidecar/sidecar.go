@@ -32,6 +32,7 @@ type Config struct {
 	ServerSocket      string
 	SidecarID         string
 	HeartbeatInterval time.Duration
+	UDPSessionTimeout time.Duration // idle timeout for UDP sessions; 0 disables cleanup
 	Exports           []ExportEntry
 	Imports           []ImportEntry
 }
@@ -41,6 +42,7 @@ func DefaultConfig() Config {
 	return Config{
 		ServerSocket:      "/var/run/outpostnet/server.sock",
 		HeartbeatInterval: 10 * time.Second,
+		UDPSessionTimeout: 30 * time.Second,
 	}
 }
 
@@ -53,8 +55,9 @@ type Sidecar struct {
 	streams map[uint32]net.Conn // streamID -> local TCP/UDP connection
 
 	// UDP session tracking for import side.
-	udpMu       sync.RWMutex
-	udpSessions map[string]*udpSession // "srcAddr" -> session (import side)
+	udpMu            sync.RWMutex
+	udpSessions      map[string]*udpSession // "srcAddr" -> session (import side)
+	udpCleanupOnce   sync.Once
 
 	// Connect serialization: only one Connect request in flight at a time.
 	connectMu sync.Mutex
@@ -239,6 +242,7 @@ func (s *Sidecar) startImportListener(imp ImportEntry) error {
 		s.importUDPConns = append(s.importUDPConns, pc)
 		log.Printf("[sidecar] import listener (udp): %s -> %s", imp.Name, addr)
 		go s.handleUDPImport(pc, imp)
+		s.udpCleanupOnce.Do(func() { go s.udpCleanupLoop() })
 	}
 
 	return nil
@@ -327,9 +331,14 @@ func (s *Sidecar) handleUDPImport(pc net.PacketConn, imp ImportEntry) {
 
 		key := srcAddr.String()
 
-		s.udpMu.RLock()
+		// Look up the session and update lastSeen under the write lock to avoid
+		// a data race with cleanUDPSessions.
+		s.udpMu.Lock()
 		session, ok := s.udpSessions[key]
-		s.udpMu.RUnlock()
+		if ok {
+			session.lastSeen = time.Now()
+		}
+		s.udpMu.Unlock()
 
 		if !ok {
 			// New UDP session: request a stream from Server.
@@ -357,8 +366,6 @@ func (s *Sidecar) handleUDPImport(pc net.PacketConn, imp ImportEntry) {
 			log.Printf("[sidecar] udp session %s -> stream %d (service=%s)", key, streamID, imp.Name)
 		}
 
-		session.lastSeen = time.Now()
-
 		// Forward datagram to server.
 		s.codec.WriteFrame(&protocol.Frame{
 			Type:     protocol.MsgTypeData,
@@ -383,6 +390,45 @@ func (u *udpImportConn) RemoteAddr() net.Addr               { return u.srcAddr }
 func (u *udpImportConn) SetDeadline(t time.Time) error      { return nil }
 func (u *udpImportConn) SetReadDeadline(t time.Time) error  { return nil }
 func (u *udpImportConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// cleanUDPSessions removes UDP sessions that have been idle for longer than
+// timeout and deletes their corresponding stream entries. Returns the number
+// of sessions removed.
+func (s *Sidecar) cleanUDPSessions(timeout time.Duration) int {
+	now := time.Now()
+	s.udpMu.Lock()
+	defer s.udpMu.Unlock()
+
+	removed := 0
+	for key, sess := range s.udpSessions {
+		if now.Sub(sess.lastSeen) >= timeout {
+			s.mu.Lock()
+			delete(s.streams, sess.streamID)
+			s.mu.Unlock()
+			delete(s.udpSessions, key)
+			removed++
+		}
+	}
+	return removed
+}
+
+// udpCleanupLoop runs cleanUDPSessions on a ticker until the sidecar stops.
+func (s *Sidecar) udpCleanupLoop() {
+	timeout := s.config.UDPSessionTimeout
+	if timeout <= 0 {
+		return
+	}
+	ticker := time.NewTicker(timeout / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.cleanUDPSessions(timeout)
+		}
+	}
+}
 
 // --- Heartbeat ---
 
