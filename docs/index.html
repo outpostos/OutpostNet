@@ -141,7 +141,7 @@
 
 <section class="hero">
   <h1>Tunnel anything.<br><span>No public IP needed.</span></h1>
-  <p>OutpostNet is a lightweight TCP/UDP tunneling proxy built for edge computing. Expose local services across regions over encrypted QUIC tunnels with multi-hop relay.</p>
+  <p>One binary, two roles. Like frp, but built on QUIC with multi-hop relay. Expose local services across regions over encrypted tunnels.</p>
   <div class="hero-buttons">
     <a href="https://github.com/outpostos/OutpostNet/releases" class="btn btn-primary">Download v1.0.0</a>
     <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md" class="btn btn-secondary">Quick Start</a>
@@ -181,22 +181,16 @@
 
 <section class="diagram-section" id="how-it-works">
   <h2>How It Works</h2>
+  <p style="color: var(--text-muted); margin-bottom: 1.5rem;">One binary (<code style="color: var(--green);">outpostnet-agent</code>), two roles — like frp's frps + frpc, unified.</p>
   <div class="diagram">
-Region A (behind NAT)                          Region B (behind NAT)
-┌──────────────────────────┐                   ┌──────────────────────────┐
-│                          │    QUIC Tunnel     │                          │
-│  App (:8080)             │   TLS 1.3, mux    │              App (:9080) │
-│   │                      │◄═════════════════►│                      │   │
-│   ▼                      │                   │                      ▼   │
-│  Sidecar (export)        │                   │        Sidecar (import)  │
-│   │                      │                   │                      │   │
-│   ▼                      │                   │                      ▼   │
-│  Server (route)          │                   │          Server (route)  │
-│   │                      │                   │                      │   │
-│   ▼                      │                   │                      ▼   │
-│  Agent ──────────────────┼───────────────────┼──────────────── Agent    │
-│  (tunnel server)         │                   │         (tunnel client)  │
-└──────────────────────────┘                   └──────────────────────────┘</div>
+Host A (server role)                    Host B (client role)
+┌──────────────────┐                    ┌──────────────────┐
+│  App (:8080)     │    QUIC Tunnel     │     App (:9080)  │
+│   │              │    (TLS 1.3)       │              │   │
+│   ▼              │                    │              ▼   │
+│  outpostnet-agent ◄══════════════════► outpostnet-agent  │
+│  (export)        │                    │        (import)  │
+└──────────────────┘                    └──────────────────┘</div>
 </section>
 
 <section class="comparison" id="comparison">
@@ -208,23 +202,23 @@ Region A (behind NAT)                          Region B (behind NAT)
       <th>FRP</th>
     </tr>
     <tr>
-      <td>TCP Proxy</td>
+      <td>Binaries needed</td>
+      <td><strong>1</strong> (outpostnet-agent)</td>
+      <td>2 (frps + frpc)</td>
+    </tr>
+    <tr>
+      <td>TCP & UDP Proxy</td>
       <td class="check">Yes</td>
       <td class="check">Yes</td>
     </tr>
     <tr>
-      <td>UDP Proxy</td>
-      <td class="check">Yes</td>
-      <td class="check">Yes</td>
-    </tr>
-    <tr>
-      <td>Transport Protocol</td>
+      <td>Transport</td>
       <td><strong>QUIC (TLS 1.3)</strong></td>
       <td>TCP / KCP / QUIC</td>
     </tr>
     <tr>
       <td>Multi-Hop Relay</td>
-      <td class="check"><strong>Yes (native)</strong></td>
+      <td class="check"><strong>Native</strong></td>
       <td class="cross">No</td>
     </tr>
     <tr>
@@ -233,7 +227,7 @@ Region A (behind NAT)                          Region B (behind NAT)
       <td class="check">Yes</td>
     </tr>
     <tr>
-      <td>Stream Multiplexing</td>
+      <td>Stream Mux</td>
       <td class="check"><strong>QUIC native</strong></td>
       <td class="check">yamux</td>
     </tr>
@@ -243,28 +237,18 @@ Region A (behind NAT)                          Region B (behind NAT)
       <td class="check">Yes</td>
     </tr>
     <tr>
-      <td>Prometheus Metrics</td>
-      <td class="check">Yes</td>
-      <td class="check">Yes (dashboard)</td>
+      <td>Metrics</td>
+      <td class="check">Prometheus</td>
+      <td class="check">Dashboard</td>
     </tr>
     <tr>
-      <td>K8s Integration</td>
-      <td class="check">Sidecar injection</td>
-      <td class="cross">Manual</td>
-    </tr>
-    <tr>
-      <td>Edge-First Design</td>
-      <td class="check"><strong>Yes</strong></td>
-      <td class="cross">Generic</td>
-    </tr>
-    <tr>
-      <td>HTTP Vhost Proxy</td>
-      <td>Roadmap (v1.1)</td>
+      <td>HTTP Vhost</td>
+      <td>Roadmap</td>
       <td class="check">Yes</td>
     </tr>
     <tr>
       <td>Dashboard UI</td>
-      <td>Roadmap (v1.2)</td>
+      <td>Roadmap</td>
       <td class="check">Yes</td>
     </tr>
   </table>

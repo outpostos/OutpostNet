@@ -4,39 +4,26 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
 [![Release](https://img.shields.io/github/v/release/outpostos/OutpostNet)](https://github.com/outpostos/OutpostNet/releases)
 
-Lightweight TCP/UDP tunneling proxy for edge computing. Expose local services across regions without public IPs — like [frp](https://github.com/fatedier/frp), built on QUIC with multi-hop relay.
+Lightweight TCP/UDP tunneling for edge computing. Like [frp](https://github.com/fatedier/frp), but built on QUIC with multi-hop relay support.
 
-边缘计算环境的轻量级 TCP/UDP 隧道代理，支持跨区域服务访问，无需公网 IP。基于 QUIC 协议，支持多跳中继。
+边缘计算环境的轻量级隧道工具，类似 frp，基于 QUIC 协议，支持多跳中继。
 
-## Features
+## How It Works
 
-- **TCP & UDP proxy** — Full L4 protocol support for HTTP, gRPC, DNS, gaming, and more
-- **QUIC tunnels** — Encrypted cross-region tunnels with TLS 1.3, multiplexed streams
-- **Token auth** — Agent-to-agent authentication for secure tunnel establishment
-- **Multi-hop relay** — Chain tunnels across 3+ regions for complex topologies
-- **Auto-reconnect** — Automatic reconnection with exponential backoff and config persistence
-- **Prometheus metrics** — Built-in observability for tunnel state, streams, and traffic
-- **Dual deployment** — Standalone binaries or Kubernetes with automatic sidecar injection
+One binary, two roles — just like frp's `frps` + `frpc`, but unified into `outpostnet-agent`:
 
-## Components
+```
+Host A (server role)              Host B (client role)
+┌──────────────────┐              ┌──────────────────┐
+│  App (:8080)     │  QUIC Tunnel │     App (:9080)   │
+│   │              │  (TLS 1.3)   │              │    │
+│   ▼              │              │              ▼    │
+│  outpostnet-agent ◄════════════► outpostnet-agent  │
+│  (export)        │              │        (import)   │
+└──────────────────┘              └──────────────────┘
+```
 
-OutpostNet has 4 components. Which ones you need depends on your deployment scenario:
-
-| Component | When to use |
-|-----------|-------------|
-| `outpostnet-agent` | **Cross-region tunnels** — the main binary for connecting services across hosts/regions via QUIC. Most users start here. |
-| `outpostnet-server` | **Single-host routing** — manages multiple sidecar registrations on one host. Use when multiple apps on the same machine share a tunnel. |
-| `outpostnet-sidecar` | **App-level proxy** — exports/imports individual services through a server. Pairs with `outpostnet-server`. |
-| `outpostnet-controller` | **Kubernetes only** — automatic sidecar injection via mutating webhook. Not needed for standalone deployments. |
-
-**Simplest setup:** Two hosts, one service → just `outpostnet-agent` on each side.
-**Multi-app setup:** Multiple services on one host → `outpostnet-server` + `outpostnet-sidecar` per app + `outpostnet-agent` for cross-region.
-
-## Quick Install
-
-Each component is released as a separate binary. Download only what you need.
-
-### Agent only (most common)
+## Install
 
 ```bash
 # Linux amd64
@@ -52,123 +39,125 @@ curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpos
 sudo mv outpostnet-agent /usr/local/bin/
 ```
 
-### Full stack (server + sidecar + agent)
+Or build from source:
 
 ```bash
-# Linux amd64 — download all three
-for comp in server sidecar agent; do
-  curl -sL "https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-${comp}-v1.0.0-linux-amd64.tar.gz" | tar xz
-done
-sudo mv outpostnet-server outpostnet-sidecar outpostnet-agent /usr/local/bin/
+git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
+make build-agent    # Output: build/outpostnet-agent
 ```
 
-### Build from source
+## Quick Start
 
-```bash
-git clone https://github.com/outpostos/OutpostNet.git
-cd OutpostNet
-make build
-# Binaries in build/
-```
+**Host A** — expose a local HTTP service:
 
-## 5-Minute Quick Start
-
-The simplest scenario: expose a service from Host A to Host B using only `outpostnet-agent`.
-
-**Host A** (service provider — has an HTTP service on port 8080):
-
-```bash
-cat > agent-a.yaml << EOF
-region: region-a
+```yaml
+# agent-server.yaml
+region: site-a
 tunnels:
-  - remote_region: region-b
+  - remote_region: site-b
     role: server
     listen_addr: 0.0.0.0:4242
 exports:
   - name: my-http
     local_addr: 127.0.0.1:8080
     protocol: tcp
-EOF
-
-outpostnet-agent --config agent-a.yaml
 ```
 
-**Host B** (service consumer — wants to access Host A's service):
-
 ```bash
-cat > agent-b.yaml << EOF
-region: region-b
+outpostnet-agent --config agent-server.yaml
+```
+
+**Host B** — access the remote service locally:
+
+```yaml
+# agent-client.yaml
+region: site-b
 tunnels:
-  - remote_region: region-a
+  - remote_region: site-a
     role: client
     remote_addr: <HOST_A_IP>:4242
 imports:
   - name: my-http
     listen_addr: 127.0.0.1:9080
-    remote_region: region-a
+    remote_region: site-a
     protocol: tcp
-EOF
+```
 
-outpostnet-agent --config agent-b.yaml
+```bash
+outpostnet-agent --config agent-client.yaml
 ```
 
 **Verify:**
 
 ```bash
-# On Host B — traffic transparently forwards to Host A:8080
-curl http://127.0.0.1:9080
+curl http://127.0.0.1:9080   # Transparently forwards to Host A:8080
 ```
 
-For multi-app setups using server + sidecar, see [docs/quickstart.md](docs/quickstart.md).
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| TCP & UDP | Full L4 proxy — HTTP, gRPC, DNS, gaming, anything |
+| QUIC Tunnel | Encrypted transport with TLS 1.3, multiplexed streams |
+| Token Auth | Agent-to-agent authentication, no PKI required |
+| Multi-Hop Relay | Chain through 3+ regions (A → B → C) |
+| Auto-Reconnect | Exponential backoff, config persistence for offline recovery |
+| Metrics | Prometheus endpoint for tunnel state, streams, traffic |
+
+## vs FRP
+
+| | OutpostNet | FRP |
+|---|---|---|
+| Binaries | 1 (`outpostnet-agent`) | 2 (`frps` + `frpc`) |
+| Transport | QUIC (TLS 1.3) | TCP / KCP / QUIC |
+| Multi-hop relay | Native | No |
+| Stream mux | QUIC native | yamux |
+| Edge-first design | Yes | Generic |
+| HTTP vhost | Roadmap | Yes |
+| Dashboard | Roadmap | Yes |
+
+## Multi-Hop Relay
+
+Connect services across 3+ regions through relay agents:
+
+```yaml
+# Region B — relay between A and C
+region: site-b
+tunnels:
+  - remote_region: site-a
+    role: client
+    remote_addr: <HOST_A_IP>:4242
+  - remote_region: site-c
+    role: server
+    listen_addr: 0.0.0.0:4243
+relays:
+  - service: my-http
+    from_region: site-a
+    to_region: site-c
+```
+
+```
+Site A ──── QUIC ────► Site B (relay) ──── QUIC ────► Site C
+```
 
 ## Documentation
 
-- [Quick Start](docs/quickstart.md) — Full walkthrough including server + sidecar mode
-- [Configuration Reference](docs/configuration.md) — All config options explained
-- [Architecture Overview](docs/architecture.md) — Component design and data flow
-- [Deployment Examples](deploy/examples/) — Ready-to-use YAML configs
+- [Quick Start](docs/quickstart.md) — Full setup walkthrough
+- [Configuration](docs/configuration.md) — All config options
+- [Architecture](docs/architecture.md) — Design and data flow
 
-## How It Works
+## Advanced: Multi-App Deployments
 
-**Agent-only mode** (simplest — two hosts, one service):
+For scenarios with multiple services on a single host, OutpostNet provides additional components:
 
-```
-Host A                          Host B
-┌──────────────────┐            ┌──────────────────┐
-│  App (:8080)     │            │     App (:9080)   │
-│   │              │ QUIC Tunnel│              │    │
-│   ▼              │  TLS 1.3   │              ▼    │
-│  Agent (export) ◄════════════►  Agent (import)   │
-└──────────────────┘            └──────────────────┘
-```
+- `outpostnet-server` — Local routing hub (one per host, manages service registration via Unix socket)
+- `outpostnet-sidecar` — Per-app proxy (registers with server, one per application)
 
-**Full stack mode** (multiple apps per host):
-
-```
-┌──────────────────────────────┐     QUIC Tunnel     ┌──────────────────────────────┐
-│          Region A            │◄══════════════════►│          Region B            │
-│                              │   (TLS 1.3, mux)   │                              │
-│ App ► Sidecar ► Server ► Agent ◄────────────────► Agent ► Server ► Sidecar ► App │
-│ :8080 (export)  (route) (tunnel)                (tunnel) (route)  (import) :9080 │
-└──────────────────────────────┘                    └──────────────────────────────┘
-```
-
-For multi-hop relay across 3+ regions, see [docs/architecture.md](docs/architecture.md).
-
-## Version
-
-```bash
-outpostnet-agent version
-outpostnet-server version
-outpostnet-sidecar version
-```
+These are not needed for basic tunneling. See [docs/quickstart.md](docs/quickstart.md) for details.
 
 ## Platforms
 
-| OS | Architecture |
-|----|-------------|
-| Linux | amd64, arm64 |
-| macOS | amd64, arm64 (Apple Silicon) |
+Linux (amd64, arm64) and macOS (amd64, arm64).
 
 ## License
 
