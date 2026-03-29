@@ -20,29 +20,46 @@ Lightweight TCP/UDP tunneling proxy for edge computing. Expose local services ac
 
 ## Components
 
-| Component | Role |
-|-----------|------|
-| `outpostnet-server` | Node-level server — manages local sidecar registration and routing (one per host) |
-| `outpostnet-sidecar` | App-level proxy — exports local services and imports remote services |
-| `outpostnet-agent` | Region-level coordinator — manages cross-region QUIC tunnels |
-| `outpostnet-controller` | K8s controller — automatic sidecar injection via mutating webhook |
+OutpostNet has 4 components. Which ones you need depends on your deployment scenario:
+
+| Component | When to use |
+|-----------|-------------|
+| `outpostnet-agent` | **Cross-region tunnels** — the main binary for connecting services across hosts/regions via QUIC. Most users start here. |
+| `outpostnet-server` | **Single-host routing** — manages multiple sidecar registrations on one host. Use when multiple apps on the same machine share a tunnel. |
+| `outpostnet-sidecar` | **App-level proxy** — exports/imports individual services through a server. Pairs with `outpostnet-server`. |
+| `outpostnet-controller` | **Kubernetes only** — automatic sidecar injection via mutating webhook. Not needed for standalone deployments. |
+
+**Simplest setup:** Two hosts, one service → just `outpostnet-agent` on each side.
+**Multi-app setup:** Multiple services on one host → `outpostnet-server` + `outpostnet-sidecar` per app + `outpostnet-agent` for cross-region.
 
 ## Quick Install
 
-### Download pre-built binaries
+Each component is released as a separate binary. Download only what you need.
+
+### Agent only (most common)
 
 ```bash
 # Linux amd64
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-linux-amd64.tar.gz | tar xz
-sudo mv outpostnet-* /usr/local/bin/
+curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-linux-amd64.tar.gz | tar xz
+sudo mv outpostnet-agent /usr/local/bin/
 
 # Linux arm64
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-linux-arm64.tar.gz | tar xz
-sudo mv outpostnet-* /usr/local/bin/
+curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-linux-arm64.tar.gz | tar xz
+sudo mv outpostnet-agent /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-darwin-arm64.tar.gz | tar xz
-sudo mv outpostnet-* /usr/local/bin/
+curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-darwin-arm64.tar.gz | tar xz
+sudo mv outpostnet-agent /usr/local/bin/
+```
+
+### Full stack (server + sidecar + agent)
+
+```bash
+# Linux amd64 — download all three
+for comp in server sidecar agent; do
+  curl -sL "https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-${comp}-v1.0.0-linux-amd64.tar.gz" | tar xz
+done
+sudo mv outpostnet-server outpostnet-sidecar outpostnet-agent /usr/local/bin/
 ```
 
 ### Build from source
@@ -56,10 +73,11 @@ make build
 
 ## 5-Minute Quick Start
 
+The simplest scenario: expose a service from Host A to Host B using only `outpostnet-agent`.
+
 **Host A** (service provider — has an HTTP service on port 8080):
 
 ```bash
-# Start agent in server role
 cat > agent-a.yaml << EOF
 region: region-a
 tunnels:
@@ -78,7 +96,6 @@ outpostnet-agent --config agent-a.yaml
 **Host B** (service consumer — wants to access Host A's service):
 
 ```bash
-# Start agent in client role
 cat > agent-b.yaml << EOF
 region: region-b
 tunnels:
@@ -102,24 +119,38 @@ outpostnet-agent --config agent-b.yaml
 curl http://127.0.0.1:9080
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough including server + sidecar mode.
+For multi-app setups using server + sidecar, see [docs/quickstart.md](docs/quickstart.md).
 
 ## Documentation
 
-- [Quick Start](docs/quickstart.md) — 5 minutes to your first tunnel
+- [Quick Start](docs/quickstart.md) — Full walkthrough including server + sidecar mode
 - [Configuration Reference](docs/configuration.md) — All config options explained
 - [Architecture Overview](docs/architecture.md) — Component design and data flow
 - [Deployment Examples](deploy/examples/) — Ready-to-use YAML configs
 
 ## How It Works
 
+**Agent-only mode** (simplest — two hosts, one service):
+
 ```
-┌─────────────────────────────────┐     QUIC Tunnel      ┌─────────────────────────────────┐
-│           Region A              │◄════════════════════►│           Region B              │
-│                                 │   (TLS 1.3, mux)     │                                 │
-│  App ──► Sidecar ──► Server ──► Agent ◄─────────────► Agent ──► Server ──► Sidecar ──► App │
-│  :8080   (export)    (route)   (tunnel)              (tunnel)  (route)   (import)   :9080│
-└─────────────────────────────────┘                      └─────────────────────────────────┘
+Host A                          Host B
+┌──────────────────┐            ┌──────────────────┐
+│  App (:8080)     │            │     App (:9080)   │
+│   │              │ QUIC Tunnel│              │    │
+│   ▼              │  TLS 1.3   │              ▼    │
+│  Agent (export) ◄════════════►  Agent (import)   │
+└──────────────────┘            └──────────────────┘
+```
+
+**Full stack mode** (multiple apps per host):
+
+```
+┌──────────────────────────────┐     QUIC Tunnel     ┌──────────────────────────────┐
+│          Region A            │◄══════════════════►│          Region B            │
+│                              │   (TLS 1.3, mux)   │                              │
+│ App ► Sidecar ► Server ► Agent ◄────────────────► Agent ► Server ► Sidecar ► App │
+│ :8080 (export)  (route) (tunnel)                (tunnel) (route)  (import) :9080 │
+└──────────────────────────────┘                    └──────────────────────────────┘
 ```
 
 For multi-hop relay across 3+ regions, see [docs/architecture.md](docs/architecture.md).
@@ -127,8 +158,8 @@ For multi-hop relay across 3+ regions, see [docs/architecture.md](docs/architect
 ## Version
 
 ```bash
-outpostnet-server version
 outpostnet-agent version
+outpostnet-server version
 outpostnet-sidecar version
 ```
 
