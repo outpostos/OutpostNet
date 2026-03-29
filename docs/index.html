@@ -141,7 +141,7 @@
 
 <section class="hero">
   <h1>Tunnel anything.<br><span>No public IP needed.</span></h1>
-  <p>One binary, two roles. Like frp, but built on QUIC with multi-hop relay. Expose local services across regions over encrypted tunnels.</p>
+  <p>One binary, two roles. Like frp, but built on QUIC. Expose local services over encrypted tunnels.</p>
   <div class="hero-buttons">
     <a href="https://github.com/outpostos/OutpostNet/releases" class="btn btn-primary">Download v1.0.0</a>
     <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md" class="btn btn-secondary">Quick Start</a>
@@ -162,8 +162,8 @@
     <p>Cross-region tunnels built on QUIC with TLS 1.3. Multiplexed streams, zero round-trip connection setup, and resilience to network changes.</p>
   </div>
   <div class="feature">
-    <h3>Multi-Hop Relay</h3>
-    <p>Chain tunnels across 3+ regions. Reach services behind multiple NAT layers or air-gapped networks through relay agents.</p>
+    <h3>Single Binary</h3>
+    <p>One binary handles both server and client roles. No separate frps/frpc to deploy or keep in sync.</p>
   </div>
   <div class="feature">
     <h3>Token Authentication</h3>
@@ -215,11 +215,6 @@ Host A (server role)                    Host B (client role)
       <td>Transport</td>
       <td><strong>QUIC (TLS 1.3)</strong></td>
       <td>TCP / KCP / QUIC</td>
-    </tr>
-    <tr>
-      <td>Multi-Hop Relay</td>
-      <td class="check"><strong>Native</strong></td>
-      <td class="cross">No</td>
     </tr>
     <tr>
       <td>Token Auth</td>
