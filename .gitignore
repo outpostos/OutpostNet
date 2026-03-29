@@ -33,6 +33,15 @@ Thumbs.db
 /outpostnet-server
 /outpostnet-sidecar
 
+# Build directory
+build/
+
+# BMAD artifacts
+_bmad/
+
+# Claude Code
+.claude/
+
 # Logs
 *.log
 

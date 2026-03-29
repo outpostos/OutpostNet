@@ -11,7 +11,7 @@ import (
 // Metrics holds all Prometheus metrics for the Agent.
 type Metrics struct {
 	TunnelState       *prometheus.GaugeVec
-	ActiveStreams      prometheus.Gauge
+	ActiveStreams     prometheus.Gauge
 	BytesSentTotal    *prometheus.CounterVec
 	BytesRecvTotal    *prometheus.CounterVec
 	ReconnectTotal    *prometheus.CounterVec
@@ -20,10 +20,10 @@ type Metrics struct {
 
 	// Relay metrics.
 	RelayStreamsTotal  *prometheus.CounterVec
-	RelayBytesTotal   *prometheus.CounterVec
+	RelayBytesTotal    *prometheus.CounterVec
 	RelayActiveStreams prometheus.Gauge
-	RelayLatency      prometheus.Histogram
-	RelayErrorsTotal  *prometheus.CounterVec
+	RelayLatency       prometheus.Histogram
+	RelayErrorsTotal   *prometheus.CounterVec
 
 	registry *prometheus.Registry
 }

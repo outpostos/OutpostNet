@@ -55,9 +55,9 @@ type Sidecar struct {
 	streams map[uint32]net.Conn // streamID -> local TCP/UDP connection
 
 	// UDP session tracking for import side.
-	udpMu            sync.RWMutex
-	udpSessions      map[string]*udpSession // "srcAddr" -> session (import side)
-	udpCleanupOnce   sync.Once
+	udpMu          sync.RWMutex
+	udpSessions    map[string]*udpSession // "srcAddr" -> session (import side)
+	udpCleanupOnce sync.Once
 
 	// Connect serialization: only one Connect request in flight at a time.
 	connectMu sync.Mutex

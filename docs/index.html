@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OutpostNet — Lightweight Tunneling for Edge Computing</title>
+  <meta name="description" content="OutpostNet is a lightweight TCP/UDP tunneling proxy for edge computing environments. Expose local services across regions without public IPs.">
+  <style>
+    :root {
+      --bg: #0a0e17;
+      --surface: #111827;
+      --border: #1f2937;
+      --text: #e5e7eb;
+      --text-muted: #9ca3af;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #10b981;
+      --code-bg: #1e293b;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+    /* Nav */
+    nav {
+      position: fixed; top: 0; width: 100%; z-index: 100;
+      background: rgba(10, 14, 23, 0.9);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+    }
+    .nav-inner {
+      max-width: 1100px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 56px;
+    }
+    .nav-brand { font-weight: 700; font-size: 1.1rem; color: var(--text); }
+    .nav-links a { margin-left: 1.5rem; color: var(--text-muted); font-size: 0.9rem; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* Hero */
+    .hero {
+      padding: 10rem 2rem 6rem;
+      text-align: center;
+      max-width: 800px; margin: 0 auto;
+    }
+    .hero h1 { font-size: 3rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 1rem; }
+    .hero h1 span { color: var(--accent); }
+    .hero p { font-size: 1.2rem; color: var(--text-muted); max-width: 600px; margin: 0 auto 2rem; }
+    .hero-buttons { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-block; padding: 0.75rem 1.5rem; border-radius: 8px;
+      font-weight: 600; font-size: 0.95rem; transition: all 0.2s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); text-decoration: none; }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--accent); text-decoration: none; }
+
+    /* Install snippet */
+    .install {
+      max-width: 600px; margin: 3rem auto 0;
+      background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 1rem 1.25rem; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
+      color: var(--text-muted); text-align: left; overflow-x: auto;
+    }
+    .install .cmd { color: var(--green); }
+
+    /* Features */
+    .features {
+      max-width: 1100px; margin: 0 auto; padding: 4rem 2rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;
+    }
+    .feature {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .feature h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .feature p { font-size: 0.9rem; color: var(--text-muted); }
+
+    /* Diagram */
+    .diagram-section {
+      max-width: 900px; margin: 0 auto; padding: 2rem 2rem 4rem; text-align: center;
+    }
+    .diagram-section h2 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+    .diagram {
+      background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 2rem; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem;
+      color: var(--text-muted); white-space: pre; overflow-x: auto; text-align: left;
+      line-height: 1.5;
+    }
+
+    /* Comparison */
+    .comparison {
+      max-width: 800px; margin: 0 auto; padding: 2rem 2rem 4rem;
+    }
+    .comparison h2 { font-size: 1.5rem; margin-bottom: 1.5rem; text-align: center; }
+    .comparison table { width: 100%; border-collapse: collapse; }
+    .comparison th, .comparison td {
+      padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+    .comparison th { color: var(--text-muted); font-weight: 600; }
+    .comparison td:first-child { font-weight: 600; }
+    .check { color: var(--green); }
+    .cross { color: #ef4444; }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border); padding: 2rem;
+      text-align: center; color: var(--text-muted); font-size: 0.85rem;
+    }
+
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 2rem; }
+      .hero p { font-size: 1rem; }
+      .diagram { font-size: 0.65rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <div class="nav-brand">OutpostNet</div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#comparison">vs FRP</a>
+      <a href="https://github.com/outpostos/OutpostNet">GitHub</a>
+      <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md">Docs</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Tunnel anything.<br><span>No public IP needed.</span></h1>
+  <p>OutpostNet is a lightweight TCP/UDP tunneling proxy built for edge computing. Expose local services across regions over encrypted QUIC tunnels with multi-hop relay.</p>
+  <div class="hero-buttons">
+    <a href="https://github.com/outpostos/OutpostNet/releases" class="btn btn-primary">Download v1.0.0</a>
+    <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md" class="btn btn-secondary">Quick Start</a>
+  </div>
+  <div class="install">
+    <span class="cmd">curl -sL</span> https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-linux-amd64.tar.gz <span class="cmd">| tar xz</span><br>
+    <span class="cmd">sudo mv</span> outpostnet-* /usr/local/bin/
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="feature">
+    <h3>TCP & UDP Proxy</h3>
+    <p>Full Layer 4 protocol support. HTTP, gRPC, DNS, gaming protocols — anything that speaks TCP or UDP works out of the box.</p>
+  </div>
+  <div class="feature">
+    <h3>QUIC Encrypted Tunnels</h3>
+    <p>Cross-region tunnels built on QUIC with TLS 1.3. Multiplexed streams, zero round-trip connection setup, and resilience to network changes.</p>
+  </div>
+  <div class="feature">
+    <h3>Multi-Hop Relay</h3>
+    <p>Chain tunnels across 3+ regions. Reach services behind multiple NAT layers or air-gapped networks through relay agents.</p>
+  </div>
+  <div class="feature">
+    <h3>Token Authentication</h3>
+    <p>Agent-to-agent token-based auth for tunnel establishment. No certificates to manage, no PKI to deploy.</p>
+  </div>
+  <div class="feature">
+    <h3>Auto-Reconnect</h3>
+    <p>Tunnels automatically reconnect with exponential backoff. Config persistence ensures recovery even after full restarts.</p>
+  </div>
+  <div class="feature">
+    <h3>Prometheus Metrics</h3>
+    <p>Built-in observability. Track tunnel state, active streams, bytes transferred, reconnect counts, and relay performance.</p>
+  </div>
+</section>
+
+<section class="diagram-section" id="how-it-works">
+  <h2>How It Works</h2>
+  <div class="diagram">
+Region A (behind NAT)                          Region B (behind NAT)
+┌──────────────────────────┐                   ┌──────────────────────────┐
+│                          │    QUIC Tunnel     │                          │
+│  App (:8080)             │   TLS 1.3, mux    │              App (:9080) │
+│   │                      │◄═════════════════►│                      │   │
+│   ▼                      │                   │                      ▼   │
+│  Sidecar (export)        │                   │        Sidecar (import)  │
+│   │                      │                   │                      │   │
+│   ▼                      │                   │                      ▼   │
+│  Server (route)          │                   │          Server (route)  │
+│   │                      │                   │                      │   │
+│   ▼                      │                   │                      ▼   │
+│  Agent ──────────────────┼───────────────────┼──────────────── Agent    │
+│  (tunnel server)         │                   │         (tunnel client)  │
+└──────────────────────────┘                   └──────────────────────────┘</div>
+</section>
+
+<section class="comparison" id="comparison">
+  <h2>OutpostNet vs FRP</h2>
+  <table>
+    <tr>
+      <th>Capability</th>
+      <th>OutpostNet 1.0</th>
+      <th>FRP</th>
+    </tr>
+    <tr>
+      <td>TCP Proxy</td>
+      <td class="check">Yes</td>
+      <td class="check">Yes</td>
+    </tr>
+    <tr>
+      <td>UDP Proxy</td>
+      <td class="check">Yes</td>
+      <td class="check">Yes</td>
+    </tr>
+    <tr>
+      <td>Transport Protocol</td>
+      <td><strong>QUIC (TLS 1.3)</strong></td>
+      <td>TCP / KCP / QUIC</td>
+    </tr>
+    <tr>
+      <td>Multi-Hop Relay</td>
+      <td class="check"><strong>Yes (native)</strong></td>
+      <td class="cross">No</td>
+    </tr>
+    <tr>
+      <td>Token Auth</td>
+      <td class="check">Yes</td>
+      <td class="check">Yes</td>
+    </tr>
+    <tr>
+      <td>Stream Multiplexing</td>
+      <td class="check"><strong>QUIC native</strong></td>
+      <td class="check">yamux</td>
+    </tr>
+    <tr>
+      <td>Auto-Reconnect</td>
+      <td class="check">Yes</td>
+      <td class="check">Yes</td>
+    </tr>
+    <tr>
+      <td>Prometheus Metrics</td>
+      <td class="check">Yes</td>
+      <td class="check">Yes (dashboard)</td>
+    </tr>
+    <tr>
+      <td>K8s Integration</td>
+      <td class="check">Sidecar injection</td>
+      <td class="cross">Manual</td>
+    </tr>
+    <tr>
+      <td>Edge-First Design</td>
+      <td class="check"><strong>Yes</strong></td>
+      <td class="cross">Generic</td>
+    </tr>
+    <tr>
+      <td>HTTP Vhost Proxy</td>
+      <td>Roadmap (v1.1)</td>
+      <td class="check">Yes</td>
+    </tr>
+    <tr>
+      <td>Dashboard UI</td>
+      <td>Roadmap (v1.2)</td>
+      <td class="check">Yes</td>
+    </tr>
+  </table>
+</section>
+
+<footer>
+  <p>OutpostNet is part of <a href="https://github.com/outpostos">OutpostOS</a> — the edge computing platform for unreliable environments.</p>
+  <p>Apache 2.0 License</p>
+</footer>
+
+</body>
+</html>

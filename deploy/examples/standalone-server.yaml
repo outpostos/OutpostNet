@@ -1,0 +1,13 @@
+# outpostnet-server standalone 配置示例
+#
+# 用途：在每台主机上运行一个 server 实例，管理本机所有 sidecar 的服务注册和路由。
+#
+# 启动方式：
+#   outpostnet-server --config standalone-server.yaml
+#
+# 或通过命令行参数直接指定（无需配置文件）：
+#   outpostnet-server --socket /tmp/outpostnet.sock
+
+listen: /var/run/outpostnet/server.sock
+log_level: info
+heartbeat_timeout: 30s

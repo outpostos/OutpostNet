@@ -159,4 +159,3 @@ func (si *SidecarInjector) ensureVolumes(pod *corev1.Pod, configMapName string) 
 func boolPtr(b bool) *bool {
 	return &b
 }
-

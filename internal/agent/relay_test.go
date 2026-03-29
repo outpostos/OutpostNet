@@ -840,4 +840,3 @@ func TestRelayMetricsE2E(t *testing.T) {
 	agentC.Stop()
 	agentB.Stop()
 }
-

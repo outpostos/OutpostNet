@@ -1,0 +1,47 @@
+# outpostnet-agent standalone 配置示例 — 客户端角色（主动发起隧道连接）
+#
+# 适用场景：边缘节点，主动连接云端 agent，建立 QUIC 隧道。
+# 将 <CLOUD_IP> 替换为云端服务器的实际 IP 地址。
+#
+# 启动方式：
+#   outpostnet-agent --config standalone-agent-client.yaml
+#
+# 健康检查：http://localhost:8082/healthz
+# Prometheus 指标：http://localhost:9090/metrics
+
+region: edge-1
+
+tunnels:
+  - remote_region: cloud
+    role: client
+    remote_addr: <CLOUD_IP>:4242
+
+# 导出边缘的 Web API 给云端访问
+exports:
+  - name: web-api
+    local_addr: 127.0.0.1:8080
+    protocol: tcp
+
+# 从云端导入数据库服务，映射为本地端口
+imports:
+  - name: postgres
+    listen_addr: 127.0.0.1:5432
+    remote_region: cloud
+    protocol: tcp
+  - name: redis
+    listen_addr: 127.0.0.1:6379
+    remote_region: cloud
+    protocol: tcp
+
+persistence:
+  dir: /var/lib/outpostnet
+  enabled: true
+
+metrics:
+  addr: :9090
+
+health_addr: :8082
+
+# 认证：两端 token 必须一致，空字符串表示禁用
+auth:
+  token: ""

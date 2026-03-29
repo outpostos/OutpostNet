@@ -92,7 +92,7 @@ func (r *EndpointSliceReconciler) ensureService(ctx context.Context, pod *corev1
 				Name:      svcName,
 				Namespace: pod.Namespace,
 				Labels: map[string]string{
-					managedByLabel:    managedByValue,
+					managedByLabel:          managedByValue,
 					"outpostnet.io/service": export.Name,
 				},
 			},
@@ -144,9 +144,9 @@ func (r *EndpointSliceReconciler) ensureEndpointSlice(ctx context.Context, pod *
 				Name:      sliceName,
 				Namespace: pod.Namespace,
 				Labels: map[string]string{
-					managedByLabel:                           managedByValue,
-					discoveryv1.LabelServiceName:             svcName,
-					"outpostnet.io/pod":                      pod.Name,
+					managedByLabel:               managedByValue,
+					discoveryv1.LabelServiceName: svcName,
+					"outpostnet.io/pod":          pod.Name,
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					*metav1.NewControllerRef(pod, corev1.SchemeGroupVersion.WithKind("Pod")),

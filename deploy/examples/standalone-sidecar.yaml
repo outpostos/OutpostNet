@@ -1,0 +1,26 @@
+# outpostnet-sidecar standalone 配置示例
+#
+# 用途：将本地服务导出到网格，并将远程服务映射为本地端口。
+# 本示例演示一个 Web API 服务导出，同时导入远程 PostgreSQL 和 Redis。
+#
+# 启动方式：
+#   outpostnet-sidecar --config standalone-sidecar.yaml
+
+server: /var/run/outpostnet/server.sock
+sidecar_id: app-server-01
+heartbeat_interval: 10s
+
+# 导出本地服务给网格中其他节点访问
+exports:
+  - name: web-api
+    local_port: 8080
+    protocol: tcp
+
+# 从网格中导入远程服务，映射为本地端口
+imports:
+  - name: postgres
+    listen_port: 5432
+    protocol: tcp
+  - name: redis
+    listen_port: 6379
+    protocol: tcp

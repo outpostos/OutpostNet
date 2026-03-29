@@ -104,8 +104,8 @@ func TestAgentHealthEndpoints(t *testing.T) {
 
 func TestAgentStopBeforeRun(t *testing.T) {
 	cfg := &agentconfig.Config{
-		Region:     "test",
-		HealthAddr: "127.0.0.1:0",
+		Region:      "test",
+		HealthAddr:  "127.0.0.1:0",
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 	}
 	a := New(cfg, nil)

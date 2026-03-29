@@ -233,8 +233,8 @@ func TestMarshalConfig(t *testing.T) {
 		Exports: []ExportConfig{
 			{Name: "web", LocalAddr: "127.0.0.1:8080", Protocol: "tcp"},
 		},
-		HealthAddr: ":8082",
-		Metrics:    MetricsConfig{Addr: ":9090"},
+		HealthAddr:  ":8082",
+		Metrics:     MetricsConfig{Addr: ":9090"},
 		Persistence: PersistenceConfig{Dir: "/var/lib/outpostnet"},
 	}
 

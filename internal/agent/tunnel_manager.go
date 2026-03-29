@@ -26,11 +26,11 @@ type TunnelManager struct {
 	logger  *slog.Logger
 	metrics *Metrics
 
-	mu            sync.Mutex
-	servers       []*tunnel.Server
-	clients       []*tunnel.ManagedClient
+	mu              sync.Mutex
+	servers         []*tunnel.Server
+	clients         []*tunnel.ManagedClient
 	clientsByRegion map[string]*tunnel.ManagedClient
-	relay         *RelayManager
+	relay           *RelayManager
 }
 
 // NewTunnelManager creates a new TunnelManager.

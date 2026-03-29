@@ -1,0 +1,38 @@
+# outpostnet-agent standalone 配置示例 — 中继节点
+#
+# 适用场景：三区域多跳中继。
+# far-edge 节点无法直接访问 cloud，通过 relay（本节点）做流量中转。
+#
+# 拓扑：far-edge ──→ relay（本节点）──→ cloud
+#
+# 启动方式：
+#   outpostnet-agent --config standalone-agent-relay.yaml
+
+region: relay
+
+tunnels:
+  # 接受来自 far-edge 的连接（server 角色）
+  - remote_region: far-edge
+    role: server
+    listen_addr: 0.0.0.0:4243
+
+  # 主动连接 cloud（client 角色）
+  - remote_region: cloud
+    role: client
+    remote_addr: <CLOUD_IP>:4242
+
+# 中继规则：far-edge 要访问 cloud 上的 postgres，经由本节点转发
+relays:
+  - service: postgres
+    from_region: far-edge
+    to_region: cloud
+    max_hops: 3
+
+persistence:
+  dir: /var/lib/outpostnet
+  enabled: true
+
+metrics:
+  addr: :9090
+
+health_addr: :8082

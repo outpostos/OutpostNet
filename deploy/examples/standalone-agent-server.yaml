@@ -1,0 +1,45 @@
+# outpostnet-agent standalone 配置示例 — 服务端角色（接受隧道连接）
+#
+# 适用场景：云端或数据中心节点，作为 QUIC 隧道的服务端，接受来自边缘节点的连接。
+#
+# 启动方式：
+#   outpostnet-agent --config standalone-agent-server.yaml
+#
+# 健康检查：http://localhost:8082/healthz
+# Prometheus 指标：http://localhost:9090/metrics
+
+region: cloud
+
+tunnels:
+  - remote_region: edge-1
+    role: server
+    listen_addr: 0.0.0.0:4242
+
+# 导出云端的数据库服务给边缘节点访问
+exports:
+  - name: postgres
+    local_addr: 127.0.0.1:5432
+    protocol: tcp
+  - name: redis
+    local_addr: 127.0.0.1:6379
+    protocol: tcp
+
+# 从边缘节点导入 Web API（用于云端服务调用边缘接口）
+imports:
+  - name: web-api
+    listen_addr: 127.0.0.1:8080
+    remote_region: edge-1
+    protocol: tcp
+
+persistence:
+  dir: /var/lib/outpostnet
+  enabled: true
+
+metrics:
+  addr: :9090
+
+health_addr: :8082
+
+# 认证：两端 token 必须一致，空字符串表示禁用
+auth:
+  token: ""

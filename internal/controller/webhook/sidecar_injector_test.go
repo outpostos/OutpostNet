@@ -235,7 +235,7 @@ func TestInjectWithExistingVolumes(t *testing.T) {
 			Name:      "my-app",
 			Namespace: "default",
 			Annotations: map[string]string{
-				annotations.InjectAnnotation: "true",
+				annotations.InjectAnnotation:  "true",
 				annotations.ExportsAnnotation: "api:8000:tcp",
 			},
 		},
@@ -287,7 +287,7 @@ func TestInjectWithGenerateName(t *testing.T) {
 			GenerateName: "my-app-", // No Name, using GenerateName
 			Namespace:    "default",
 			Annotations: map[string]string{
-				annotations.InjectAnnotation: "true",
+				annotations.InjectAnnotation:  "true",
 				annotations.ExportsAnnotation: "web:8080:tcp",
 			},
 		},
@@ -323,9 +323,9 @@ func TestInjectSidecarResources(t *testing.T) {
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-app",
+			Name: "my-app",
 			Annotations: map[string]string{
-				annotations.InjectAnnotation: "true",
+				annotations.InjectAnnotation:  "true",
 				annotations.ExportsAnnotation: "svc:8080:tcp",
 			},
 		},
@@ -370,7 +370,7 @@ func TestInjectSidecarVolumeMounts(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "mount-test",
 			Annotations: map[string]string{
-				annotations.InjectAnnotation: "true",
+				annotations.InjectAnnotation:  "true",
 				annotations.ExportsAnnotation: "test:9090:udp",
 			},
 		},
@@ -421,7 +421,7 @@ func TestInjectSidecarArgs(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "args-test",
 			Annotations: map[string]string{
-				annotations.InjectAnnotation: "true",
+				annotations.InjectAnnotation:  "true",
 				annotations.ExportsAnnotation: "svc:80:tcp",
 			},
 		},

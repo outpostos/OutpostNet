@@ -13,8 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/outpostos/OutpostNet/pkg/annotations"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
+	"github.com/outpostos/OutpostNet/pkg/annotations"
 )
 
 // RegionReconciler watches Pods with region annotations and generates Agent
