@@ -146,15 +146,6 @@ Site A ──── QUIC ────► Site B (relay) ──── QUIC ──
 - [Configuration](docs/configuration.md) — All config options
 - [Architecture](docs/architecture.md) — Design and data flow
 
-## Advanced: Multi-App Deployments
-
-For scenarios with multiple services on a single host, OutpostNet provides additional components:
-
-- `outpostnet-server` — Local routing hub (one per host, manages service registration via Unix socket)
-- `outpostnet-sidecar` — Per-app proxy (registers with server, one per application)
-
-These are not needed for basic tunneling. See [docs/quickstart.md](docs/quickstart.md) for details.
-
 ## Platforms
 
 Linux (amd64, arm64) and macOS (amd64, arm64).
