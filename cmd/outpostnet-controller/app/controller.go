@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/outpostos/OutpostNet/internal/controller/reconciler"
 	"github.com/outpostos/OutpostNet/internal/controller/webhook"
@@ -43,6 +43,7 @@ func NewControllerCommand() *cobra.Command {
 		},
 	}
 
+	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&opts.MetricsAddr, "metrics-addr", opts.MetricsAddr, "Metrics endpoint address")
 	cmd.Flags().StringVar(&opts.HealthProbeAddr, "health-probe-addr", opts.HealthProbeAddr, "Health probe endpoint address")
 	cmd.Flags().BoolVar(&opts.EnableLeaderElection, "leader-elect", opts.EnableLeaderElection, "Enable leader election for HA")

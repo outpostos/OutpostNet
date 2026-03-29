@@ -44,6 +44,7 @@ func NewServerCommand() *cobra.Command {
 		},
 	}
 
+	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
 	cmd.Flags().StringVar(&cfg.SocketPath, "socket", cfg.SocketPath, "Unix socket path")
 	cmd.Flags().DurationVar(&cfg.HeartbeatTimeout, "heartbeat-timeout", cfg.HeartbeatTimeout, "Heartbeat timeout duration")

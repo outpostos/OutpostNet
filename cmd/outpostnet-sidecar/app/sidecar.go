@@ -62,6 +62,7 @@ func NewSidecarCommand() *cobra.Command {
 		},
 	}
 
+	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
 	cmd.Flags().StringVar(&cfg.ServerSocket, "server-socket", cfg.ServerSocket, "Server Unix socket path")
 	cmd.Flags().StringVar(&cfg.SidecarID, "sidecar-id", cfg.SidecarID, "Unique sidecar identifier")

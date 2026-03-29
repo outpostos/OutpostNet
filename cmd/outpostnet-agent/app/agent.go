@@ -40,6 +40,7 @@ func NewAgentCommand() *cobra.Command {
 		},
 	}
 
+	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
 	cmd.Flags().StringVar(&region, "region", "", "Region name (overrides config file)")
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Metrics endpoint address (overrides config file)")

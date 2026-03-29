@@ -28,7 +28,12 @@ VERSION_PKG = github.com/outpostos/OutpostNet/pkg/version
 # Go build flags
 LDFLAGS = -ldflags "-X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gitCommit=$(COMMIT) -X $(VERSION_PKG).buildDate=$(BUILD_TIME)"
 
-.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help
+# Release platforms
+RELEASE_PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller
+RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gitCommit=$(COMMIT) -X $(VERSION_PKG).buildDate=$(BUILD_TIME)"
+
+.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release docker-build-combined
 
 # Default target
 all: clean fmt vet test build
@@ -166,22 +171,46 @@ bench-tunnel:
 	$(GOTEST) -bench=. -benchtime=3s -run=^$$ ./pkg/tunnel/
 
 # Release targets
-release: clean fmt vet test
-	@echo "Building release binaries..."
+release: fmt vet
+	@echo "Building release binaries for all platforms..."
 	@mkdir -p $(BUILD_DIR)/release
-	@GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-linux-amd64 ./cmd/outpostnet-server
-	@GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-linux-amd64 ./cmd/outpostnet-sidecar
-	@GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-darwin-amd64 ./cmd/outpostnet-server
-	@GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-darwin-amd64 ./cmd/outpostnet-sidecar
-	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-darwin-arm64 ./cmd/outpostnet-server
-	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-darwin-arm64 ./cmd/outpostnet-sidecar
-	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SERVER_BINARY)-windows-amd64.exe ./cmd/outpostnet-server
-	@GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-linux-amd64 ./cmd/outpostnet-agent
-	@GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-darwin-amd64 ./cmd/outpostnet-agent
-	@GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-darwin-arm64 ./cmd/outpostnet-agent
-	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(SIDECAR_BINARY)-windows-amd64.exe ./cmd/outpostnet-sidecar
-	@GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/release/$(AGENT_BINARY)-windows-amd64.exe ./cmd/outpostnet-agent
-	@echo "Release binaries built in $(BUILD_DIR)/release/"
+	@for component in outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller; do \
+		for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+			os=$$(echo $$platform | cut -d/ -f1); \
+			arch=$$(echo $$platform | cut -d/ -f2); \
+			binary=$$component-$(VERSION)-$$os-$$arch; \
+			echo "  $$os/$$arch $$component"; \
+			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GOBUILD) $(RELEASE_LDFLAGS) \
+				-o $(BUILD_DIR)/release/$$binary ./cmd/$$component || exit 1; \
+			tar -czf $(BUILD_DIR)/release/$$component-$(VERSION)-$$os-$$arch.tar.gz \
+				-C $(BUILD_DIR)/release $$binary; \
+			rm -f $(BUILD_DIR)/release/$$binary; \
+		done \
+	done
+	@echo "Release archives built in $(BUILD_DIR)/release/"
+	@ls -lh $(BUILD_DIR)/release/
+
+# Build combined server+agent Docker image using pre-built linux/amd64 binaries
+docker-build-combined:
+	@echo "Building combined server+agent Docker image..."
+	@if [ ! -f $(BUILD_DIR)/release/outpostnet-server-$(VERSION)-linux-amd64.tar.gz ]; then \
+		echo "Run 'make release' first to build linux/amd64 binaries"; exit 1; \
+	fi
+	@mkdir -p $(BUILD_DIR)/release/docker-stage
+	@tar -xzf $(BUILD_DIR)/release/outpostnet-server-$(VERSION)-linux-amd64.tar.gz \
+		-C $(BUILD_DIR)/release/docker-stage
+	@tar -xzf $(BUILD_DIR)/release/outpostnet-agent-$(VERSION)-linux-amd64.tar.gz \
+		-C $(BUILD_DIR)/release/docker-stage
+	@mv $(BUILD_DIR)/release/docker-stage/outpostnet-server-$(VERSION)-linux-amd64 \
+		$(BUILD_DIR)/release/docker-stage/outpostnet-server
+	@mv $(BUILD_DIR)/release/docker-stage/outpostnet-agent-$(VERSION)-linux-amd64 \
+		$(BUILD_DIR)/release/docker-stage/outpostnet-agent
+	docker build \
+		-t outpostnet:$(VERSION) -t outpostnet:latest \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f build/docker/Dockerfile.combined $(BUILD_DIR)/release/docker-stage
+	@rm -rf $(BUILD_DIR)/release/docker-stage
+	@echo "Built outpostnet:$(VERSION) and outpostnet:latest"
 
 # Help
 help:
@@ -208,7 +237,8 @@ help:
 	@echo "  clean           - Clean build artifacts"
 	@echo "  clean-all       - Clean all generated files"
 	@echo ""
-	@echo "  bench-tunnel    - Run QUIC tunnel benchmarks"
-	@echo "  release         - Build release binaries for all platforms"
-	@echo "  docker-build    - Build Docker images"
-	@echo "  help            - Show this help"
+	@echo "  bench-tunnel         - Run QUIC tunnel benchmarks"
+	@echo "  release              - Build release archives for all platforms (4 components × 4 OS/arch)"
+	@echo "  docker-build         - Build individual Docker images (requires golang:1.25-alpine)"
+	@echo "  docker-build-combined - Build combined server+agent image using pre-built binaries"
+	@echo "  help                 - Show this help"
