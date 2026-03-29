@@ -126,7 +126,7 @@ func TestValidateConfigErrors(t *testing.T) {
 			want: "region is required",
 		},
 		{
-			name: "tunnel missing remote_region",
+			name: "client tunnel missing remote_region",
 			yaml: `
 region: test
 tunnels:
@@ -277,6 +277,33 @@ exports:
 	}
 	if cfg.Tunnels[0].ListenAddr != "0.0.0.0:4242" {
 		t.Errorf("listen_addr = %q, want 0.0.0.0:4242", cfg.Tunnels[0].ListenAddr)
+	}
+}
+
+func TestServerRoleTunnelWithoutRemoteRegion(t *testing.T) {
+	// Server-role tunnels do not need remote_region — the server accepts any
+	// authenticated client regardless of region.
+	yaml := `
+region: site-a
+auth:
+  token: changeme
+tunnels:
+  - role: server
+    listen_addr: 0.0.0.0:4242
+exports:
+  - name: my-http
+    local_addr: 127.0.0.1:8080
+    protocol: tcp
+`
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.Tunnels[0].Role != "server" {
+		t.Errorf("role = %q, want server", cfg.Tunnels[0].Role)
+	}
+	if cfg.Tunnels[0].RemoteRegion != "" {
+		t.Errorf("remote_region should be empty, got %q", cfg.Tunnels[0].RemoteRegion)
 	}
 }
 

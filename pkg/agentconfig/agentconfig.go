@@ -197,15 +197,15 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	for i, t := range cfg.Tunnels {
-		if t.RemoteRegion == "" {
-			return fmt.Errorf("tunnels[%d].remote_region is required", i)
-		}
 		switch strings.ToLower(t.Role) {
 		case "server":
 			if t.ListenAddr == "" {
 				return fmt.Errorf("tunnels[%d].listen_addr is required when role=server", i)
 			}
 		case "client":
+			if t.RemoteRegion == "" {
+				return fmt.Errorf("tunnels[%d].remote_region is required", i)
+			}
 			if t.RemoteAddr == "" {
 				return fmt.Errorf("tunnels[%d].remote_addr is required when role=client", i)
 			}

@@ -112,11 +112,15 @@ func (tm *TunnelManager) buildTLSConfig() (*tls.Config, error) {
 }
 
 func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelConfig, tlsCfg *tls.Config) error {
+	srvLogger := tm.logger.With("tunnel", "server", "listen_addr", tc.ListenAddr)
+	if tc.RemoteRegion != "" {
+		srvLogger = srvLogger.With("remote_region", tc.RemoteRegion)
+	}
 	srv := tunnel.NewServer(tunnel.ServerConfig{
 		ListenAddr: tc.ListenAddr,
 		TLS:        tlsCfg,
 		Token:      tm.cfg.Auth.Token,
-	}, tm.logger.With("tunnel", "server", "remote_region", tc.RemoteRegion))
+	}, srvLogger)
 
 	// Register all exports as routes on this server.
 	for _, exp := range tm.cfg.Exports {
@@ -129,7 +133,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 
 	go func() {
 		if err := srv.ListenAndServe(ctx); err != nil {
-			tm.logger.Error("tunnel server stopped", "remote_region", tc.RemoteRegion, "error", err)
+			srvLogger.Error("tunnel server stopped", "error", err)
 		}
 	}()
 
@@ -142,7 +146,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	tm.logger.Info("tunnel server started", "remote_region", tc.RemoteRegion, "addr", srv.Addr())
+	srvLogger.Info("tunnel server started", "addr", srv.Addr())
 	return nil
 }
 

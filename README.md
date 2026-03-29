@@ -63,8 +63,7 @@ region: site-a
 auth:
   token: changeme
 tunnels:
-  - remote_region: site-b
-    role: server
+  - role: server
     listen_addr: 0.0.0.0:4242
 exports:
   - name: my-http
@@ -132,8 +131,7 @@ region: site-a
 auth:
   token: changeme
 tunnels:
-  - remote_region: site-b
-    role: server
+  - role: server
     listen_addr: 0.0.0.0:4242
 exports:
   - name: my-http
@@ -148,8 +146,7 @@ tunnels:
   - remote_region: site-a
     role: client
     remote_addr: <HOST_A_IP>:4242
-  - remote_region: site-c
-    role: server
+  - role: server
     listen_addr: 0.0.0.0:4243
 relays:
   - service: my-http
