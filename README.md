@@ -4,13 +4,11 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
 [![Release](https://img.shields.io/github/v/release/outpostos/OutpostNet)](https://github.com/outpostos/OutpostNet/releases)
 
-Lightweight TCP/UDP tunneling for edge computing. Like [frp](https://github.com/fatedier/frp), but built on QUIC with multi-hop relay support.
+OutpostNet is a lightweight TCP/UDP tunneling tool for edge computing, similar to [frp](https://github.com/fatedier/frp). It creates encrypted QUIC tunnels between hosts, allowing you to expose local services across regions without a public IP.
 
-边缘计算环境的轻量级隧道工具，类似 frp，基于 QUIC 协议，支持多跳中继。
+One binary (`outpostnet-agent`), two roles (`server` / `client`).
 
 ## How It Works
-
-One binary, two roles — just like frp's `frps` + `frpc`, but unified into `outpostnet-agent`:
 
 ```
 Host A (server role)              Host B (client role)
@@ -22,6 +20,8 @@ Host A (server role)              Host B (client role)
 │  (export)        │              │        (import)   │
 └──────────────────┘              └──────────────────┘
 ```
+
+Host A exports a local service. Host B imports it as a local port. Traffic flows through an encrypted QUIC tunnel. No public IP needed on either side.
 
 ## Install
 
@@ -39,16 +39,19 @@ curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpos
 sudo mv outpostnet-agent /usr/local/bin/
 ```
 
-Or build from source:
+Build from source:
 
 ```bash
 git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
-make build-agent    # Output: build/outpostnet-agent
+make build-agent
+# Output: build/outpostnet-agent
 ```
 
 ## Quick Start
 
-**Host A** — expose a local HTTP service:
+### Step 1: Start agent on Host A (server role)
+
+Host A has an HTTP service running on port 8080 that you want to expose.
 
 ```yaml
 # agent-server.yaml
@@ -67,7 +70,9 @@ exports:
 outpostnet-agent --config agent-server.yaml
 ```
 
-**Host B** — access the remote service locally:
+### Step 2: Start agent on Host B (client role)
+
+Host B connects to Host A and imports the service as a local port. Replace `<HOST_A_IP>` with Host A's actual IP.
 
 ```yaml
 # agent-client.yaml
@@ -87,41 +92,34 @@ imports:
 outpostnet-agent --config agent-client.yaml
 ```
 
-**Verify:**
+### Step 3: Verify
 
 ```bash
-curl http://127.0.0.1:9080   # Transparently forwards to Host A:8080
+# On Host B — traffic forwards transparently to Host A:8080
+curl http://127.0.0.1:9080
 ```
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| TCP & UDP | Full L4 proxy — HTTP, gRPC, DNS, gaming, anything |
-| QUIC Tunnel | Encrypted transport with TLS 1.3, multiplexed streams |
-| Token Auth | Agent-to-agent authentication, no PKI required |
-| Multi-Hop Relay | Chain through 3+ regions (A → B → C) |
-| Auto-Reconnect | Exponential backoff, config persistence for offline recovery |
-| Metrics | Prometheus endpoint for tunnel state, streams, traffic |
-
-## vs FRP
-
-| | OutpostNet | FRP |
-|---|---|---|
-| Binaries | 1 (`outpostnet-agent`) | 2 (`frps` + `frpc`) |
-| Transport | QUIC (TLS 1.3) | TCP / KCP / QUIC |
-| Multi-hop relay | Native | No |
-| Stream mux | QUIC native | yamux |
-| Edge-first design | Yes | Generic |
-| HTTP Vhost | Roadmap | Yes |
-| Dashboard UI | Roadmap | Yes |
+| TCP & UDP | Full L4 proxy for HTTP, gRPC, DNS, gaming, and more |
+| QUIC Tunnel | Encrypted transport with TLS 1.3 and multiplexed streams |
+| Token Auth | Shared-secret authentication between agents, no PKI needed |
+| Multi-Hop Relay | Route traffic through intermediate agents across 3+ regions |
+| Auto-Reconnect | Exponential backoff with config persistence for offline recovery |
+| Metrics | Prometheus endpoint for tunnel state, streams, and traffic |
 
 ## Multi-Hop Relay
 
-Connect services across 3+ regions through relay agents:
+When two hosts cannot connect directly, route traffic through a relay agent:
+
+```
+Site A ──── QUIC ────► Site B (relay) ──── QUIC ────► Site C
+```
 
 ```yaml
-# Region B — relay between A and C
+# agent-relay.yaml (on Site B)
 region: site-b
 tunnels:
   - remote_region: site-a
@@ -136,19 +134,30 @@ relays:
     to_region: site-c
 ```
 
-```
-Site A ──── QUIC ────► Site B (relay) ──── QUIC ────► Site C
-```
+## Comparison with FRP
+
+| | OutpostNet | FRP |
+|---|---|---|
+| Binaries | 1 (`outpostnet-agent`) | 2 (`frps` + `frpc`) |
+| Transport | QUIC (TLS 1.3) | TCP / KCP / QUIC |
+| Multi-Hop Relay | Native | Not supported |
+| Stream Multiplexing | QUIC native | yamux |
+| HTTP Vhost | Roadmap | Supported |
+| Dashboard UI | Roadmap | Supported |
 
 ## Documentation
 
-- [Quick Start](docs/quickstart.md) — Full setup walkthrough
-- [Configuration](docs/configuration.md) — All config options
-- [Architecture](docs/architecture.md) — Design and data flow
+- [Quick Start Guide](docs/quickstart.md)
+- [Configuration Reference](docs/configuration.md)
+- [Architecture Overview](docs/architecture.md)
+- [Deployment Examples](deploy/examples/)
 
-## Platforms
+## Supported Platforms
 
-Linux (amd64, arm64) and macOS (amd64, arm64).
+| OS | Architecture |
+|----|-------------|
+| Linux | amd64, arm64 |
+| macOS | amd64, arm64 |
 
 ## License
 
