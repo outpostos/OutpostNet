@@ -27,15 +27,19 @@ Host A exports a local service. Host B imports it as a local port. Traffic flows
 
 ```bash
 # Linux amd64
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-linux-amd64.tar.gz | tar xz
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-linux-amd64.tar.gz | tar xz
 sudo mv outpostnet-agent /usr/local/bin/
 
 # Linux arm64
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-linux-arm64.tar.gz | tar xz
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-linux-arm64.tar.gz | tar xz
 sudo mv outpostnet-agent /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -sL https://github.com/outpostos/OutpostNet/releases/latest/download/outpostnet-agent-v1.0.0-darwin-arm64.tar.gz | tar xz
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-darwin-arm64.tar.gz | tar xz
+sudo mv outpostnet-agent /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-darwin-amd64.tar.gz | tar xz
 sudo mv outpostnet-agent /usr/local/bin/
 ```
 
@@ -56,6 +60,8 @@ Host A has an HTTP service running on port 8080 that you want to expose.
 ```yaml
 # agent-server.yaml
 region: site-a
+auth:
+  token: changeme
 tunnels:
   - remote_region: site-b
     role: server
@@ -77,6 +83,8 @@ Host B connects to Host A and imports the service as a local port. Replace `<HOS
 ```yaml
 # agent-client.yaml
 region: site-b
+auth:
+  token: changeme
 tunnels:
   - remote_region: site-a
     role: client
@@ -119,8 +127,23 @@ Site A ──── QUIC ────► Site B (relay) ──── QUIC ──
 ```
 
 ```yaml
-# agent-relay.yaml (on Site B)
+# agent-site-a.yaml — exports the service
+region: site-a
+auth:
+  token: changeme
+tunnels:
+  - remote_region: site-b
+    role: server
+    listen_addr: 0.0.0.0:4242
+exports:
+  - name: my-http
+    local_addr: 127.0.0.1:8080
+    protocol: tcp
+
+# agent-relay.yaml (on Site B) — relays site-a traffic to site-c
 region: site-b
+auth:
+  token: changeme
 tunnels:
   - remote_region: site-a
     role: client
@@ -132,6 +155,20 @@ relays:
   - service: my-http
     from_region: site-a
     to_region: site-c
+
+# agent-site-c.yaml — imports the service via relay
+region: site-c
+auth:
+  token: changeme
+tunnels:
+  - remote_region: site-b
+    role: client
+    remote_addr: <HOST_B_IP>:4243
+imports:
+  - name: my-http
+    listen_addr: 127.0.0.1:9080
+    remote_region: site-a
+    protocol: tcp
 ```
 
 ## Comparison with FRP
