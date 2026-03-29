@@ -1,4 +1,7 @@
-# outpostnet-sidecar standalone 配置示例
+# outpostnet-sidecar standalone 配置示例（进阶：单主机多应用场景）
+#
+# 注意：大多数场景只需要 outpostnet-agent，参见 standalone-agent-*.yaml。
+# sidecar 需要配合 outpostnet-server 使用，用于同一台主机上多个应用共享隧道。
 #
 # 用途：将本地服务导出到网格，并将远程服务映射为本地端口。
 # 本示例演示一个 Web API 服务导出，同时导入远程 PostgreSQL 和 Redis。

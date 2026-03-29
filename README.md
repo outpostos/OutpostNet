@@ -113,8 +113,8 @@ curl http://127.0.0.1:9080   # Transparently forwards to Host A:8080
 | Multi-hop relay | Native | No |
 | Stream mux | QUIC native | yamux |
 | Edge-first design | Yes | Generic |
-| HTTP vhost | Roadmap | Yes |
-| Dashboard | Roadmap | Yes |
+| HTTP Vhost | Roadmap | Yes |
+| Dashboard UI | Roadmap | Yes |
 
 ## Multi-Hop Relay
 

@@ -1,4 +1,7 @@
-# outpostnet-server standalone 配置示例
+# outpostnet-server standalone 配置示例（进阶：单主机多应用场景）
+#
+# 注意：大多数场景只需要 outpostnet-agent，参见 standalone-agent-*.yaml。
+# 本组件仅用于同一台主机上有多个应用需要共享隧道的场景。
 #
 # 用途：在每台主机上运行一个 server 实例，管理本机所有 sidecar 的服务注册和路由。
 #
