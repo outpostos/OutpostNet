@@ -32,6 +32,10 @@ type ServerConfig struct {
 
 	// MaxIdleTimeout is the max idle timeout before closing a connection. Default: 30s.
 	MaxIdleTimeout time.Duration
+
+	// Token is the shared secret for authenticating incoming connections.
+	// An empty token disables authentication (backward compatible).
+	Token string
 }
 
 // ClientConfig configures a tunnel client (the initiating side).
@@ -47,6 +51,10 @@ type ClientConfig struct {
 
 	// MaxIdleTimeout is the max idle timeout before closing a connection. Default: 30s.
 	MaxIdleTimeout time.Duration
+
+	// Token is the shared secret sent to the server for authentication.
+	// An empty token disables authentication (backward compatible).
+	Token string
 }
 
 // ServiceRoute maps a service name to a local TCP address.

@@ -2,9 +2,12 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -30,6 +33,7 @@ func NewClient(cfg ClientConfig, logger *slog.Logger) *Client {
 }
 
 // Connect establishes the QUIC connection to the tunnel server.
+// If a token is configured, it performs the auth handshake before returning.
 func (c *Client) Connect(ctx context.Context) error {
 	conn, err := Dial(ctx, c.cfg)
 	if err != nil {
@@ -38,7 +42,52 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
+
+	if c.cfg.Token != "" {
+		if err := c.authenticate(ctx); err != nil {
+			conn.CloseWithError(1, "auth failed")
+			c.mu.Lock()
+			c.conn = nil
+			c.mu.Unlock()
+			return fmt.Errorf("tunnel auth: %w", err)
+		}
+	}
+
 	c.logger.Info("connected to tunnel server", "addr", c.cfg.ServerAddr)
+	return nil
+}
+
+// authenticate performs the client-side auth handshake.
+func (c *Client) authenticate(ctx context.Context) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+
+	authCtx, cancel := context.WithTimeout(ctx, authHandshakeTimeout*time.Second)
+	defer cancel()
+
+	stream, err := conn.OpenStreamSync(authCtx)
+	if err != nil {
+		return fmt.Errorf("open auth stream: %w", err)
+	}
+	defer stream.Close()
+
+	deadline := time.Now().Add(authHandshakeTimeout * time.Second)
+	stream.SetReadDeadline(deadline)
+	stream.SetWriteDeadline(deadline)
+
+	if err := writeAuthToken(stream, c.cfg.Token); err != nil {
+		return fmt.Errorf("write auth token: %w", err)
+	}
+
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(stream, resp); err != nil {
+		return fmt.Errorf("read auth response: %w", err)
+	}
+
+	if resp[0] != authOK {
+		return fmt.Errorf("server rejected authentication")
+	}
 	return nil
 }
 

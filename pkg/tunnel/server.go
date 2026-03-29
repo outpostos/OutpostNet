@@ -2,10 +2,12 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -127,6 +129,17 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConnection(ctx context.Context, conn *quic.Conn) {
 	s.logger.Info("accepted connection", "remote", conn.RemoteAddr())
+
+	// If token auth is configured, authenticate before processing service streams.
+	if s.cfg.Token != "" {
+		if err := s.authenticateConn(ctx, conn); err != nil {
+			s.logger.Warn("authentication failed", "remote", conn.RemoteAddr(), "error", err)
+			conn.CloseWithError(1, "authentication failed")
+			return
+		}
+		s.logger.Debug("authentication succeeded", "remote", conn.RemoteAddr())
+	}
+
 	defer conn.CloseWithError(0, "server closing")
 
 	var wg sync.WaitGroup
@@ -183,6 +196,38 @@ func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 
 	// Bidirectional forwarding.
 	relay(stream, localConn)
+}
+
+// authenticateConn performs the auth handshake on the first stream of a new connection.
+// The client opens a stream and sends its token; the server responds with authOK or authFail.
+func (s *Server) authenticateConn(ctx context.Context, conn *quic.Conn) error {
+	authCtx, cancel := context.WithTimeout(ctx, authHandshakeTimeout*time.Second)
+	defer cancel()
+
+	stream, err := conn.AcceptStream(authCtx)
+	if err != nil {
+		return fmt.Errorf("accept auth stream: %w", err)
+	}
+	defer stream.Close()
+
+	deadline := time.Now().Add(authHandshakeTimeout * time.Second)
+	stream.SetReadDeadline(deadline)
+	stream.SetWriteDeadline(deadline)
+
+	token, err := readAuthToken(stream)
+	if err != nil {
+		return fmt.Errorf("read auth token: %w", err)
+	}
+
+	if token != s.cfg.Token {
+		stream.Write([]byte{authFail}) //nolint:errcheck — best-effort, connection closes anyway
+		return fmt.Errorf("token mismatch")
+	}
+
+	if _, err := stream.Write([]byte{authOK}); err != nil {
+		return fmt.Errorf("write auth response: %w", err)
+	}
+	return nil
 }
 
 // relay copies data bidirectionally between two ReadWriteClosers.

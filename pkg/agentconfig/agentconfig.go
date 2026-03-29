@@ -39,6 +39,9 @@ type Config struct {
 
 	// TLS configures TLS for tunnel connections.
 	TLS TLSConfig `yaml:"tls"`
+
+	// Auth configures authentication for tunnel connections.
+	Auth AuthConfig `yaml:"auth"`
 }
 
 // TunnelConfig describes a QUIC tunnel to another region.
@@ -139,6 +142,13 @@ type TLSConfig struct {
 
 	// Insecure skips TLS verification (for development only).
 	Insecure bool `yaml:"insecure"`
+}
+
+// AuthConfig configures authentication for tunnel connections.
+type AuthConfig struct {
+	// Token is a shared secret used to authenticate QUIC connections.
+	// An empty token disables authentication (backward compatible).
+	Token string `yaml:"token"`
 }
 
 // LoadConfig loads an Agent config from a YAML file.
