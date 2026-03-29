@@ -4,7 +4,7 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
 [![Release](https://img.shields.io/github/v/release/outpostos/OutpostNet)](https://github.com/outpostos/OutpostNet/releases)
 
-OutpostNet is a lightweight TCP/UDP tunneling tool for edge computing, similar to [frp](https://github.com/fatedier/frp). It creates encrypted QUIC tunnels between hosts, allowing you to expose local services across regions without a public IP.
+OutpostNet is a lightweight TCP/UDP tunneling tool for edge computing, similar to [frp](https://github.com/fatedier/frp). It creates encrypted QUIC tunnels between hosts, allowing you to expose local services without a public IP.
 
 One binary (`outpostnet-agent`), two roles (`server` / `client`).
 
@@ -59,7 +59,6 @@ Host A has an HTTP service running on port 8080 that you want to expose.
 
 ```yaml
 # agent-server.yaml
-region: site-a
 auth:
   token: changeme
 tunnels:
@@ -81,17 +80,14 @@ Host B connects to Host A and imports the service as a local port. Replace `<HOS
 
 ```yaml
 # agent-client.yaml
-region: site-b
 auth:
   token: changeme
 tunnels:
-  - remote_region: site-a
-    role: client
+  - role: client
     remote_addr: <HOST_A_IP>:4242
 imports:
   - name: my-http
     listen_addr: 127.0.0.1:9080
-    remote_region: site-a
     protocol: tcp
 ```
 
@@ -113,60 +109,8 @@ curl http://127.0.0.1:9080
 | TCP & UDP | Full L4 proxy for HTTP, gRPC, DNS, gaming, and more |
 | QUIC Tunnel | Encrypted transport with TLS 1.3 and multiplexed streams |
 | Token Auth | Shared-secret authentication between agents, no PKI needed |
-| Multi-Hop Relay | Route traffic through intermediate agents across 3+ regions |
 | Auto-Reconnect | Exponential backoff with config persistence for offline recovery |
 | Metrics | Prometheus endpoint for tunnel state, streams, and traffic |
-
-## Multi-Hop Relay
-
-When two hosts cannot connect directly, route traffic through a relay agent:
-
-```
-Site A ──── QUIC ────► Site B (relay) ──── QUIC ────► Site C
-```
-
-```yaml
-# agent-site-a.yaml — exports the service
-region: site-a
-auth:
-  token: changeme
-tunnels:
-  - role: server
-    listen_addr: 0.0.0.0:4242
-exports:
-  - name: my-http
-    local_addr: 127.0.0.1:8080
-    protocol: tcp
-
-# agent-relay.yaml (on Site B) — relays site-a traffic to site-c
-region: site-b
-auth:
-  token: changeme
-tunnels:
-  - remote_region: site-a
-    role: client
-    remote_addr: <HOST_A_IP>:4242
-  - role: server
-    listen_addr: 0.0.0.0:4243
-relays:
-  - service: my-http
-    from_region: site-c
-    to_region: site-a
-
-# agent-site-c.yaml — imports the service via relay
-region: site-c
-auth:
-  token: changeme
-tunnels:
-  - remote_region: site-b
-    role: client
-    remote_addr: <HOST_B_IP>:4243
-imports:
-  - name: my-http
-    listen_addr: 127.0.0.1:9080
-    remote_region: site-a
-    protocol: tcp
-```
 
 ## Comparison with FRP
 
@@ -174,7 +118,6 @@ imports:
 |---|---|---|
 | Binaries | 1 (`outpostnet-agent`) | 2 (`frps` + `frpc`) |
 | Transport | QUIC (TLS 1.3) | TCP / KCP / QUIC |
-| Multi-Hop Relay | Native | Not supported |
 | Stream Multiplexing | QUIC native | yamux |
 | HTTP Vhost | Roadmap | Supported |
 | Dashboard UI | Roadmap | Supported |

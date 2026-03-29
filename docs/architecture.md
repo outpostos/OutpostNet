@@ -1,132 +1,120 @@
-# 架构概览
+# Architecture Overview
 
-## 核心概念
+## Core Concept
 
-OutpostNet 的核心是 `outpostnet-agent`——一个二进制，通过配置区分 server 和 client 角色，在两台或多台主机之间建立 QUIC 加密隧道。
+OutpostNet's core is `outpostnet-agent` — one binary that acts as either a server or client role, creating encrypted QUIC tunnels between hosts.
 
-这个模型与 frp 类似：frp 需要 `frps`（服务端）+ `frpc`（客户端），OutpostNet 把两者合并为一个 `outpostnet-agent`，通过 `role: server` / `role: client` 区分。
+This model is similar to frp: frp requires `frps` (server) + `frpc` (client); OutpostNet unifies both into a single `outpostnet-agent`, distinguished by `role: server` / `role: client`.
 
 ```
-主机 A (server 角色)                主机 B (client 角色)
-┌──────────────────┐                ┌──────────────────┐
-│  App (:8080)     │  QUIC Tunnel   │     App (:9080)  │
-│   │              │  (TLS 1.3)     │              │   │
-│   ▼              │                │              ▼   │
-│  outpostnet-agent ◄══════════════► outpostnet-agent  │
-│  (export)        │                │        (import)  │
-└──────────────────┘                └──────────────────┘
+Host A (server role)              Host B (client role)
+┌──────────────────┐              ┌──────────────────┐
+│  App (:8080)     │  QUIC Tunnel │     App (:9080)  │
+│   │              │  (TLS 1.3)   │              │   │
+│   ▼              │              │              ▼   │
+│  outpostnet-agent ◄════════════► outpostnet-agent  │
+│  (export)        │              │        (import)  │
+└──────────────────┘              └──────────────────┘
 ```
 
 ---
 
-## 数据流
+## Data Flow
 
-### 场景一：两台主机，一个服务（最常用）
-
-```
-App-B (主机 B, :9080) → agent-B (client) ──── QUIC ────► agent-A (server) → App-A (主机 A, :8080)
-```
-
-主机 A 的 agent 导出本地 8080 端口的服务，主机 B 的 agent 导入并监听在本地 9080 端口。用户在主机 B 访问 `localhost:9080`，流量经 QUIC 隧道透明转发到主机 A 的 8080。
-
-### 场景二：多跳中继（三区域）
+### Scenario: Two Hosts, One Service (Most Common)
 
 ```
-区域 A ──── QUIC ────► 区域 B (中继) ──── QUIC ────► 区域 C
-agent-A                agent-B                       agent-C
-(export)               (relay)                       (import)
+App-B (Host B, :9080) → agent-B (client) ──── QUIC ────► agent-A (server) → App-A (Host A, :8080)
 ```
 
-区域 A 无法直连区域 C，通过区域 B 的 agent 做中继。agent-B 配置 `relays` 规则，自动将来自 A 的流量转发给 C。最多支持 5 跳。
+Host A's agent exports the local service on port 8080. Host B's agent imports it and listens on local port 9080. Users on Host B access `localhost:9080`, and traffic is transparently forwarded through the QUIC tunnel to Host A's port 8080.
 
-### 场景三：多服务、多区域
+### Scenario: Multiple Services
 
-一个 agent 可以同时配置：
-- 多个 tunnel（连接到不同区域）
-- 多个 export（导出多个本地服务）
-- 多个 import（从不同区域导入服务）
+A single agent can configure:
+- Multiple tunnels (connecting to different hosts)
+- Multiple exports (exposing multiple local services)
+- Multiple imports (importing services from different hosts)
 
 ```yaml
-region: site-b
 tunnels:
-  - remote_region: site-a
-    role: client
+  - role: client
     remote_addr: 10.0.1.1:4242
-  - remote_region: site-c
-    role: server
+  - role: server
     listen_addr: 0.0.0.0:4243
+
 exports:
   - name: api
     local_addr: 127.0.0.1:8080
     protocol: tcp
+
 imports:
   - name: database
     listen_addr: 127.0.0.1:5432
-    remote_region: site-a
     protocol: tcp
 ```
 
 ---
 
-## 协议
+## Protocol
 
-### QUIC 隧道（agent ↔ agent）
+### QUIC Tunnel (agent ↔ agent)
 
-- 基于 QUIC（quic-go 实现），内置 TLS 1.3 加密
-- 原生多流复用，每个 QUIC 连接承载多个服务流
-- 可选 token 认证（两端配置相同 `auth.token`）
-- 网络变化时自动恢复（QUIC 协议特性）
-
----
-
-## 关键设计决策
-
-| 决策 | 原因 |
-|------|------|
-| 一个二进制，两个角色 | 简化部署，减少用户认知成本（对标 frp 但更简单） |
-| QUIC 作为隧道协议 | 原生多路复用、内置 TLS、移动网络下抖动恢复能力强 |
-| 配置持久化 | 边缘节点网络不稳定，agent 重启后自动恢复隧道 |
-| Token 认证而非证书 | 降低部署门槛，无需管理 PKI 基础设施 |
+- Built on QUIC (quic-go implementation), with TLS 1.3 encryption
+- Native stream multiplexing — one QUIC connection carries multiple service streams
+- Optional token authentication (both ends configure the same `auth.token`)
+- Automatic recovery on network changes (QUIC protocol feature)
 
 ---
 
-## 进阶：单主机多应用架构
+## Key Design Decisions
 
-> 以下内容适用于 **同一台主机上有多个应用** 需要共享隧道的场景。基本的跨主机隧道不需要这些组件。
+| Decision | Rationale |
+|----------|-----------|
+| One binary, two roles | Simplifies deployment, reduces cognitive overhead (like frp but simpler) |
+| QUIC as tunnel protocol | Native multiplexing, built-in TLS, resilient under mobile/unstable networks |
+| Configuration persistence | Edge nodes have unreliable networks; agent auto-recovers tunnels on restart |
+| Token auth instead of certificates | Lowers deployment barrier, no PKI infrastructure to manage |
 
-对于单主机多应用，OutpostNet 提供额外两个组件：
+---
 
-- `outpostnet-server` — 本机路由中心（Unix socket），管理多个 sidecar 的服务注册
-- `outpostnet-sidecar` — 每个应用旁运行一个，连接到 server，负责该应用的服务导出/导入
+## Advanced: Multi-Application Architecture
+
+> The following applies to scenarios where **multiple applications on a single host** need to share tunnels. Basic cross-host tunneling does not require these components.
+
+For multi-application scenarios, OutpostNet provides two additional components:
+
+- `outpostnet-server` — Local routing hub (Unix socket), manages service registration for multiple sidecars
+- `outpostnet-sidecar` — Runs alongside each application, connects to the server, handles that app's exports/imports
 
 ```
-同一主机内：
+Same host:
 ┌────────────────────────────────────────────┐
 │  App-1 → sidecar-1 ┐                      │
-│                     ├─► server ──► agent ──┼──► QUIC 隧道
-│  App-2 → sidecar-2 ┘   (路由)    (隧道)   │
+│                     ├─► server ──► agent ──┼──► QUIC tunnel
+│  App-2 → sidecar-2 ┘   (route)   (tunnel) │
 └────────────────────────────────────────────┘
 ```
 
-### 组件职责
+### Component Responsibilities
 
 **outpostnet-server**
-- 通过 Unix domain socket 接受 sidecar 连接（同机通信，性能更高）
-- 维护服务注册表：哪个 sidecar 导出了哪些服务
-- 将连接请求路由到对应的 sidecar
-- 心跳检测并清理失效连接
+- Accepts sidecar connections via Unix domain socket (same-host communication, low overhead)
+- Maintains a service registry: which sidecar exports which services
+- Routes connection requests to the appropriate sidecar
+- Heartbeat monitoring and cleanup of stale connections
 
 **outpostnet-sidecar**
-- 连接本机 server，注册本地服务（export）或监听本地端口导入远程服务（import）
-- 同时支持 TCP 和 UDP
-- 每个应用独立配置、独立进程，互不影响
+- Connects to the local server, registers local services (export) or listens on local ports for remote services (import)
+- Supports both TCP and UDP
+- Each application has its own config and process, fully isolated
 
-### 内部协议（server ↔ sidecar）
+### Internal Protocol (server ↔ sidecar)
 
-使用基于 Unix socket 的自定义二进制协议：
-- 帧格式：长度前缀 + 消息类型 + Payload
-- 消息类型：Handshake / Register / Connect / OpenStream / Data / StreamClose / Heartbeat
-- 流模型：32-bit stream ID，控制流（ID=0）用于握手和注册
-- 缓冲区：每个流 32KB
+Uses a custom binary protocol over Unix socket:
+- Frame format: length prefix + message type + payload
+- Message types: Handshake / Register / Connect / OpenStream / Data / StreamClose / Heartbeat
+- Stream model: 32-bit stream ID; control stream (ID=0) for handshake and registration
+- Buffer: 32KB per stream
 
-详见 [配置参考](configuration.md) 中的 server 和 sidecar 配置说明。
+See the [Configuration Reference](configuration.md) for server and sidecar configuration details.
