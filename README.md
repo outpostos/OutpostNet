@@ -27,20 +27,20 @@ Host A exports a local service. Host B imports it as a local port. Traffic flows
 
 ```bash
 # Linux amd64
-curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-linux-amd64.tar.gz | tar xz
-sudo mv outpostnet-agent-v1.0.0-linux-amd64 /usr/local/bin/outpostnet-agent
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.1/outpostnet-agent-v1.0.1-linux-amd64.tar.gz | tar xz
+sudo mv outpostnet-agent-v1.0.1-linux-amd64 /usr/local/bin/outpostnet-agent
 
 # Linux arm64
-curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-linux-arm64.tar.gz | tar xz
-sudo mv outpostnet-agent-v1.0.0-linux-arm64 /usr/local/bin/outpostnet-agent
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.1/outpostnet-agent-v1.0.1-linux-arm64.tar.gz | tar xz
+sudo mv outpostnet-agent-v1.0.1-linux-arm64 /usr/local/bin/outpostnet-agent
 
 # macOS (Apple Silicon)
-curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-darwin-arm64.tar.gz | tar xz
-sudo mv outpostnet-agent-v1.0.0-darwin-arm64 /usr/local/bin/outpostnet-agent
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.1/outpostnet-agent-v1.0.1-darwin-arm64.tar.gz | tar xz
+sudo mv outpostnet-agent-v1.0.1-darwin-arm64 /usr/local/bin/outpostnet-agent
 
 # macOS (Intel)
-curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.0/outpostnet-agent-v1.0.0-darwin-amd64.tar.gz | tar xz
-sudo mv outpostnet-agent-v1.0.0-darwin-amd64 /usr/local/bin/outpostnet-agent
+curl -sL https://github.com/outpostos/OutpostNet/releases/download/v1.0.1/outpostnet-agent-v1.0.1-darwin-amd64.tar.gz | tar xz
+sudo mv outpostnet-agent-v1.0.1-darwin-amd64 /usr/local/bin/outpostnet-agent
 ```
 
 Build from source:

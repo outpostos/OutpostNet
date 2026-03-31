@@ -2,6 +2,13 @@
 
 All notable changes to OutpostNet will be documented in this file.
 
+## [1.0.1] - 2026-03-29
+
+### Documentation
+- Removed multi-hop relay references from docs
+- All documentation now pure English
+- Consistent with 1.0 feature scope (TCP/UDP tunneling only)
+
 ## [1.0.0] - 2026-03-29
 
 First stable release. OutpostNet 1.0 is a lightweight TCP/UDP tunneling tool for edge computing, comparable to FRP at the L4 proxy layer with added QUIC transport.
