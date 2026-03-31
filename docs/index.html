@@ -44,6 +44,12 @@
     .nav-links a { margin-left: 1.5rem; color: var(--text-muted); font-size: 0.9rem; }
     .nav-links a:hover { color: var(--text); text-decoration: none; }
 
+    /* Section label */
+    .section-label {
+      display: block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
     /* Hero */
     .hero {
       padding: 10rem 2rem 6rem;
@@ -59,13 +65,42 @@
       font-weight: 600; font-size: 0.95rem; transition: all 0.2s;
     }
     .btn-primary { background: var(--accent); color: #fff; }
-    .btn-primary:hover { background: var(--accent-hover); text-decoration: none; }
+    .btn-primary:hover {
+      background: var(--accent-hover); text-decoration: none;
+      box-shadow: 0 0 18px rgba(59, 130, 246, 0.55);
+    }
     .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
     .btn-secondary:hover { border-color: var(--accent); text-decoration: none; }
 
+    /* Version badge */
+    .version-badge {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 0.78rem; color: var(--text-muted);
+      margin-bottom: 1.5rem;
+    }
+    .version-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+      flex-shrink: 0;
+    }
+
+    /* Hero feature tags */
+    .hero-tags {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem;
+      margin: 1.5rem 0 0;
+    }
+    .hero-tag {
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem;
+      color: var(--text-muted); padding: 0.25rem 0.6rem;
+      border: 1px solid var(--border); border-radius: 4px;
+      background: var(--surface);
+    }
+    .hero-tag::before { content: '·'; margin-right: 0.4rem; color: var(--accent); }
+
     /* Install snippet */
     .install {
-      max-width: 600px; margin: 3rem auto 0;
+      max-width: 600px; margin: 2rem auto 0;
       background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
       padding: 1rem 1.25rem; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
       color: var(--text-muted); text-align: left; overflow-x: auto;
@@ -77,10 +112,15 @@
       max-width: 1100px; margin: 0 auto; padding: 4rem 2rem;
       display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;
     }
+    .features-header {
+      max-width: 1100px; margin: 0 auto; padding: 4rem 2rem 0; text-align: center;
+    }
+    .features-header h2 { font-size: 1.5rem; }
     .feature {
       background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-      padding: 1.5rem;
+      padding: 1.5rem; transition: box-shadow 0.2s;
     }
+    .feature:hover { box-shadow: 0 0 20px rgba(59, 130, 246, 0.12); }
     .feature h3 { font-size: 1rem; margin-bottom: 0.5rem; }
     .feature p { font-size: 0.9rem; color: var(--text-muted); }
 
@@ -144,16 +184,53 @@
     }
     .bench-hi { color: var(--green); }
 
+    /* CTA Section */
+    .cta-section {
+      position: relative; overflow: hidden;
+      padding: 5rem 2rem; text-align: center;
+    }
+    .cta-section::before {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse 70% 60% at 50% 50%, rgba(59,130,246,0.12) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .cta-section h2 {
+      font-size: 2rem; font-weight: 800; letter-spacing: -0.02em;
+      margin-bottom: 0.75rem; position: relative;
+    }
+    .cta-section p {
+      color: var(--text-muted); font-size: 1.05rem;
+      max-width: 500px; margin: 0 auto 2rem; position: relative;
+    }
+    .cta-buttons { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; position: relative; }
+
     /* Footer */
     footer {
-      border-top: 1px solid var(--border); padding: 2rem;
-      text-align: center; color: var(--text-muted); font-size: 0.85rem;
+      border-top: 1px solid var(--border); padding: 2.5rem 2rem;
+    }
+    .footer-inner {
+      max-width: 1100px; margin: 0 auto;
+      display: flex; align-items: flex-start; justify-content: space-between;
+      flex-wrap: wrap; gap: 2rem;
+    }
+    .footer-brand {
+      font-weight: 700; font-size: 1rem; color: var(--text); margin-bottom: 0.4rem;
+    }
+    .footer-tagline { font-size: 0.85rem; color: var(--text-muted); max-width: 280px; }
+    .footer-links { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center; }
+    .footer-links a { color: var(--text-muted); font-size: 0.85rem; }
+    .footer-links a:hover { color: var(--text); text-decoration: none; }
+    .footer-copy {
+      width: 100%; text-align: center; color: var(--text-muted); font-size: 0.8rem;
+      padding-top: 1.5rem; border-top: 1px solid var(--border); margin-top: 1rem;
     }
 
     @media (max-width: 640px) {
       .hero h1 { font-size: 2rem; }
       .hero p { font-size: 1rem; }
       .diagram { font-size: 0.65rem; }
+      .footer-inner { flex-direction: column; }
+      .cta-section h2 { font-size: 1.5rem; }
     }
   </style>
 </head>
@@ -174,11 +251,22 @@
 </nav>
 
 <section class="hero">
+  <div class="version-badge">
+    <span class="version-dot"></span>
+    v1.0.1 — stable
+  </div>
   <h1>Tunnel anything.<br><span>No public IP needed.</span></h1>
   <p>One binary, two roles. Like frp, but built on QUIC. Expose local services over encrypted tunnels.</p>
   <div class="hero-buttons">
     <a href="https://github.com/outpostos/OutpostNet/releases" class="btn btn-primary">Download v1.0.1</a>
     <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md" class="btn btn-secondary">Quick Start</a>
+  </div>
+  <div class="hero-tags">
+    <span class="hero-tag">Single Binary</span>
+    <span class="hero-tag">QUIC Native</span>
+    <span class="hero-tag">Token Auth</span>
+    <span class="hero-tag">Auto-Reconnect</span>
+    <span class="hero-tag">Prometheus Metrics</span>
   </div>
   <div class="install">
     <span class="cmd">curl -sL</span> https://github.com/outpostos/OutpostNet/releases/download/v1.0.1/outpostnet-agent-v1.0.1-linux-amd64.tar.gz <span class="cmd">| tar xz</span><br>
@@ -186,7 +274,11 @@
   </div>
 </section>
 
-<section class="features" id="features">
+<div class="features-header" id="features">
+  <span class="section-label">Capabilities</span>
+  <h2>Everything you need to punch through NAT</h2>
+</div>
+<section class="features">
   <div class="feature">
     <h3>TCP & UDP Proxy</h3>
     <p>Full Layer 4 protocol support. HTTP, gRPC, DNS, gaming protocols — anything that speaks TCP or UDP works out of the box.</p>
@@ -214,6 +306,7 @@
 </section>
 
 <section class="diagram-section" id="how-it-works">
+  <span class="section-label">Architecture</span>
   <h2>How It Works</h2>
   <p style="color: var(--text-muted); margin-bottom: 1.5rem;">One binary (<code style="color: var(--green);">outpostnet-agent</code>), two roles — like frp's frps + frpc, unified.</p>
   <div class="diagram">
@@ -228,6 +321,7 @@ Host A (server role)                    Host B (client role)
 </section>
 
 <section class="comparison" id="comparison">
+  <span class="section-label">Comparison</span>
   <h2>OutpostNet vs FRP</h2>
   <table>
     <tr>
@@ -284,6 +378,7 @@ Host A (server role)                    Host B (client role)
 </section>
 
 <section class="test-results" id="test-results">
+  <span class="section-label">Quality</span>
   <h2>Test Results</h2>
   <p class="section-sub">v1.0.1 · 2026-03-31 · Linux x86_64 · Go 1.22</p>
 
@@ -352,9 +447,31 @@ Platform: Intel Core i5-8250U @ 1.60GHz · Linux x86_64 · QUIC/TLS 1.3 loopback
   </p>
 </section>
 
+<section class="cta-section">
+  <h2>Ready to tunnel?</h2>
+  <p>Download the single binary and expose your first service in under two minutes.</p>
+  <div class="cta-buttons">
+    <a href="https://github.com/outpostos/OutpostNet/releases" class="btn btn-primary">Download v1.0.1</a>
+    <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md" class="btn btn-secondary">Quick Start Guide</a>
+    <a href="https://github.com/outpostos/OutpostNet" class="btn btn-secondary">View on GitHub</a>
+  </div>
+</section>
+
 <footer>
-  <p>OutpostNet is part of <a href="https://github.com/outpostos">OutpostOS</a> — the edge computing platform for unreliable environments.</p>
-  <p>Apache 2.0 License</p>
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand">OutpostNet</div>
+      <div class="footer-tagline">Part of <a href="https://github.com/outpostos">OutpostOS</a> — the edge computing platform for unreliable environments.</div>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/outpostos/OutpostNet">GitHub</a>
+      <a href="https://github.com/outpostos/OutpostNet/blob/main/docs/quickstart.md">Docs</a>
+      <a href="https://github.com/outpostos/OutpostNet/releases">Releases</a>
+      <a href="https://github.com/outpostos/OutpostNet/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/outpostos/OutpostNet/blob/main/LICENSE">Apache 2.0</a>
+    </div>
+  </div>
+  <div class="footer-copy">© 2026 OutpostOS. Apache 2.0 License.</div>
 </footer>
 
 </body>
