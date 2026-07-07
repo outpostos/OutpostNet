@@ -13,6 +13,7 @@ import (
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 	"github.com/outpostos/OutpostNet/pkg/tunnel"
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
+	"github.com/quic-go/quic-go"
 )
 
 // TunnelManager creates and manages QUIC tunnels based on Agent configuration.
@@ -30,7 +31,11 @@ type TunnelManager struct {
 	servers         []*tunnel.Server
 	clients         []*tunnel.ManagedClient
 	clientsByRegion map[string]*tunnel.ManagedClient
+	clientsByNode   map[string]*tunnel.ManagedClient
 	relay           *RelayManager
+
+	connectPeerClient      func(context.Context, *tunnel.ManagedClient) error
+	connectPeerClientUntil func(context.Context, *tunnel.ManagedClient)
 }
 
 // NewTunnelManager creates a new TunnelManager.
@@ -38,12 +43,20 @@ func NewTunnelManager(cfg *agentconfig.Config, logger *slog.Logger, metrics *Met
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TunnelManager{
+	tm := &TunnelManager{
 		cfg:             cfg,
 		logger:          logger,
 		metrics:         metrics,
 		clientsByRegion: make(map[string]*tunnel.ManagedClient),
+		clientsByNode:   make(map[string]*tunnel.ManagedClient),
 	}
+	tm.connectPeerClient = func(ctx context.Context, mc *tunnel.ManagedClient) error {
+		return mc.Connect(ctx)
+	}
+	tm.connectPeerClientUntil = func(ctx context.Context, mc *tunnel.ManagedClient) {
+		mc.ConnectUntilReady(ctx)
+	}
+	return tm
 }
 
 // Start creates and starts all configured tunnels.
@@ -151,18 +164,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 }
 
 func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelConfig, _ *tls.Config) error {
-	mc := tunnel.NewManagedClient(tunnel.ManagedClientConfig{
-		ClientConfig: tunnel.ClientConfig{
-			ServerAddr: tc.RemoteAddr,
-			TLS:        tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
-			Token:      tm.cfg.Auth.Token,
-		},
-		InitialReconnectDelay: 1 * time.Second,
-		MaxReconnectDelay:     30 * time.Second,
-		OnStateChange: func(s tunnel.ConnState) {
-			tm.logger.Info("tunnel state changed", "remote_region", tc.RemoteRegion, "state", s)
-		},
-	}, tm.logger.With("tunnel", "client", "remote_region", tc.RemoteRegion))
+	mc := tm.newManagedClient(tc.RemoteAddr, tc.RemoteRegion)
 
 	if err := mc.Connect(ctx); err != nil {
 		return fmt.Errorf("connect to %s: %w", tc.RemoteAddr, err)
@@ -173,9 +175,9 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 	tm.clientsByRegion[tc.RemoteRegion] = mc
 	tm.mu.Unlock()
 
-	// Start import proxies for services from this remote region.
+	// Start legacy import proxies for services from this remote region.
 	for _, imp := range tm.cfg.Imports {
-		if imp.RemoteRegion != tc.RemoteRegion {
+		if isServiceImport(imp) || imp.RemoteRegion != tc.RemoteRegion {
 			continue
 		}
 		go tm.serveImport(ctx, mc, imp)
@@ -183,6 +185,21 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 
 	tm.logger.Info("tunnel client connected", "remote_region", tc.RemoteRegion, "addr", tc.RemoteAddr)
 	return nil
+}
+
+func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel.ManagedClient {
+	return tunnel.NewManagedClient(tunnel.ManagedClientConfig{
+		ClientConfig: tunnel.ClientConfig{
+			ServerAddr: remoteAddr,
+			TLS:        tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
+			Token:      tm.cfg.Auth.Token,
+		},
+		InitialReconnectDelay: 1 * time.Second,
+		MaxReconnectDelay:     30 * time.Second,
+		OnStateChange: func(s tunnel.ConnState) {
+			tm.logger.Info("tunnel state changed", "remote", remoteName, "state", s)
+		},
+	}, tm.logger.With("tunnel", "client", "remote", remoteName))
 }
 
 func (tm *TunnelManager) serveImport(ctx context.Context, mc *tunnel.ManagedClient, imp agentconfig.ImportConfig) {
@@ -194,6 +211,33 @@ func (tm *TunnelManager) serveImport(ctx context.Context, mc *tunnel.ManagedClie
 			return
 		}
 		tm.logger.Error("import proxy stopped, restarting...", "service", imp.Name, "error", err)
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
+	for _, imp := range tm.cfg.Imports {
+		if !isServiceImport(imp) {
+			continue
+		}
+		go tm.serveDynamicImport(ctx, imp)
+	}
+}
+
+func (tm *TunnelManager) serveDynamicImport(ctx context.Context, imp agentconfig.ImportConfig) {
+	serviceName, nodeID, err := agentconfig.ParseServiceRef(imp.Service)
+	if err != nil {
+		tm.logger.Error("invalid service import", "service", imp.Service, "error", err)
+		return
+	}
+	tm.logger.Info("serving dynamic import", "service", serviceName, "node_id", nodeID, "listen", imp.ListenAddr)
+
+	for {
+		err := tm.listenAndProxyDynamic(ctx, nodeID, serviceName, imp.ListenAddr)
+		if ctx.Err() != nil {
+			return
+		}
+		tm.logger.Error("dynamic import proxy stopped, restarting...", "service", serviceName, "node_id", nodeID, "error", err)
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -242,6 +286,119 @@ func (tm *TunnelManager) listenAndProxy(ctx context.Context, mc *tunnel.ManagedC
 	}
 }
 
+func (tm *TunnelManager) listenAndProxyDynamic(ctx context.Context, nodeID, serviceName, listenAddr string) error {
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+	}()
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer conn.Close()
+
+			stream, mc, err := tm.openDynamicServiceStream(ctx, nodeID, serviceName)
+			if err != nil {
+				tm.logger.Warn("dynamic import pending or unavailable", "service", serviceName, "node_id", nodeID, "error", err)
+				return
+			}
+			defer stream.Close()
+			defer mc.StreamDone()
+
+			biRelay(stream, conn)
+		}()
+	}
+}
+
+func (tm *TunnelManager) openDynamicServiceStream(ctx context.Context, nodeID, serviceName string) (*quic.Stream, *tunnel.ManagedClient, error) {
+	mc, ok := tm.DynamicClient(nodeID)
+	if !ok {
+		return nil, nil, fmt.Errorf("peer %q not in directory", nodeID)
+	}
+	stream, err := mc.OpenServiceStream(ctx, serviceName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return stream, mc, nil
+}
+
+func (tm *TunnelManager) AddOrUpdatePeerClient(ctx context.Context, nodeID, addr string) error {
+	tm.mu.Lock()
+	if mc, ok := tm.clientsByNode[nodeID]; ok {
+		tm.mu.Unlock()
+		if mc.ServerAddr() == addr {
+			return nil
+		}
+		return mc.UpdateServerAddr(ctx, addr)
+	}
+
+	mc := tm.newManagedClient(addr, nodeID)
+	tm.clients = append(tm.clients, mc)
+	tm.clientsByNode[nodeID] = mc
+	tm.mu.Unlock()
+
+	if err := tm.connectPeerClient(ctx, mc); err != nil {
+		tm.logger.Warn("dynamic peer tunnel pending", "node_id", nodeID, "addr", addr, "error", err)
+		go tm.connectPeerClientUntil(ctx, mc)
+	}
+	return nil
+}
+
+func (tm *TunnelManager) RemovePeerClient(nodeID string) {
+	tm.mu.Lock()
+	mc, ok := tm.clientsByNode[nodeID]
+	if ok {
+		delete(tm.clientsByNode, nodeID)
+		for i, client := range tm.clients {
+			if client == mc {
+				tm.clients = append(tm.clients[:i], tm.clients[i+1:]...)
+				break
+			}
+		}
+	}
+	tm.mu.Unlock()
+	if ok {
+		_ = mc.GracefulShutdown(5 * time.Second)
+	}
+}
+
+func (tm *TunnelManager) DynamicClient(nodeID string) (*tunnel.ManagedClient, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	mc, ok := tm.clientsByNode[nodeID]
+	return mc, ok
+}
+
+func (tm *TunnelManager) DynamicClientState(nodeID string) (tunnel.ConnState, bool) {
+	mc, ok := tm.DynamicClient(nodeID)
+	if !ok {
+		return tunnel.StateDisconnected, false
+	}
+	return mc.State(), true
+}
+
+func isServiceImport(imp agentconfig.ImportConfig) bool {
+	return imp.Service != ""
+}
+
 // Stop gracefully shuts down all tunnels.
 func (tm *TunnelManager) Stop() {
 	tm.mu.Lock()
@@ -251,6 +408,8 @@ func (tm *TunnelManager) Stop() {
 		mc.GracefulShutdown(5 * time.Second)
 	}
 	tm.clients = nil
+	tm.clientsByNode = make(map[string]*tunnel.ManagedClient)
+	tm.clientsByRegion = make(map[string]*tunnel.ManagedClient)
 
 	for _, srv := range tm.servers {
 		srv.Close()

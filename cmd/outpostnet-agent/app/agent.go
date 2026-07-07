@@ -22,6 +22,7 @@ func NewAgentCommand() *cobra.Command {
 	var (
 		configFile     string
 		region         string
+		nodeID         string
 		metricsAddr    string
 		healthAddr     string
 		persistenceDir string
@@ -32,7 +33,7 @@ func NewAgentCommand() *cobra.Command {
 		Short: "OutpostNet cross-region agent",
 		Long:  "OutpostNet Agent manages QUIC tunnels between edge regions, enabling cross-region service access with automatic reconnection and config persistence.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadAgentConfig(configFile, region, metricsAddr, healthAddr, persistenceDir)
+			cfg, err := loadAgentConfig(configFile, region, nodeID, metricsAddr, healthAddr, persistenceDir)
 			if err != nil {
 				return err
 			}
@@ -43,6 +44,7 @@ func NewAgentCommand() *cobra.Command {
 	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to YAML config file")
 	cmd.Flags().StringVar(&region, "region", "", "Optional region name (overrides config file; used for relay routing)")
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Optional node ID (overrides config file; used for peer-directory role arbitration)")
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Metrics endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&healthAddr, "health-addr", "", "Health check endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&persistenceDir, "persistence-dir", "", "Directory for config persistence (overrides config file)")
@@ -61,7 +63,7 @@ func newVersionCommand() *cobra.Command {
 	}
 }
 
-func loadAgentConfig(configFile, region, metricsAddr, healthAddr, persistenceDir string) (*agentconfig.Config, error) {
+func loadAgentConfig(configFile, region, nodeID, metricsAddr, healthAddr, persistenceDir string) (*agentconfig.Config, error) {
 	var cfg *agentconfig.Config
 
 	if configFile != "" {
@@ -74,15 +76,20 @@ func loadAgentConfig(configFile, region, metricsAddr, healthAddr, persistenceDir
 		// Minimal config from flags.
 		cfg = &agentconfig.Config{
 			Region:      region,
+			NodeID:      nodeID,
 			HealthAddr:  ":8082",
 			Metrics:     agentconfig.MetricsConfig{Addr: ":9090"},
 			Persistence: agentconfig.PersistenceConfig{Dir: "/var/lib/outpostnet"},
+			Management:  agentconfig.ManagementConfig{SocketPath: agentconfig.DefaultManagementSocketPath},
 		}
 	}
 
 	// CLI flags override config file values.
 	if region != "" {
 		cfg.Region = region
+	}
+	if nodeID != "" {
+		cfg.NodeID = nodeID
 	}
 	if metricsAddr != "" {
 		cfg.Metrics.Addr = metricsAddr

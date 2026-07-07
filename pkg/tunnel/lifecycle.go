@@ -103,12 +103,22 @@ func (mc *ManagedClient) State() ConnState {
 	return mc.state
 }
 
+// ServerAddr returns the current remote tunnel server address.
+func (mc *ManagedClient) ServerAddr() string {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.cfg.ServerAddr
+}
+
 // Connect establishes the initial connection and starts monitoring.
 // It returns after the first connection is established or the context is cancelled.
 func (mc *ManagedClient) Connect(ctx context.Context) error {
 	mc.setState(StateConnecting)
 
-	conn, err := dialAndAuth(ctx, mc.cfg.ClientConfig)
+	mc.mu.RLock()
+	cfg := mc.cfg.ClientConfig
+	mc.mu.RUnlock()
+	conn, err := dialAndAuth(ctx, cfg)
 	if err != nil {
 		mc.setState(StateDisconnected)
 		return err
@@ -119,7 +129,7 @@ func (mc *ManagedClient) Connect(ctx context.Context) error {
 	mc.mu.Unlock()
 	mc.setState(StateConnected)
 
-	mc.logger.Info("managed client connected", "addr", mc.cfg.ServerAddr)
+	mc.logger.Info("managed client connected", "addr", cfg.ServerAddr)
 
 	// Start monitoring the connection for failures.
 	monitorCtx, cancel := context.WithCancel(ctx)
@@ -127,6 +137,31 @@ func (mc *ManagedClient) Connect(ctx context.Context) error {
 	go mc.monitor(monitorCtx)
 
 	return nil
+}
+
+// ConnectUntilReady retries the initial connection with the managed client's
+// normal exponential backoff until it succeeds or ctx is cancelled.
+func (mc *ManagedClient) ConnectUntilReady(ctx context.Context) {
+	delay := mc.cfg.InitialReconnectDelay
+	for {
+		if err := mc.Connect(ctx); err == nil {
+			return
+		} else {
+			mc.logger.Warn("initial connect failed, retrying", "addr", mc.ServerAddr(), "delay", delay, "error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			mc.setState(StateDisconnected)
+			return
+		case <-time.After(delay):
+		}
+
+		delay = time.Duration(math.Min(
+			float64(delay)*2,
+			float64(mc.cfg.MaxReconnectDelay),
+		))
+	}
 }
 
 // monitor watches for connection failure and triggers reconnection.
@@ -167,9 +202,12 @@ func (mc *ManagedClient) reconnect(ctx context.Context) {
 		}
 
 		attempt++
-		mc.logger.Info("reconnect attempt", "attempt", attempt, "delay", delay)
+		mc.mu.RLock()
+		cfg := mc.cfg.ClientConfig
+		mc.mu.RUnlock()
+		mc.logger.Info("reconnect attempt", "attempt", attempt, "delay", delay, "addr", cfg.ServerAddr)
 
-		conn, err := dialAndAuth(ctx, mc.cfg.ClientConfig)
+		conn, err := dialAndAuth(ctx, cfg)
 		if err != nil {
 			mc.logger.Error("reconnect failed", "attempt", attempt, "error", err)
 			// Exponential backoff.
@@ -187,6 +225,27 @@ func (mc *ManagedClient) reconnect(ctx context.Context) {
 		mc.logger.Info("reconnected", "attempt", attempt)
 		return
 	}
+}
+
+// UpdateServerAddr closes the active connection so the existing managed
+// reconnect loop redials the new address with its normal backoff settings.
+func (mc *ManagedClient) UpdateServerAddr(ctx context.Context, addr string) error {
+	mc.mu.Lock()
+	if mc.cfg.ServerAddr == addr {
+		mc.mu.Unlock()
+		return nil
+	}
+	oldAddr := mc.cfg.ServerAddr
+	mc.cfg.ServerAddr = addr
+	conn := mc.conn
+	mc.conn = nil
+	mc.mu.Unlock()
+
+	mc.logger.Info("managed client remote address changed", "old_addr", oldAddr, "new_addr", addr)
+	if conn != nil {
+		_ = conn.CloseWithError(0, "managed client remote address changed")
+	}
+	return nil
 }
 
 // OpenServiceStream opens a stream on the current connection.

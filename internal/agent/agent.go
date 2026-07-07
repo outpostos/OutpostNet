@@ -23,6 +23,7 @@ type Agent struct {
 	metrics       *Metrics
 	healthServer  *http.Server
 	metricsServer *http.Server
+	mgmtServer    *ManagementServer
 
 	mu     sync.Mutex
 	ready  bool
@@ -76,13 +77,28 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 
-	// Start tunnel manager if tunnels are configured.
-	if len(a.cfg.Tunnels) > 0 {
+	// Start tunnel manager if static tunnels or dynamic imports are configured.
+	if len(a.cfg.Tunnels) > 0 || hasServiceImports(a.cfg.Imports) {
 		a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
 		if err := a.tunnels.Start(ctx); err != nil {
 			return fmt.Errorf("start tunnels: %w", err)
 		}
+		a.tunnels.StartDynamicImports(ctx)
 		defer a.tunnels.Stop()
+	}
+
+	if a.cfg.NodeID != "" {
+		if a.tunnels == nil {
+			a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
+		}
+		directory := NewPeerDirectory(a.cfg.NodeID, a.tunnels, a.logger)
+		a.mgmtServer = NewManagementServer(a.cfg.Management.SocketPath, directory, a.logger)
+		if err := a.mgmtServer.Start(ctx); err != nil {
+			return fmt.Errorf("start management server: %w", err)
+		}
+		defer a.mgmtServer.Stop()
+	} else if hasServiceImports(a.cfg.Imports) {
+		a.logger.Warn("service imports configured without node_id; peer-directory imports will remain pending")
 	}
 
 	// Mark ready after all components are up.
@@ -97,6 +113,15 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	a.logger.Info("agent shutting down")
 	return nil
+}
+
+func hasServiceImports(imports []agentconfig.ImportConfig) bool {
+	for _, imp := range imports {
+		if imp.Service != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop initiates graceful shutdown.
