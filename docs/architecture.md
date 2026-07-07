@@ -65,6 +65,12 @@ imports:
 - Optional token authentication (both ends configure the same `auth.token`)
 - Automatic recovery on network changes (QUIC protocol feature)
 
+### Peer Directory Management API
+
+When configured with `node_id`, `outpostnet-agent` also exposes a local HTTP API over a Unix socket. `PUT /v1/peers` replaces the full peer list using `node_id` and `addr`; `GET /v1/peers` reports tunnel status for assertions. For each node pair, the lexicographically smaller `node_id` dials as the QUIC client and the larger node accepts as the server, which avoids duplicate tunnels without a coordinator.
+
+Imports can use `service: <name>@<node_id>` to bind a stable local `listen_addr` while the backing peer tunnel is resolved and reconnected from the directory.
+
 ---
 
 ## Key Design Decisions

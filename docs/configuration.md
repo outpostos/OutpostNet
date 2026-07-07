@@ -13,6 +13,8 @@ The agent is OutpostNet's core component. One binary, two roles (`server` / `cli
 ### YAML Configuration
 
 ```yaml
+node_id: node-a                  # Required for peer-directory service imports
+
 # QUIC tunnel definitions
 tunnels:
   - role: server               # server (listen) or client (connect)
@@ -30,6 +32,13 @@ imports:
   - name: remote-db            # Remote service name
     listen_addr: 127.0.0.1:5432 # Local listen address
     protocol: tcp               # tcp or udp
+  - service: my-api@node-b      # Peer-directory form: <name>@<node_id>
+    listen_addr: 127.0.0.1:9080
+    protocol: tcp
+
+# Local management API
+management:
+  socket_path: /run/outpostnet/outpostnet.sock
 
 # Authentication (optional, recommended)
 auth:
@@ -78,9 +87,27 @@ tls:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Remote service name to import |
+| `name` | string | Yes, unless `service` is set | Remote service name to import |
+| `service` | string | No | Peer-directory service reference, format `<name>@<node_id>` |
 | `listen_addr` | string | Yes | Local listen address, format `host:port` |
 | `protocol` | string | Yes | `tcp` or `udp` |
+
+`service` is additive to the static `name` form. With `service: <name>@<node_id>`, the agent keeps `listen_addr` stable and resolves the peer tunnel through the local peer directory. Missing peers stay pending and retry without exiting the process.
+
+#### `management`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `socket_path` | string | `/run/outpostnet/outpostnet.sock` | Unix socket for the local HTTP management API |
+
+### Peer Directory API
+
+When `node_id` is set, the agent listens on `management.socket_path` using HTTP over a Unix domain socket.
+
+| Endpoint | Description |
+|----------|-------------|
+| `PUT /v1/peers` | Replace the full peer list. Body: `[{"node_id":"node-b","addr":"127.0.0.1:4242"}]` |
+| `GET /v1/peers` | Return peer entries with tunnel status: `connected`, `reconnecting`, or `pending` |
 
 #### `auth`
 
@@ -110,6 +137,7 @@ tls:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config <path>` | — | YAML config file path |
+| `--node-id <id>` | — | Node ID override for peer-directory role arbitration |
 | `--metrics-addr <addr>` | `:9090` | Metrics address (overrides config) |
 | `--health-addr <addr>` | `:8082` | Health check address (overrides config) |
 | `--persistence-dir <path>` | `/var/lib/outpostnet` | Persistence directory (overrides config) |

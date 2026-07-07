@@ -189,7 +189,7 @@ exports:
 imports:
   - listen_addr: "0.0.0.0:8080"
     protocol: tcp`,
-			want: "imports[0].name is required",
+			want: "imports[0].name or service is required",
 		},
 		{
 			name: "import missing listen_addr",
@@ -211,6 +211,55 @@ imports:
 				t.Errorf("error = %q, want to contain %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseServiceRef(t *testing.T) {
+	service, nodeID, err := ParseServiceRef("api@node-b")
+	if err != nil {
+		t.Fatalf("ParseServiceRef: %v", err)
+	}
+	if service != "api" {
+		t.Errorf("service = %q, want api", service)
+	}
+	if nodeID != "node-b" {
+		t.Errorf("nodeID = %q, want node-b", nodeID)
+	}
+
+	for _, ref := range []string{"api", "@node-b", "api@", "api@node@extra"} {
+		t.Run(ref, func(t *testing.T) {
+			if _, _, err := ParseServiceRef(ref); err == nil {
+				t.Fatal("expected parse error")
+			}
+		})
+	}
+}
+
+func TestServiceImportConfig(t *testing.T) {
+	yaml := `
+node_id: node-a
+imports:
+  - service: api@node-b
+    listen_addr: 127.0.0.1:9080
+    protocol: tcp
+management:
+  socket_path: /tmp/outpostnet-test.sock
+`
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.NodeID != "node-a" {
+		t.Errorf("node_id = %q, want node-a", cfg.NodeID)
+	}
+	if cfg.Management.SocketPath != "/tmp/outpostnet-test.sock" {
+		t.Errorf("management socket = %q", cfg.Management.SocketPath)
+	}
+	if cfg.Imports[0].Name != "api" {
+		t.Errorf("derived import name = %q, want api", cfg.Imports[0].Name)
+	}
+	if cfg.Imports[0].RemoteRegion != "node-b" {
+		t.Errorf("derived remote region = %q, want node-b", cfg.Imports[0].RemoteRegion)
 	}
 }
 

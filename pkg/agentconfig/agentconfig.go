@@ -14,6 +14,9 @@ type Config struct {
 	// Region optionally identifies this agent (used for relay routing).
 	Region string `yaml:"region,omitempty"`
 
+	// NodeID identifies this agent for peer-directory role arbitration.
+	NodeID string `yaml:"node_id,omitempty"`
+
 	// Tunnels defines QUIC tunnel connections to other regions.
 	Tunnels []TunnelConfig `yaml:"tunnels"`
 
@@ -42,6 +45,9 @@ type Config struct {
 
 	// Auth configures authentication for tunnel connections.
 	Auth AuthConfig `yaml:"auth"`
+
+	// Management configures the local agent management API.
+	Management ManagementConfig `yaml:"management"`
 }
 
 // TunnelConfig describes a QUIC tunnel to another region.
@@ -75,6 +81,10 @@ type ExportConfig struct {
 type ImportConfig struct {
 	// Name is the service name to import.
 	Name string `yaml:"name"`
+
+	// Service imports a remote service by peer-directory name in the form
+	// "<service>@<node_id>". It is additive with the legacy Name field.
+	Service string `yaml:"service,omitempty"`
 
 	// ListenAddr is the local address to listen on for incoming connections.
 	ListenAddr string `yaml:"listen_addr"`
@@ -152,6 +162,14 @@ type AuthConfig struct {
 	Token string `yaml:"token"`
 }
 
+// ManagementConfig configures the agent's local management API.
+type ManagementConfig struct {
+	// SocketPath is the Unix domain socket path for HTTP management requests.
+	SocketPath string `yaml:"socket_path"`
+}
+
+const DefaultManagementSocketPath = "/run/outpostnet/outpostnet.sock"
+
 // LoadConfig loads an Agent config from a YAML file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -183,6 +201,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Persistence.Dir == "" {
 		cfg.Persistence.Dir = "/var/lib/outpostnet"
+	}
+	if cfg.Management.SocketPath == "" {
+		cfg.Management.SocketPath = DefaultManagementSocketPath
 	}
 	for i := range cfg.Relays {
 		if cfg.Relays[i].MaxHops == 0 {
@@ -221,8 +242,20 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	for i, imp := range cfg.Imports {
-		if imp.Name == "" {
-			return fmt.Errorf("imports[%d].name is required", i)
+		if imp.Name == "" && imp.Service == "" {
+			return fmt.Errorf("imports[%d].name or service is required", i)
+		}
+		if imp.Service != "" {
+			service, nodeID, err := ParseServiceRef(imp.Service)
+			if err != nil {
+				return fmt.Errorf("imports[%d].service: %w", i, err)
+			}
+			if imp.Name == "" {
+				cfg.Imports[i].Name = service
+			}
+			if imp.RemoteRegion == "" {
+				cfg.Imports[i].RemoteRegion = nodeID
+			}
 		}
 		if imp.ListenAddr == "" {
 			return fmt.Errorf("imports[%d].listen_addr is required", i)
@@ -262,6 +295,15 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// ParseServiceRef parses "<service>@<node_id>" import references.
+func ParseServiceRef(ref string) (serviceName, nodeID string, err error) {
+	parts := strings.Split(ref, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("must be in the form <service>@<node_id>")
+	}
+	return parts[0], parts[1], nil
 }
 
 func validateProtocol(p string) error {

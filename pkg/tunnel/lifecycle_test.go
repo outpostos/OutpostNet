@@ -303,6 +303,22 @@ func TestManagedClientDefaults(t *testing.T) {
 	}
 }
 
+func TestManagedClientUpdateServerAddr(t *testing.T) {
+	mc := NewManagedClient(ManagedClientConfig{
+		ClientConfig: ClientConfig{
+			ServerAddr: "127.0.0.1:4242",
+			TLS:        tlsutil.ClientTLSConfig(true),
+		},
+	}, nil)
+
+	if err := mc.UpdateServerAddr(context.Background(), "127.0.0.1:5252"); err != nil {
+		t.Fatalf("UpdateServerAddr: %v", err)
+	}
+	if got := mc.ServerAddr(); got != "127.0.0.1:5252" {
+		t.Fatalf("ServerAddr = %q, want 127.0.0.1:5252", got)
+	}
+}
+
 func TestManagedClientOpenRelayStream(t *testing.T) {
 	srv, srvAddr := newTestServer(t)
 
