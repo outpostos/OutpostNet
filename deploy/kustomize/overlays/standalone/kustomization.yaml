@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Standalone overlay: agent-only deployment without controller/webhook.
+# Use this when you want to run outpostnet-agent as a DaemonSet or Deployment
+# on edge nodes without the full K8s controller.
+
+namespace: outpostnet-system
+
+resources:
+  - ../../base
+  - agent-daemonset.yaml
+
+# Remove K8s controller components for agent-only deployments
+patches:
+  - target:
+      kind: Deployment
+      name: outpostnet-controller
+    patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: outpostnet-controller
+  - target:
+      kind: MutatingWebhookConfiguration
+      name: outpostnet-webhook
+    patch: |
+      $patch: delete
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: MutatingWebhookConfiguration
+      metadata:
+        name: outpostnet-webhook

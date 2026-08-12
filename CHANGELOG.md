@@ -2,6 +2,43 @@
 
 All notable changes to OutpostNet will be documented in this file.
 
+## [2.0.0] - 2026-08-12
+
+Second major release. OutpostNet 2.0 adds full Kubernetes-native integration: a controller, mutating webhook, sidecar auto-injection, and cross-region peer discovery — while keeping the standalone agent from v1.x fully supported.
+
+### What's New
+
+#### Kubernetes-Native Architecture
+- **Controller** (`outpostnet-controller`) — Kubernetes controller-runtime operator that watches Pod annotations and manages tunnel configuration automatically
+- **Mutating Webhook** — Auto-injects OutpostNet sidecar containers into annotated Pods at admission time
+- **Sidecar** (`outpostnet-sidecar`) — Per-Pod sidecar that registers services with the local server and manages imports/exports
+- **Server** (`outpostnet-server`) — Local Unix-socket routing hub for multi-sidecar scenarios on a single node
+
+#### Annotation-Driven Service Exposure
+- Declare exports and imports with Pod annotations: `outpostnet.io/exports`, `outpostnet.io/imports`
+- Controller generates ConfigMaps and reconciles tunnel state automatically
+- EndpointSlice management for headless Service discovery
+
+#### Peer Directory (G3.1/G3.2)
+- `node_id`-based peer addressing — agents discover and maintain direct QUIC tunnels to named peers
+- Service imports using `service: <name>@<node_id>` syntax — stable local listen address with dynamic peer resolution
+- Management API over Unix socket (`PUT /v1/peers`, `GET /v1/peers`) for peer list updates
+- Lexicographic role arbitration — smaller node_id dials as client, eliminating duplicate tunnels without a coordinator
+
+#### Relay Support (Epic 5)
+- Three-region relay forwarding for networks where direct QUIC connections are not possible
+- Controller computes relay paths; Agent performs transparent relay forwarding
+- Relay hop limit and metrics for observability
+
+### Compatibility
+
+OutpostNet v1.x standalone agent configurations (YAML with `tunnels`, `exports`, `imports`) are fully supported in v2.0.
+
+### Platforms
+
+- linux/amd64, linux/arm64
+- darwin/amd64, darwin/arm64
+
 ## [1.0.1] - 2026-03-29
 
 ### Documentation
