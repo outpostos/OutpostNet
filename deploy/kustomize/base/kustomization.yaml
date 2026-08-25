@@ -4,12 +4,12 @@ kind: Kustomization
 namespace: outpostnet-system
 
 resources:
-  - ../../namespace.yaml
-  - ../../controller-rbac.yaml
-  - ../../controller-deployment.yaml
-  - ../../webhook-configuration.yaml
-  - ../../server-configmap.yaml
-  - ../../server-daemonset.yaml
+  - namespace.yaml
+  - controller-rbac.yaml
+  - controller-deployment.yaml
+  - webhook-configuration.yaml
+  - server-configmap.yaml
+  - server-daemonset.yaml
 
 images:
   - name: outpostnet-controller
@@ -17,6 +17,4 @@ images:
   - name: outpostnet-server
     newTag: v2.0.0
   - name: outpostnet-sidecar
-    newTag: v2.0.0
-  - name: outpostnet-agent
     newTag: v2.0.0

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outpostnet-controller
+  namespace: outpostnet-system
+  labels:
+    app.kubernetes.io/name: outpostnet-controller
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: outpostnet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outpostnet-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outpostnet-controller
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/part-of: outpostnet
+    spec:
+      serviceAccountName: outpostnet-controller
+      containers:
+        - name: controller
+          image: outpostnet-controller:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --metrics-addr=:8080
+            - --health-probe-addr=:8081
+            - --sidecar-image=outpostnet-sidecar:latest
+            - --webhook-port=9443
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: outpostnet-webhook-tls
+            optional: true

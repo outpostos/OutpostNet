@@ -11,6 +11,10 @@ resources:
   - ../../base
   - agent-daemonset.yaml
 
+images:
+  - name: outpostnet-agent
+    newTag: v2.0.0
+
 # Remove K8s controller components for agent-only deployments
 patches:
   - target:
@@ -24,10 +28,19 @@ patches:
         name: outpostnet-controller
   - target:
       kind: MutatingWebhookConfiguration
-      name: outpostnet-webhook
+      name: outpostnet-sidecar-injector
     patch: |
       $patch: delete
       apiVersion: admissionregistration.k8s.io/v1
       kind: MutatingWebhookConfiguration
+      metadata:
+        name: outpostnet-sidecar-injector
+  - target:
+      kind: Service
+      name: outpostnet-webhook
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Service
       metadata:
         name: outpostnet-webhook

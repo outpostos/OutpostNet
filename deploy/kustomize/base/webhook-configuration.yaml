@@ -1,0 +1,57 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: outpostnet-sidecar-injector
+  labels:
+    app.kubernetes.io/name: outpostnet-controller
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/part-of: outpostnet
+webhooks:
+  - name: sidecar-injector.outpostnet.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: IfNeeded
+    clientConfig:
+      service:
+        name: outpostnet-webhook
+        namespace: outpostnet-system
+        path: /mutate-pods
+        port: 443
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        # Skip system namespaces.
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - outpostnet-system
+    objectSelector:
+      matchExpressions:
+        # Only intercept pods with the inject annotation.
+        - key: outpostnet.io/injected
+          operator: DoesNotExist
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: outpostnet-webhook
+  namespace: outpostnet-system
+  labels:
+    app.kubernetes.io/name: outpostnet-controller
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/part-of: outpostnet
+spec:
+  ports:
+    - port: 443
+      targetPort: 9443
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: outpostnet-controller

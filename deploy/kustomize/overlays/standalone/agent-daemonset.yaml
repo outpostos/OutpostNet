@@ -23,7 +23,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: agent
-          image: outpostnet-agent:v2.0.0
+          image: outpostnet-agent:latest
           args:
             - --config=/etc/outpostnet/agent.yaml
           volumeMounts:
