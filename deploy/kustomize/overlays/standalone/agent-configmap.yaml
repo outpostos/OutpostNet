@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: outpostnet-agent-config
+  namespace: outpostnet-system
+  labels:
+    app.kubernetes.io/name: outpostnet-agent
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: outpostnet
+data:
+  agent.yaml: |
+    # Standalone agent configuration — customize for your deployment.
+    # See https://github.com/outpostos/OutpostNet for full config reference.
+    persistence:
+      dir: /var/lib/outpostnet
+    metrics:
+      addr: ":9090"
+    health_addr: ":8082"
+    # tunnels, exports, imports — add as needed for your topology.
+    # Example:
+    # tunnels:
+    #   - remote_addr: "peer-agent.example.com:4242"
+    #     role: client
+    # exports:
+    #   - name: my-service
+    #     local_addr: "127.0.0.1:8080"
+    #     protocol: tcp

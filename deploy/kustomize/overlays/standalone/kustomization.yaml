@@ -10,6 +10,7 @@ namespace: outpostnet-system
 resources:
   - ../../base
   - agent-daemonset.yaml
+  - agent-configmap.yaml
 
 images:
   - name: outpostnet-agent
