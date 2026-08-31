@@ -69,5 +69,5 @@ spec:
             type: DirectoryOrCreate
         - name: socket
           hostPath:
-            path: /run/outpostnet
+            path: /var/run/outpostnet
             type: DirectoryOrCreate
