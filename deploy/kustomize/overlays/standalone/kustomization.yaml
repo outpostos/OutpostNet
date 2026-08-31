@@ -45,3 +45,30 @@ patches:
       kind: Service
       metadata:
         name: outpostnet-webhook
+  - target:
+      kind: ServiceAccount
+      name: outpostnet-controller
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: outpostnet-controller
+  - target:
+      kind: ClusterRole
+      name: outpostnet-controller
+    patch: |
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: outpostnet-controller
+  - target:
+      kind: ClusterRoleBinding
+      name: outpostnet-controller
+    patch: |
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: outpostnet-controller
