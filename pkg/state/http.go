@@ -1,0 +1,300 @@
+package state
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const (
+	// PushPath is the HTTP path for push replication.
+	PushPath = "/state/v1/push"
+	// PullPath is the HTTP path for pull replication.
+	PullPath = "/state/v1/pull"
+)
+
+const defaultMaxRequestBytes int64 = 1 << 20
+
+// HTTPSyncerConfig configures HTTP peer calls.
+type HTTPSyncerConfig struct {
+	Client    *http.Client
+	NodeID    string
+	AuthToken string
+}
+
+// HTTPSyncer implements Syncer over JSON/HTTP.
+type HTTPSyncer struct {
+	client    *http.Client
+	nodeID    string
+	authToken string
+}
+
+// NewHTTPSyncer creates an authenticated HTTP syncer.
+func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
+	if cfg.NodeID == "" {
+		return nil, fmt.Errorf("http syncer node id is required")
+	}
+	if cfg.AuthToken == "" {
+		return nil, fmt.Errorf("http syncer auth token is required")
+	}
+	client := cfg.Client
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &HTTPSyncer{client: client, nodeID: cfg.NodeID, authToken: cfg.AuthToken}, nil
+}
+
+// Push sends entries to a remote peer.
+func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
+	req.ProtocolVersion = StateProtocolVersion
+	if req.SourceNodeID == "" {
+		req.SourceNodeID = s.nodeID
+	}
+	var resp PushResponse
+	if err := s.doJSON(ctx, http.MethodPost, addr, PushPath, req, &resp); err != nil {
+		return nil, err
+	}
+	if err := validateProtocolResponse(addr, "push", resp.ProtocolVersion); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// Pull retrieves entries from a remote peer.
+func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
+	req.ProtocolVersion = StateProtocolVersion
+	if req.SourceNodeID == "" {
+		req.SourceNodeID = s.nodeID
+	}
+	var resp PullResponse
+	if err := s.doJSON(ctx, http.MethodPost, addr, PullPath, req, &resp); err != nil {
+		return nil, err
+	}
+	if err := validateProtocolResponse(addr, "pull", resp.ProtocolVersion); err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
+}
+
+func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqBody, respBody any) error {
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal %s %s request: %w", method, path, err)
+	}
+	url := buildPeerURL(addr, path)
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("build %s %s request: %w", method, url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.authToken)
+	req.Header.Set("X-Outpost-Node-ID", s.nodeID)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read %s %s response: %w", method, url, err)
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("%s %s: status %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if respBody == nil {
+		return nil
+	}
+	if err := json.Unmarshal(body, respBody); err != nil {
+		return fmt.Errorf("decode %s %s response: %w", method, url, err)
+	}
+	return nil
+}
+
+func buildPeerURL(addr, path string) string {
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/") + path
+	}
+	return "http://" + strings.TrimRight(addr, "/") + path
+}
+
+// HTTPHandlerConfig configures HTTP replication endpoints.
+type HTTPHandlerConfig struct {
+	NodeID          string
+	Engine          *GossipEngine
+	AuthToken       string
+	MaxRequestBytes int64
+}
+
+// NewHTTPHandler exposes authenticated state replication endpoints.
+func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
+	if cfg.NodeID == "" {
+		return nil, fmt.Errorf("http state handler node id is required")
+	}
+	if cfg.Engine == nil {
+		return nil, fmt.Errorf("http state handler engine is required")
+	}
+	if cfg.AuthToken == "" {
+		return nil, fmt.Errorf("http state handler auth token is required")
+	}
+	limit := cfg.MaxRequestBytes
+	if limit == 0 {
+		limit = defaultMaxRequestBytes
+	}
+	if limit < 0 {
+		return nil, fmt.Errorf("http state handler max request bytes must be >= 0")
+	}
+	h := &httpHandler{
+		nodeID:          cfg.NodeID,
+		engine:          cfg.Engine,
+		authToken:       cfg.AuthToken,
+		maxRequestBytes: limit,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(PushPath, h.handlePush)
+	mux.HandleFunc(PullPath, h.handlePull)
+	return mux, nil
+}
+
+type httpHandler struct {
+	nodeID          string
+	engine          *GossipEngine
+	authToken       string
+	maxRequestBytes int64
+}
+
+func (h *httpHandler) handlePush(w http.ResponseWriter, r *http.Request) {
+	if !h.preflight(w, r, http.MethodPost) {
+		return
+	}
+	var req PushRequest
+	if err := decodeJSONBody(w, r, h.maxRequestBytes, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	if !protocolMatches(req.ProtocolVersion) {
+		writeJSONError(w, http.StatusUpgradeRequired, fmt.Sprintf("state protocol version mismatch: got %s want major %d", req.ProtocolVersion, StateProtocolVersion.Major))
+		return
+	}
+	if !h.identityMatches(w, r, req.SourceNodeID) {
+		return
+	}
+	for _, entry := range req.Entries {
+		if err := h.engine.policy.ValidateApply(entry); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	resp, err := h.engine.HandlePush(r.Context(), req)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp.ProtocolVersion = StateProtocolVersion
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
+	if !h.preflight(w, r, http.MethodPost) {
+		return
+	}
+	var req PullRequest
+	if err := decodeJSONBody(w, r, h.maxRequestBytes, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	if !protocolMatches(req.ProtocolVersion) {
+		writeJSONError(w, http.StatusUpgradeRequired, fmt.Sprintf("state protocol version mismatch: got %s want major %d", req.ProtocolVersion, StateProtocolVersion.Major))
+		return
+	}
+	if !h.identityMatches(w, r, req.SourceNodeID) {
+		return
+	}
+	entries, err := h.engine.HandlePull(r.Context(), req)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, PullResponse{ProtocolVersion: StateProtocolVersion, Entries: entries})
+}
+
+func (h *httpHandler) preflight(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Sprintf("method %s not allowed", r.Method))
+		return false
+	}
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") ||
+		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != h.authToken {
+		writeJSONError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+		return false
+	}
+	return true
+}
+
+func (h *httpHandler) identityMatches(w http.ResponseWriter, r *http.Request, source string) bool {
+	header := r.Header.Get("X-Outpost-Node-ID")
+	if source == "" || header == "" {
+		writeJSONError(w, http.StatusBadRequest, "source node identity is required")
+		return false
+	}
+	if source != header {
+		writeJSONError(w, http.StatusForbidden, "source node identity does not match request header")
+		return false
+	}
+	if source == h.nodeID {
+		writeJSONError(w, http.StatusForbidden, "self-replication request rejected")
+		return false
+	}
+	return true
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, limit int64, out any) error {
+	defer r.Body.Close()
+	reader := http.MaxBytesReader(w, r.Body, limit)
+	dec := json.NewDecoder(reader)
+	if err := dec.Decode(out); err != nil {
+		return fmt.Errorf("decode request: %w", err)
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("decode request: multiple JSON values")
+	}
+	return nil
+}
+
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
+	writeJSONError(w, http.StatusBadRequest, err.Error())
+}
+
+func protocolMatches(version ProtocolVersion) bool {
+	return version.CompatibleWith(StateProtocolVersion)
+}
+
+func validateProtocolResponse(peer, operation string, version ProtocolVersion) error {
+	if protocolMatches(version) {
+		return nil
+	}
+	return fmt.Errorf("state protocol version mismatch in %s response from %s: got %s want major %d",
+		operation, peer, version, StateProtocolVersion.Major)
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
