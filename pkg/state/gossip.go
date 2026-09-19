@@ -14,7 +14,7 @@ const rejectionReasonClockOffset = "clock_offset"
 // GossipConfig configures incremental push and digest pull exchange.
 type GossipConfig struct {
 	NodeID              string
-	Store               *MemoryStore
+	Store               Store
 	Syncer              Syncer
 	PeerProvider        PeerProvider
 	Policy              MergePolicy
@@ -27,7 +27,7 @@ type GossipConfig struct {
 // GossipEngine exchanges state with peers through a Syncer.
 type GossipEngine struct {
 	nodeID              string
-	store               *MemoryStore
+	store               Store
 	syncer              Syncer
 	peerProvider        PeerProvider
 	policy              MergePolicy
@@ -126,7 +126,11 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 			slog.Debug("state gossip: peer in backoff", "peer", addr, "until", until)
 			continue
 		}
-		since := g.peerLastPushPosition(addr)
+		since, err := g.peerLastPushPosition(ctx, addr)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		changes, err := g.store.ChangesSince(ctx, since, 0)
 		if err != nil {
 			return err
@@ -145,7 +149,12 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 			errs = append(errs, err)
 			continue
 		}
-		g.recordPushSuccess(addr, g.pushSuccessPosition(addr, since, changes, resp))
+		pushed := g.pushSuccessPosition(addr, since, changes, resp)
+		if err := g.recordPushSuccess(ctx, addr, pushed); err != nil {
+			g.recordPeerFailure(addr, "push-progress", err, now)
+			errs = append(errs, err)
+			continue
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -203,8 +212,9 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 			rejected++
 			if rejection, ok := rejectionFromApplyError(entry, err); ok {
 				rejections = append(rejections, rejection)
+				continue
 			}
-			continue
+			return nil, fmt.Errorf("apply pushed entry from %q key %q: %w", req.SourceNodeID, entry.Key, err)
 		}
 		if applied {
 			accepted++
@@ -273,13 +283,25 @@ func (g *GossipEngine) allowAttempt(addr string, now time.Time) (bool, time.Time
 	return true, time.Time{}
 }
 
-func (g *GossipEngine) peerLastPushPosition(addr string) uint64 {
+func (g *GossipEngine) peerLastPushPosition(ctx context.Context, addr string) (uint64, error) {
+	if progress, ok := g.store.(PeerProgressStore); ok {
+		position, err := progress.PeerProgress(ctx, addr)
+		if err != nil {
+			return 0, err
+		}
+		return position, nil
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.peerStateLocked(addr).lastPushPosition
+	return g.peerStateLocked(addr).lastPushPosition, nil
 }
 
-func (g *GossipEngine) recordPushSuccess(addr string, pushed uint64) {
+func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushed uint64) error {
+	if progress, ok := g.store.(PeerProgressStore); ok {
+		if err := progress.SavePeerProgress(ctx, addr, pushed); err != nil {
+			return err
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
@@ -288,6 +310,7 @@ func (g *GossipEngine) recordPushSuccess(addr string, pushed uint64) {
 	}
 	state.failures = 0
 	state.nextAttempt = time.Time{}
+	return nil
 }
 
 func (g *GossipEngine) recordPeerSuccess(addr string) {
