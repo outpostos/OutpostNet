@@ -19,20 +19,27 @@ const (
 	PullPath = "/state/v1/pull"
 )
 
-const defaultMaxRequestBytes int64 = 1 << 20
+const (
+	defaultMaxRequestBytes  int64 = 1 << 20
+	defaultMaxResponseBytes int64 = 1 << 20
+)
 
 // HTTPSyncerConfig configures HTTP peer calls.
 type HTTPSyncerConfig struct {
-	Client    *http.Client
-	NodeID    string
-	AuthToken string
+	Client           *http.Client
+	NodeID           string
+	AuthToken        string
+	PolicyID         string
+	MaxResponseBytes int64
 }
 
 // HTTPSyncer implements Syncer over JSON/HTTP.
 type HTTPSyncer struct {
-	client    *http.Client
-	nodeID    string
-	authToken string
+	client           *http.Client
+	nodeID           string
+	authToken        string
+	policyID         string
+	maxResponseBytes int64
 }
 
 // NewHTTPSyncer creates an authenticated HTTP syncer.
@@ -43,16 +50,36 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	if cfg.AuthToken == "" {
 		return nil, fmt.Errorf("http syncer auth token is required")
 	}
+	maxResponseBytes := cfg.MaxResponseBytes
+	if maxResponseBytes == 0 {
+		maxResponseBytes = defaultMaxResponseBytes
+	}
+	if maxResponseBytes < 0 {
+		return nil, fmt.Errorf("http syncer max response bytes must be >= 0")
+	}
+	policyID := cfg.PolicyID
+	if policyID == "" {
+		policyID = NewHLCLWWPolicy().ID()
+	}
 	client := cfg.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &HTTPSyncer{client: client, nodeID: cfg.NodeID, authToken: cfg.AuthToken}, nil
+	return &HTTPSyncer{
+		client:           client,
+		nodeID:           cfg.NodeID,
+		authToken:        cfg.AuthToken,
+		policyID:         policyID,
+		maxResponseBytes: maxResponseBytes,
+	}, nil
 }
 
 // Push sends entries to a remote peer.
 func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.PolicyID == "" {
+		req.PolicyID = s.policyID
+	}
 	if req.SourceNodeID == "" {
 		req.SourceNodeID = s.nodeID
 	}
@@ -63,12 +90,18 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 	if err := validateProtocolResponse(addr, "push", resp.ProtocolVersion); err != nil {
 		return nil, err
 	}
+	if err := validatePolicyResponse(addr, "push", req.PolicyID, resp.PolicyID); err != nil {
+		return nil, err
+	}
 	return &resp, nil
 }
 
 // Pull retrieves entries from a remote peer.
 func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.PolicyID == "" {
+		req.PolicyID = s.policyID
+	}
 	if req.SourceNodeID == "" {
 		req.SourceNodeID = s.nodeID
 	}
@@ -77,6 +110,9 @@ func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]
 		return nil, err
 	}
 	if err := validateProtocolResponse(addr, "pull", resp.ProtocolVersion); err != nil {
+		return nil, err
+	}
+	if err := validatePolicyResponse(addr, "pull", req.PolicyID, resp.PolicyID); err != nil {
 		return nil, err
 	}
 	return resp.Entries, nil
@@ -102,7 +138,7 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 		return fmt.Errorf("%s %s: %w", method, url, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedResponseBody(resp, s.maxResponseBytes)
 	if err != nil {
 		return fmt.Errorf("read %s %s response: %w", method, url, err)
 	}
@@ -186,6 +222,9 @@ func (h *httpHandler) handlePush(w http.ResponseWriter, r *http.Request) {
 	if !h.identityMatches(w, r, req.SourceNodeID) {
 		return
 	}
+	if !h.policyMatches(w, req.PolicyID) {
+		return
+	}
 	for _, entry := range req.Entries {
 		if err := h.engine.policy.ValidateApply(entry); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -198,6 +237,7 @@ func (h *httpHandler) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.ProtocolVersion = StateProtocolVersion
+	resp.PolicyID = h.engine.policy.ID()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -217,12 +257,15 @@ func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
 	if !h.identityMatches(w, r, req.SourceNodeID) {
 		return
 	}
+	if !h.policyMatches(w, req.PolicyID) {
+		return
+	}
 	entries, err := h.engine.HandlePull(r.Context(), req)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, PullResponse{ProtocolVersion: StateProtocolVersion, Entries: entries})
+	writeJSON(w, http.StatusOK, PullResponse{ProtocolVersion: StateProtocolVersion, PolicyID: h.engine.policy.ID(), Entries: entries})
 }
 
 func (h *httpHandler) preflight(w http.ResponseWriter, r *http.Request, method string) bool {
@@ -250,6 +293,18 @@ func (h *httpHandler) identityMatches(w http.ResponseWriter, r *http.Request, so
 	}
 	if source == h.nodeID {
 		writeJSONError(w, http.StatusForbidden, "self-replication request rejected")
+		return false
+	}
+	return true
+}
+
+func (h *httpHandler) policyMatches(w http.ResponseWriter, policyID string) bool {
+	if err := validatePolicyID(h.engine.policy, policyID); err != nil {
+		if errors.Is(err, errPolicyIDRequired) {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return false
+		}
+		writeJSONError(w, http.StatusConflict, err.Error())
 		return false
 	}
 	return true
@@ -287,6 +342,31 @@ func validateProtocolResponse(peer, operation string, version ProtocolVersion) e
 	}
 	return fmt.Errorf("state protocol version mismatch in %s response from %s: got %s want major %d",
 		operation, peer, version, StateProtocolVersion.Major)
+}
+
+func validatePolicyResponse(peer, operation, wantPolicyID, gotPolicyID string) error {
+	if strings.TrimSpace(gotPolicyID) == "" {
+		return fmt.Errorf("state policy id missing in %s response from %s", operation, peer)
+	}
+	if gotPolicyID != wantPolicyID {
+		return fmt.Errorf("state policy id mismatch in %s response from %s: got %q want %q",
+			operation, peer, gotPolicyID, wantPolicyID)
+	}
+	return nil
+}
+
+func readLimitedResponseBody(resp *http.Response, limit int64) ([]byte, error) {
+	if resp.ContentLength > limit {
+		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

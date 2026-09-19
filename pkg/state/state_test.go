@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,6 +82,54 @@ func TestStoreSubmitsReadsObservesAndComparesAtomically(t *testing.T) {
 	if event := <-observed; !event.Deleted {
 		t.Fatalf("observer did not see delete tombstone: %+v", event)
 	}
+}
+
+func TestStoreReturnedValuesCannotMutateCommittedState(t *testing.T) {
+	ctx := context.Background()
+	store := mustStore(t, "node-a", NewHLCLWWPolicy(), &fixedPhysicalClock{now: 1_000})
+
+	observed := make(chan Entry, 4)
+	stop := store.Observe(func(entry Entry) {
+		observed <- entry
+	})
+	defer stop()
+
+	created, err := store.Put(ctx, "opaque/entity-1", []byte("v1"))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	created.Value[0] = 'X'
+	assertStoredValue(t, store, "opaque/entity-1", "v1")
+	if event := <-observed; string(event.Value) != "v1" {
+		t.Fatalf("observer received aliased Put value: %q", event.Value)
+	}
+	event := mustGet(t, store, "opaque/entity-1")
+	event.Value[0] = 'Y'
+	assertStoredValue(t, store, "opaque/entity-1", "v1")
+
+	updated, swapped, err := store.CompareAndSet(ctx, "opaque/entity-1", mustGet(t, store, "opaque/entity-1").Identity(), Mutation{Value: []byte("v2")})
+	if err != nil {
+		t.Fatalf("CompareAndSet success: %v", err)
+	}
+	if !swapped {
+		t.Fatal("expected CompareAndSet success")
+	}
+	updated.Value[0] = 'Z'
+	assertStoredValue(t, store, "opaque/entity-1", "v2")
+	if event := <-observed; string(event.Value) != "v2" {
+		t.Fatalf("observer received aliased CAS value: %q", event.Value)
+	}
+
+	staleExpected := EntryIdentity{Key: "opaque/entity-1"}
+	current, swapped, err := store.CompareAndSet(ctx, "opaque/entity-1", staleExpected, Mutation{Value: []byte("stale")})
+	if err != nil {
+		t.Fatalf("CompareAndSet stale: %v", err)
+	}
+	if swapped {
+		t.Fatal("stale CompareAndSet unexpectedly succeeded")
+	}
+	current.Value[0] = 'Q'
+	assertStoredValue(t, store, "opaque/entity-1", "v2")
 }
 
 func TestTwoHTTPNodesReplicatePartitionRecoverAndRejectDuplicateOutOfOrderResurrection(t *testing.T) {
@@ -167,6 +218,63 @@ func TestTwoHTTPNodesReplicatePartitionRecoverAndRejectDuplicateOutOfOrderResurr
 	entry := mustGet(t, b.store, "opaque/target")
 	if !entry.Deleted || entry.ChangeID != deleted.ChangeID {
 		t.Fatalf("old duplicate live entry resurrected deleted state: %+v", entry)
+	}
+}
+
+func TestHTTPNodesRecoverAfterTransportFailureWithoutSkippingUnconfirmedChanges(t *testing.T) {
+	ctx := context.Background()
+	token := "test-replication-token"
+
+	clockA := &fixedPhysicalClock{now: 1_000}
+	clockB := &fixedPhysicalClock{now: 1_000}
+	a := newHTTPTestNode(t, "node-a", token, clockA)
+	b := newBreakableHTTPTestNode(t, "node-b", token, clockB)
+	defer a.server.Close()
+	defer b.server.Close()
+	a.peers.Store([]string{b.server.URL})
+	b.peers.Store([]string{a.server.URL})
+
+	live, err := a.store.Put(ctx, "opaque/target", []byte("live-from-a"))
+	if err != nil {
+		t.Fatalf("node-a Put live: %v", err)
+	}
+	if err := a.engine.SyncOnce(ctx); err != nil {
+		t.Fatalf("initial SyncOnce: %v", err)
+	}
+	assertStoredValue(t, b.store, "opaque/target", "live-from-a")
+
+	b.breaker.Store(true)
+	clockA.now = 2_000
+	if _, err := a.store.Put(ctx, "opaque/target", []byte("unconfirmed-update")); err != nil {
+		t.Fatalf("node-a Put unconfirmed: %v", err)
+	}
+	clockA.now = 3_000
+	deleted, err := a.store.Delete(ctx, "opaque/target")
+	if err != nil {
+		t.Fatalf("node-a Delete: %v", err)
+	}
+	if err := a.engine.SyncOnce(ctx); err == nil {
+		t.Fatal("expected transport failure during SyncOnce")
+	}
+	if got := peerLastPushForTest(a.engine, b.server.URL); got != live.Position {
+		t.Fatalf("failed push advanced peer cursor: got %d want %d", got, live.Position)
+	}
+	entry := mustGet(t, b.store, "opaque/target")
+	if entry.Deleted || string(entry.Value) != "live-from-a" {
+		t.Fatalf("transport failure changed peer state: %+v", entry)
+	}
+
+	b.breaker.Store(false)
+	clearPeerBackoffForTest(a.engine, b.server.URL)
+	if err := a.engine.SyncOnce(ctx); err != nil {
+		t.Fatalf("recovery SyncOnce: %v", err)
+	}
+	entry = mustGet(t, b.store, "opaque/target")
+	if !entry.Deleted {
+		t.Fatalf("recovered peer did not receive tombstone: %+v", entry)
+	}
+	if entry.ChangeID != deleted.ChangeID || entry.Version != deleted.Version {
+		t.Fatalf("recovered peer did not converge on delete version: got %+v want %+v", entry, deleted)
 	}
 }
 
@@ -262,6 +370,94 @@ func TestHTTPAdapterRequiresAuthIdentityProtocolAndSizeLimit(t *testing.T) {
 	}
 }
 
+func TestHTTPSyncerRejectsOversizeSuccessAndErrorResponses(t *testing.T) {
+	ctx := context.Background()
+	oversizeJSON := `{"protocol_version":{"major":1,"minor":0},"policy_id":"outpostnet.state.hlc-lww/v1","accepted":0,"rejected":0,"padding":"` + strings.Repeat("x", 128) + `"}`
+	oversizeError := strings.Repeat("e", 128)
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		length int64
+	}{
+		{name: "success missing content length", status: http.StatusOK, body: oversizeJSON, length: -1},
+		{name: "success declared oversize", status: http.StatusOK, body: oversizeJSON, length: int64(len(oversizeJSON))},
+		{name: "error missing content length", status: http.StatusInternalServerError, body: oversizeError, length: -1},
+		{name: "error declared oversize", status: http.StatusInternalServerError, body: oversizeError, length: int64(len(oversizeError))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.length >= 0 {
+					w.Header().Set("Content-Length", fmt.Sprint(tt.length))
+				}
+				w.WriteHeader(tt.status)
+				if tt.length < 0 {
+					w.(http.Flusher).Flush()
+				}
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			syncer, err := NewHTTPSyncer(HTTPSyncerConfig{
+				Client:           server.Client(),
+				NodeID:           "node-a",
+				AuthToken:        "token",
+				MaxResponseBytes: 32,
+			})
+			if err != nil {
+				t.Fatalf("NewHTTPSyncer: %v", err)
+			}
+			_, err = syncer.Push(ctx, server.URL, PushRequest{SourceNodeID: "node-a"})
+			if err == nil || !strings.Contains(err.Error(), "response body exceeds 32 bytes") {
+				t.Fatalf("expected response size error, got %v", err)
+			}
+		})
+	}
+
+	if _, err := NewHTTPSyncer(HTTPSyncerConfig{NodeID: "node-a", AuthToken: "token", MaxResponseBytes: -1}); err == nil {
+		t.Fatal("expected negative max response bytes to be rejected")
+	}
+}
+
+func TestHTTPSyncerRejectsMissingOrMismatchedPolicyResponse(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing policy id",
+			body: `{"protocol_version":{"major":1,"minor":0},"accepted":0,"rejected":0}`,
+		},
+		{
+			name: "mismatched policy id",
+			body: `{"protocol_version":{"major":1,"minor":0},"policy_id":"other-policy/v1","accepted":0,"rejected":0}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			syncer, err := NewHTTPSyncer(HTTPSyncerConfig{
+				Client:    server.Client(),
+				NodeID:    "node-a",
+				AuthToken: "token",
+				PolicyID:  NewHLCLWWPolicy().ID(),
+			})
+			if err != nil {
+				t.Fatalf("NewHTTPSyncer: %v", err)
+			}
+			_, err = syncer.Push(ctx, server.URL, PushRequest{SourceNodeID: "node-a"})
+			if err == nil || !strings.Contains(err.Error(), "policy") {
+				t.Fatalf("expected policy response error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestPolicyMismatchRejectedAndDigestMetadataStaysGeneric(t *testing.T) {
 	ctx := context.Background()
 	policyA := epochPolicy{id: "epoch/a"}
@@ -314,21 +510,172 @@ func TestPolicyMismatchRejectedAndDigestMetadataStaysGeneric(t *testing.T) {
 	}
 }
 
+func TestHTTPPolicyMismatchRejectedWithoutChangingState(t *testing.T) {
+	ctx := context.Background()
+	token := "test-policy-token"
+	policyA := epochPolicy{id: "epoch/a"}
+	policyB := epochPolicy{id: "epoch/b"}
+	a := newHTTPTestNodeWithPolicy(t, "node-a", token, policyA, &fixedPhysicalClock{now: 1_000})
+	b := newHTTPTestNodeWithPolicy(t, "node-b", token, policyB, &fixedPhysicalClock{now: 1_000})
+	defer a.server.Close()
+	defer b.server.Close()
+
+	if _, err := a.store.Put(ctx, "opaque/epoch", []byte("7")); err != nil {
+		t.Fatalf("node-a Put: %v", err)
+	}
+	_, err := a.syncer.Push(ctx, b.server.URL, PushRequest{
+		SourceNodeID: "node-a",
+		Entries:      []Entry{mustGet(t, a.store, "opaque/epoch")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Fatalf("expected policy mismatch push error, got %v", err)
+	}
+	if _, ok, err := b.store.Get(ctx, "opaque/epoch"); err != nil || ok {
+		t.Fatalf("policy-mismatched push modified receiver: ok=%v err=%v", ok, err)
+	}
+
+	_, err = a.syncer.Pull(ctx, b.server.URL, PullRequest{SourceNodeID: "node-a"})
+	if err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Fatalf("expected policy mismatch pull error, got %v", err)
+	}
+
+	body := mustJSON(t, PushRequest{
+		ProtocolVersion: StateProtocolVersion,
+		SourceNodeID:    "node-a",
+		Entries:         []Entry{mustGet(t, a.store, "opaque/epoch")},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.server.URL+PushPath, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build missing policy request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Outpost-Node-ID", "node-a")
+	resp, err := b.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("missing policy request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing policy id, got %d", resp.StatusCode)
+	}
+}
+
+func TestAntiEntropyApplyFailureReturnsErrorAndPreservesRetryState(t *testing.T) {
+	ctx := context.Background()
+	store := mustStore(t, "node-a", NewHLCLWWPolicy(), &fixedPhysicalClock{now: 1_000})
+	invalid := newEntryForTest("opaque/bad", []byte("bad"), "node-b", 1, Timestamp{WallMS: 1_000})
+	invalid.Key = ""
+	valid := newEntryForTest("opaque/good", []byte("good"), "node-b", 2, Timestamp{WallMS: 2_000})
+	syncer := &scriptedPullSyncer{
+		pulls: [][]Entry{
+			{invalid},
+			{valid},
+		},
+	}
+	engine, err := NewGossipEngine(GossipConfig{
+		NodeID:       "node-a",
+		Store:        store,
+		Syncer:       syncer,
+		PeerProvider: NewStaticPeerProvider([]string{"peer-b"}),
+		BackoffBase:  time.Hour,
+		BackoffMax:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+
+	err = engine.AntiEntropyOnce(ctx)
+	if err == nil || !strings.Contains(err.Error(), "apply pulled entry") {
+		t.Fatalf("expected apply error from anti-entropy, got %v", err)
+	}
+	if failures, blocked := peerFailureForTest(engine, "peer-b"); failures == 0 || !blocked {
+		t.Fatalf("apply failure did not preserve retry state: failures=%d blocked=%v", failures, blocked)
+	}
+	if _, ok, err := store.Get(ctx, "opaque/good"); err != nil || ok {
+		t.Fatalf("invalid pull unexpectedly changed store: ok=%v err=%v", ok, err)
+	}
+
+	clearPeerBackoffForTest(engine, "peer-b")
+	if err := engine.AntiEntropyOnce(ctx); err != nil {
+		t.Fatalf("recovery AntiEntropyOnce: %v", err)
+	}
+	assertStoredValue(t, store, "opaque/good", "good")
+}
+
+func TestAntiEntropyOlderOrDuplicateEntriesAreNotApplyFailures(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedPhysicalClock{now: 2_000}
+	store := mustStore(t, "node-a", NewHLCLWWPolicy(), clock)
+	current, err := store.Put(ctx, "opaque/current", []byte("current"))
+	if err != nil {
+		t.Fatalf("Put current: %v", err)
+	}
+	older := current
+	older.Value = []byte("older")
+	older.Version.HLC = Timestamp{WallMS: 1_000}
+	syncer := &scriptedPullSyncer{pulls: [][]Entry{{current, older}}}
+	engine, err := NewGossipEngine(GossipConfig{
+		NodeID:       "node-a",
+		Store:        store,
+		Syncer:       syncer,
+		PeerProvider: NewStaticPeerProvider([]string{"peer-b"}),
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+	if err := engine.AntiEntropyOnce(ctx); err != nil {
+		t.Fatalf("AntiEntropyOnce duplicate/older: %v", err)
+	}
+	assertStoredValue(t, store, "opaque/current", "current")
+}
+
+func TestPeerFailureBackoffSaturatesBeforeOverflow(t *testing.T) {
+	store := mustStore(t, "node-a", NewHLCLWWPolicy(), &fixedPhysicalClock{now: 1_000})
+	engine, err := NewGossipEngine(GossipConfig{
+		NodeID:       "node-a",
+		Store:        store,
+		Syncer:       noopSyncer{},
+		PeerProvider: NewStaticPeerProvider([]string{"peer-b"}),
+		BackoffBase:  time.Second,
+		BackoffMax:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+	now := time.Unix(1_000, 0)
+	for i := 0; i < 128; i++ {
+		engine.recordPeerFailure("peer-b", "push", errors.New("boom"), now)
+		state := peerStateForTest(engine, "peer-b")
+		if !state.nextAttempt.After(now) {
+			t.Fatalf("failure %d produced non-positive backoff: retryAt=%s now=%s", i+1, state.nextAttempt, now)
+		}
+		if state.nextAttempt.Sub(now) > time.Hour {
+			t.Fatalf("failure %d exceeded max backoff: %s", i+1, state.nextAttempt.Sub(now))
+		}
+	}
+}
+
 type httpTestNode struct {
-	id     string
-	store  *MemoryStore
-	engine *GossipEngine
-	syncer *HTTPSyncer
-	server *httptest.Server
-	peers  atomicPeerList
+	id      string
+	store   *MemoryStore
+	engine  *GossipEngine
+	syncer  *HTTPSyncer
+	server  *httptest.Server
+	peers   atomicPeerList
+	breaker atomic.Bool
 }
 
 func newHTTPTestNode(t *testing.T, id, token string, clock *fixedPhysicalClock) *httpTestNode {
+	return newHTTPTestNodeWithPolicy(t, id, token, NewHLCLWWPolicy(), clock)
+}
+
+func newHTTPTestNodeWithPolicy(t *testing.T, id, token string, policy MergePolicy, clock *fixedPhysicalClock) *httpTestNode {
 	t.Helper()
 	node := &httpTestNode{id: id}
-	node.store = mustStore(t, id, NewHLCLWWPolicy(), clock)
+	node.store = mustStore(t, id, policy, clock)
 	var err error
-	node.syncer, err = NewHTTPSyncer(HTTPSyncerConfig{NodeID: id, AuthToken: token})
+	node.syncer, err = NewHTTPSyncer(HTTPSyncerConfig{NodeID: id, AuthToken: token, PolicyID: policy.ID()})
 	if err != nil {
 		t.Fatalf("NewHTTPSyncer: %v", err)
 	}
@@ -341,8 +688,38 @@ func newHTTPTestNode(t *testing.T, id, token string, clock *fixedPhysicalClock) 
 	if err != nil {
 		t.Fatalf("NewGossipEngine: %v", err)
 	}
+	node.server = newHTTPServerForNode(t, node, token, nil)
+	node.syncer.client = node.server.Client()
+	return node
+}
+
+func newBreakableHTTPTestNode(t *testing.T, id, token string, clock *fixedPhysicalClock) *httpTestNode {
+	t.Helper()
+	node := &httpTestNode{id: id}
+	node.store = mustStore(t, id, NewHLCLWWPolicy(), clock)
+	var err error
+	node.syncer, err = NewHTTPSyncer(HTTPSyncerConfig{NodeID: id, AuthToken: token, PolicyID: node.store.Policy().ID()})
+	if err != nil {
+		t.Fatalf("NewHTTPSyncer: %v", err)
+	}
+	node.engine, err = NewGossipEngine(GossipConfig{
+		NodeID:       id,
+		Store:        node.store,
+		Syncer:       node.syncer,
+		PeerProvider: PeerProviderFunc(func() []string { return node.peers.Load() }),
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+	node.server = newHTTPServerForNode(t, node, token, &node.breaker)
+	node.syncer.client = node.server.Client()
+	return node
+}
+
+func newHTTPServerForNode(t *testing.T, node *httpTestNode, token string, breaker *atomic.Bool) *httptest.Server {
+	t.Helper()
 	handler, err := NewHTTPHandler(HTTPHandlerConfig{
-		NodeID:          id,
+		NodeID:          node.id,
 		Engine:          node.engine,
 		AuthToken:       token,
 		MaxRequestBytes: 1 << 20,
@@ -350,9 +727,27 @@ func newHTTPTestNode(t *testing.T, id, token string, clock *fixedPhysicalClock) 
 	if err != nil {
 		t.Fatalf("NewHTTPHandler: %v", err)
 	}
-	node.server = httptest.NewServer(handler)
-	node.syncer.client = node.server.Client()
-	return node
+	if breaker == nil {
+		return httptest.NewServer(handler)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if breaker.Load() {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("httptest response writer does not support hijacking")
+				http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack connection: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
 }
 
 type atomicPeerList struct {
@@ -394,6 +789,14 @@ func mustGet(t *testing.T, store *MemoryStore, key string) Entry {
 	return entry
 }
 
+func assertStoredValue(t *testing.T, store *MemoryStore, key, value string) {
+	t.Helper()
+	entry := mustGet(t, store, key)
+	if string(entry.Value) != value {
+		t.Fatalf("stored value for %s = %q, want %q", key, entry.Value, value)
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	data, err := json.Marshal(v)
@@ -419,6 +822,46 @@ func (noopSyncer) Push(context.Context, string, PushRequest) (*PushResponse, err
 
 func (noopSyncer) Pull(context.Context, string, PullRequest) ([]Entry, error) {
 	return nil, nil
+}
+
+type scriptedPullSyncer struct {
+	pulls [][]Entry
+	calls atomic.Int64
+}
+
+func (s *scriptedPullSyncer) Push(context.Context, string, PushRequest) (*PushResponse, error) {
+	return &PushResponse{ProtocolVersion: StateProtocolVersion, PolicyID: NewHLCLWWPolicy().ID()}, nil
+}
+
+func (s *scriptedPullSyncer) Pull(context.Context, string, PullRequest) ([]Entry, error) {
+	index := int(s.calls.Add(1)) - 1
+	if index >= len(s.pulls) {
+		return nil, nil
+	}
+	return append([]Entry(nil), s.pulls[index]...), nil
+}
+
+func peerStateForTest(engine *GossipEngine, peer string) peerState {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.peerStateLocked(peer)
+	return *state
+}
+
+func peerLastPushForTest(engine *GossipEngine, peer string) uint64 {
+	return peerStateForTest(engine, peer).lastPushPosition
+}
+
+func peerFailureForTest(engine *GossipEngine, peer string) (int, bool) {
+	state := peerStateForTest(engine, peer)
+	return state.failures, !state.nextAttempt.IsZero()
+}
+
+func clearPeerBackoffForTest(engine *GossipEngine, peer string) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.peerStateLocked(peer)
+	state.nextAttempt = time.Time{}
 }
 
 type epochPolicy struct {

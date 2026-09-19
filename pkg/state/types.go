@@ -104,6 +104,7 @@ type Mutation struct {
 // PushRequest is a batch of entries pushed from one node to a peer.
 type PushRequest struct {
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	PolicyID        string          `json:"policy_id"`
 	SourceNodeID    string          `json:"source"`
 	Entries         []Entry         `json:"entries"`
 }
@@ -111,6 +112,7 @@ type PushRequest struct {
 // PushResponse reports how many pushed entries changed receiver state.
 type PushResponse struct {
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	PolicyID        string          `json:"policy_id"`
 	Accepted        int             `json:"accepted"`
 	Rejected        int             `json:"rejected"`
 	Rejections      []PushRejection `json:"rejections,omitempty"`
@@ -128,6 +130,7 @@ type PushRejection struct {
 // PullRequest asks for entries newer than a cursor or a digest.
 type PullRequest struct {
 	ProtocolVersion ProtocolVersion         `json:"protocol_version"`
+	PolicyID        string                  `json:"policy_id"`
 	SourceNodeID    string                  `json:"source,omitempty"`
 	SincePosition   uint64                  `json:"since_position,omitempty"`
 	Limit           int                     `json:"limit,omitempty"`
@@ -137,6 +140,7 @@ type PullRequest struct {
 // PullResponse is returned by the HTTP pull endpoint.
 type PullResponse struct {
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	PolicyID        string          `json:"policy_id"`
 	Entries         []Entry         `json:"entries"`
 }
 

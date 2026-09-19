@@ -136,6 +136,7 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 		}
 		resp, err := g.syncer.Push(ctx, addr, PushRequest{
 			ProtocolVersion: StateProtocolVersion,
+			PolicyID:        g.policy.ID(),
 			SourceNodeID:    g.nodeID,
 			Entries:         changes,
 		})
@@ -164,6 +165,7 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 		}
 		entries, err := g.syncer.Pull(ctx, addr, PullRequest{
 			ProtocolVersion: StateProtocolVersion,
+			PolicyID:        g.policy.ID(),
 			SourceNodeID:    g.nodeID,
 			Digest:          digest,
 		})
@@ -172,18 +174,27 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			errs = append(errs, err)
 			continue
 		}
-		g.recordPeerSuccess(addr)
+		var applyErrs []error
 		for _, entry := range entries {
 			if _, err := g.store.Apply(ctx, entry); err != nil {
-				slog.Error("state gossip: apply pulled entry", "peer", addr, "key", entry.Key, "err", err)
+				applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", addr, entry.Key, err))
 			}
 		}
+		if err := errors.Join(applyErrs...); err != nil {
+			g.recordPeerFailure(addr, "pull-apply", err, now)
+			errs = append(errs, err)
+			continue
+		}
+		g.recordPeerSuccess(addr)
 	}
 	return errors.Join(errs...)
 }
 
 // HandlePush applies entries from a peer.
 func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushResponse, error) {
+	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
+		return nil, err
+	}
 	var accepted, rejected int
 	var rejections []PushRejection
 	for _, entry := range req.Entries {
@@ -203,6 +214,7 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 	}
 	return &PushResponse{
 		ProtocolVersion: StateProtocolVersion,
+		PolicyID:        g.policy.ID(),
 		Accepted:        accepted,
 		Rejected:        rejected,
 		Rejections:      rejections,
@@ -211,6 +223,9 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 
 // HandlePull returns entries newer than the caller's cursor or digest.
 func (g *GossipEngine) HandlePull(ctx context.Context, req PullRequest) ([]Entry, error) {
+	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
+		return nil, err
+	}
 	if len(req.Digest) > 0 {
 		return g.diffAgainstDigest(ctx, req.Digest, req.Limit)
 	}
@@ -288,12 +303,26 @@ func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now 
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures++
-	backoff := g.backoffBase << (state.failures - 1)
-	if backoff > g.backoffMax {
-		backoff = g.backoffMax
-	}
+	backoff := saturatedBackoff(g.backoffBase, g.backoffMax, state.failures)
 	state.nextAttempt = now.Add(backoff)
 	slog.Warn("state gossip: peer sync failed", "peer", addr, "operation", operation, "err", err, "retryAt", state.nextAttempt)
+}
+
+func saturatedBackoff(base, max time.Duration, failures int) time.Duration {
+	if failures <= 0 {
+		return base
+	}
+	backoff := base
+	for i := 1; i < failures; i++ {
+		if backoff >= max || backoff > max/2 {
+			return max
+		}
+		backoff *= 2
+	}
+	if backoff > max {
+		return max
+	}
+	return backoff
 }
 
 func (g *GossipEngine) peerStateLocked(addr string) *peerState {

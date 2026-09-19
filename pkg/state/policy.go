@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -80,6 +81,19 @@ func policiesCompatible(left, right MergePolicy) bool {
 	left = normalizePolicy(left)
 	right = normalizePolicy(right)
 	return left.ID() == right.ID()
+}
+
+var errPolicyIDRequired = errors.New("state policy id is required")
+
+func validatePolicyID(local MergePolicy, peerPolicyID string) error {
+	local = normalizePolicy(local)
+	if strings.TrimSpace(peerPolicyID) == "" {
+		return errPolicyIDRequired
+	}
+	if peerPolicyID != local.ID() {
+		return fmt.Errorf("state policy id mismatch: got %q want %q", peerPolicyID, local.ID())
+	}
+	return nil
 }
 
 func newDigestRecord(entry Entry, policy MergePolicy) DigestRecord {

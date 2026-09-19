@@ -74,7 +74,7 @@ func (s *MemoryStore) put(ctx context.Context, key string, mutation Mutation) (E
 	s.entries[key] = entry
 	s.mu.Unlock()
 	s.notify(entry)
-	return entry, nil
+	return copyEntry(entry), nil
 }
 
 // CompareAndSet atomically applies a local mutation if the current entry still
@@ -90,7 +90,7 @@ func (s *MemoryStore) CompareAndSet(ctx context.Context, key string, expected En
 	current, found := s.entries[key]
 	if !found || current.Identity() != expected {
 		s.mu.Unlock()
-		return current, false, nil
+		return copyEntry(current), false, nil
 	}
 	entry := s.newLocalEntry(key, mutation)
 	if err := s.policy.ValidateApply(entry); err != nil {
@@ -100,7 +100,7 @@ func (s *MemoryStore) CompareAndSet(ctx context.Context, key string, expected En
 	s.entries[key] = entry
 	s.mu.Unlock()
 	s.notify(entry)
-	return entry, true, nil
+	return copyEntry(entry), true, nil
 }
 
 // Get reads the current entry for a key, including tombstones.
