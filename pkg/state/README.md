@@ -35,13 +35,33 @@ Durable store:
   A failed append/sync returns an error; the failed entry is not readable and is
   not announced. Local counters may have gaps after failures, but committed
   counters are not reused.
+- A failed or short append is rolled back: the log is truncated to its pre-append
+  offset and best-effort synced, so the file keeps no byte the store did not
+  confirm and a later cold start still opens the directory. The discarded durable
+  sequence number is reused, which is safe because its bytes are gone — recovery
+  derives the next sequence from the records that are actually on disk, so no
+  sequence can collide in the log. Change counters are never reused.
+- If that rollback itself fails, the store becomes fail-closed: it keeps serving
+  already confirmed reads, but every `Put`, `Delete`, `CompareAndSet`, `Apply`,
+  and `SavePeerProgress` returns `ErrDurableStoreUnwritable` and no further byte
+  is written. A restart re-runs recovery, which repairs the torn tail.
 - Recovery restores values, tombstones, HLC state, committed change counters, and
   local positions into a fresh store instance. A backward or frozen physical
   clock after restart advances from the recovered HLC instead of reusing an old
   `ChangeID` or regressing `StateVersion`.
-- Corrupt manifests, unsupported format versions, corrupt log records, and
-  incomplete tail records fail explicitly. The store does not silently clear the
-  directory or fall back to memory.
+- Recovery distinguishes an unconfirmed tail from confirmed corruption. A record
+  is written by a single `Write` that ends in `\n`, so an unterminated final line
+  (even one that happens to parse) was never confirmed: recovery truncates it,
+  emits one warning, and opens the directory. Corrupt JSON or a regressed
+  sequence in a *terminated* record is confirmed corruption and refuses the
+  directory, as do corrupt manifests and unsupported format versions. A tail that
+  cannot be truncated is also refused, with `ErrDurableLogTruncated`. The store
+  never silently clears the directory or falls back to memory.
+- `LocalStatus().Ready` is true while the replica serves local reads and false
+  after `Close`, and `CheckConsumerPosition` then reports `NeedsSnapshot` instead
+  of resuming. `Ready` stays a local-readiness signal; it never claims that peers
+  were caught up. Recovery runs to completion before a store constructor returns,
+  so a store that could not recover is not published at all.
 - `DurableStore` also persists gossip peer push progress. `GossipEngine` advances
   that progress only after a peer acknowledges the push and the local progress
   record is durably saved. If progress saving fails, the sync returns an error
@@ -76,5 +96,15 @@ Boundaries:
   This distinguishes process-crash recovery from stronger storage-controller or
   full power-loss guarantees; the package does not claim protection beyond what
   the filesystem honors for synced file data and directory metadata.
+- A rollback can only remove bytes the filesystem lets it truncate, and recovery
+  can only repair a tail the filesystem reports. Failure modes that leave a
+  truncated record *inside* confirmed history, or that lose already synced data,
+  are outside what this store can detect; epoch and lineage guards for a
+  directory that was deleted or replaced underneath the node are tracked
+  separately.
+- `CompareAndSet` appends while holding the store's entry lock, so a slow `fsync`
+  can delay concurrent readers of that store; `Put`, `Delete`, and `Apply` append
+  outside it. This lock scope is a known bound, not a correctness claim, and
+  narrowing it is tracked with durable-log compaction rather than claimed here.
 - It does not import or adapt OutpostLet legacy wire formats; that remains ticket
   04.

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // MemoryStoreConfig configures an in-memory state replica.
@@ -20,6 +21,9 @@ type MemoryStoreConfig struct {
 type MemoryStore struct {
 	*storeCore
 }
+
+// MemoryStore implements the same replica seam as DurableStore.
+var _ Store = (*MemoryStore)(nil)
 
 // NewMemoryStore creates a state replica.
 func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
@@ -36,7 +40,11 @@ type storeCore struct {
 	entries map[string]Entry
 	clock   localClock
 	hlc     *hlcClock
-	ready   bool
+	// ready reports whether this replica can serve local reads and resume a
+	// consumer position. Recovery runs to completion before a store constructor
+	// returns, so a published store starts ready; a lifecycle owner clears it when
+	// the replica stops serving (DurableStore.Close).
+	ready atomic.Bool
 
 	commitMu    sync.Mutex
 	mu          sync.RWMutex
@@ -49,15 +57,19 @@ func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock) (*s
 	if nodeID == "" {
 		return nil, fmt.Errorf("state store node id is required")
 	}
-	return &storeCore{
+	core := &storeCore{
 		nodeID:    nodeID,
 		policy:    normalizePolicy(policy),
 		entries:   make(map[string]Entry),
 		hlc:       newHLCClock(physical),
-		ready:     true,
 		observers: make(map[uint64]func(Entry)),
-	}, nil
+	}
+	core.ready.Store(true)
+	return core, nil
 }
+
+// markNotReady records that this replica no longer serves local state.
+func (s *storeCore) markNotReady() { s.ready.Store(false) }
 
 // Policy returns the merge policy used by local writes, Apply and digests.
 func (s *storeCore) Policy() MergePolicy { return s.policy }
@@ -120,6 +132,10 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 		return Entry{}, false, err
 	}
 	if persist != nil {
+		// The durable append, including its fsync and any rollback, runs while mu is
+		// held here, so a slow disk delays concurrent readers of this store.
+		// Put/Delete/Apply append outside mu. This lock scope is pre-existing and
+		// narrowing it is tracked with durable-log compaction, not claimed here.
 		if err := persist(entry); err != nil {
 			s.mu.Unlock()
 			return Entry{}, false, err
@@ -215,20 +231,22 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 func (s *storeCore) CurrentPosition() uint64 { return s.clock.Current() }
 
 // LocalStatus reports local recovery readiness and the latest local position.
+// Ready is false once the replica has stopped serving local state.
 func (s *storeCore) LocalStatus() LocalStatus {
-	return LocalStatus{Ready: s.ready, CurrentPosition: s.CurrentPosition()}
+	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.CurrentPosition()}
 }
 
 // CheckConsumerPosition reports whether a stored consumer position can resume.
 func (s *storeCore) CheckConsumerPosition(position uint64) ConsumerPositionStatus {
 	current := s.CurrentPosition()
+	ready := s.ready.Load()
 	status := ConsumerPositionStatus{
-		Ready:           s.ready,
+		Ready:           ready,
 		CurrentPosition: current,
 		Requested:       position,
 	}
 	switch {
-	case !s.ready:
+	case !ready:
 		status.NeedsSnapshot = true
 		status.Reason = "local store is not ready"
 	case position == 0:
