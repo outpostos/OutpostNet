@@ -600,3 +600,70 @@ func TestReplicatedGCRefusesEmptyPeerList(t *testing.T) {
 		t.Fatalf("horizon moved on a refused collection: %+v", a.store.GCHorizon())
 	}
 }
+
+// Review 03b H4: adopting a peer horizon at runtime must raise the HLC lower
+// bound exactly like replaying the purge record after a restart does.
+func TestResyncHorizonRaisesHLCLikeReplay(t *testing.T) {
+	ctx := context.Background()
+	serverClock := &fixedPhysicalClock{now: 1_000_000}
+	server := mustGCMemoryStore(t, "node-a", serverClock, testRetention)
+	if _, err := server.Put(ctx, "live", []byte("v")); err != nil {
+		t.Fatalf("Put live: %v", err)
+	}
+	serverClock.now += 1_000
+	if _, err := server.Delete(ctx, "doomed"); err != nil {
+		t.Fatalf("Delete doomed: %v", err)
+	}
+	serverClock.now += 2 * retentionMS()
+	if result, err := server.CollectTombstones(ctx); err != nil || result.Collected != 1 {
+		t.Fatalf("server GC: %+v err=%v", result, err)
+	}
+	horizon := server.GCHorizon()
+
+	net := newLoopNet()
+	serverEngine, err := NewGossipEngine(GossipConfig{NodeID: "node-a", Store: server, Syncer: loopSyncer{net: net, from: "node-a"}})
+	if err != nil {
+		t.Fatalf("NewGossipEngine server: %v", err)
+	}
+	net.engines["node-a"] = serverEngine
+
+	// The client's physical clock lags the adopted horizon.
+	clientClock := &fixedPhysicalClock{now: 1_000_500}
+	dir := t.TempDir()
+	cfg := DurableStoreConfig{Dir: dir, NodeID: "node-l", PhysicalClock: clientClock, TombstoneRetention: testRetention}
+	client := mustDurableStore(t, cfg)
+	clientEngine, err := NewGossipEngine(GossipConfig{
+		NodeID:       "node-l",
+		Store:        client,
+		Syncer:       loopSyncer{net: net, from: "node-l"},
+		PeerProvider: NewStaticPeerProvider([]string{"node-a"}),
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine client: %v", err)
+	}
+	if err := clientEngine.resyncFrom(ctx, "node-a", horizon); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	if client.GCHorizon() != horizon {
+		t.Fatalf("client horizon %+v, want %+v", client.GCHorizon(), horizon)
+	}
+	runtimeLower := client.hlc.Current()
+	if runtimeLower.Compare(horizon) < 0 {
+		t.Fatalf("runtime HLC %+v is below the adopted horizon %+v", runtimeLower, horizon)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	recovered := mustDurableStore(t, cfg)
+	defer recovered.Close()
+	if replayLower := recovered.hlc.Current(); replayLower != runtimeLower {
+		t.Fatalf("HLC lower bound differs across restart: runtime %+v, replay %+v", runtimeLower, replayLower)
+	}
+	next, err := recovered.Put(ctx, "after", []byte("x"))
+	if err != nil {
+		t.Fatalf("Put after restart: %v", err)
+	}
+	if next.Version.HLC.Compare(horizon) <= 0 {
+		t.Fatalf("local write HLC %+v is not above the horizon %+v", next.Version.HLC, horizon)
+	}
+}

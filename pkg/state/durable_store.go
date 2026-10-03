@@ -468,7 +468,6 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		s.storeCore.mu.Lock()
 		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed})
 		s.storeCore.mu.Unlock()
-		s.hlc.Restore(timestampValue(record.Horizon))
 		return nil
 	default:
 		return fmt.Errorf("unknown durable record type %q", record.Type)

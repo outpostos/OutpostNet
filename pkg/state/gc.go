@@ -194,7 +194,9 @@ func (s *storeCore) collectTombstones(ctx context.Context, safePosition uint64, 
 }
 
 // applyPurgeLocked removes entries whose identity still matches and raises the
-// horizon and floor. It is shared by live collection, resync and replay.
+// horizon, the floor and the HLC lower bound. It is shared by live collection,
+// resync and replay, so an adopted horizon raises the HLC at runtime exactly as
+// replaying its purge record does after a restart.
 func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	var removed []Entry
 	for _, ref := range set.Removed {
@@ -208,6 +210,10 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
 	s.floor = maxUint64(s.floor, set.Floor)
 	s.clock.SetAtLeast(s.floor)
+	// Local writes must order after every removed or adopted entry; otherwise a
+	// store whose physical clock lags the horizon would issue writes at or below
+	// it, which peers refuse as beyond_gc_horizon.
+	s.hlc.Restore(s.horizon)
 	return removed
 }
 
