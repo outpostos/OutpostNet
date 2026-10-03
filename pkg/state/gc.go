@@ -269,11 +269,6 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	s.mu.RLock()
 	set := purgeSet{Horizon: maxTimestamp(s.horizon, peerHorizon), Floor: s.floor}
 	horizonChanged := set.Horizon != s.horizon
-	if horizonChanged {
-		// Removals behind the adopted part of the horizon were done by the peer;
-		// this store cannot vouch that any requester acknowledged them.
-		set.Adopted = peerHorizon
-	}
 	for _, entry := range s.entries {
 		if _, ok := held[entry.Key]; ok {
 			continue
@@ -288,6 +283,12 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 		result.Horizon = set.Horizon
 		return result, nil
 	}
+	// Every removal of a resync, and every part of the horizon it raises, was
+	// decided by the peer: this store cannot vouch that any requester
+	// acknowledged it. That holds even when the local horizon does not move
+	// (the peer's horizon is lower but it collected a key we still held), so the
+	// peer horizon is recorded as adopted whenever the resync changes anything.
+	set.Adopted = peerHorizon
 	if len(set.Removed) > 0 {
 		// A purged value is a visible change. It gets a fresh local position that
 		// becomes the floor, so every consumer that may hold the value re-snapshots.

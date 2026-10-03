@@ -92,14 +92,21 @@ func (c *churnCluster) openNode(t *testing.T, id string, ids []string, dir strin
 			peers = append(peers, other)
 		}
 	}
-	peerList := &atomicPeerList{}
-	peerList.Store(peers)
 	var store gcTestStore
 	if dir != "" {
 		store = mustDurableStore(t, DurableStoreConfig{Dir: dir, NodeID: id, PhysicalClock: c.clock, TombstoneRetention: testRetention})
 	} else {
 		store = mustGCMemoryStore(t, id, c.clock, testRetention)
 	}
+	return c.attachNode(t, id, peers, store)
+}
+
+// attachNode starts a gossip engine for an existing store with the given peers
+// and registers it in the loop network.
+func (c *churnCluster) attachNode(t *testing.T, id string, peers []string, store gcTestStore) *churnNode {
+	t.Helper()
+	peerList := &atomicPeerList{}
+	peerList.Store(peers)
 	engine, err := NewGossipEngine(GossipConfig{
 		NodeID:       id,
 		Store:        store,
