@@ -39,7 +39,7 @@ t05 未提交内容：`pkg/agentconfig/meshconfig.go`（`mesh.gateway_addr/dns/p
 ## 3. 模块边界与 import 方向
 
 ```
-cmd/outpostnet-service ──► internal/servicehost ──► pkg/service (Service 领域：Ref/Entry/ExportTable/配置校验)
+cmd/outpostnet-service ──► internal/servicehost ──► pkg/service (Service 领域：Ref/Target/Entry/RegisterExports+ApplyExports/配置校验)
                                    │                     │
                                    ▼                     ▼
                            internal/agent ──────► pkg/agentconfig
@@ -66,7 +66,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口，内部导入/导出�
 
 - 应用只认识稳定入口地址（例如 `127.0.0.1:18080`）和其背后的稳定服务身份（例如 `echo@node-b`）。
 - 入口对**每个新连接**重新向 Net 宿主要流：动态路径按 `node_id` 查当前隧道客户端，该客户端的远端地址来自对等目录（`PUT /v1/peers`）。实例换节点地址/端口后，管理输入更新目录 → `ManagedClient.UpdateServerAddr` 关闭旧连接并重拨新地址 → 后续新连接到达新实例。
-- 实例在同节点换本地端口：导出表把同名服务的路由改到新地址（`ExportTable.Apply` 支持同名换址），后续新流到达新实例。
+- 实例在同节点换本地端口：导出表把同名服务的路由改到新地址（`service.ApplyExports` 支持同名换址），后续新流到达新实例。
 - **不承诺在途连接无损迁移**：
   - 隧道换地址时，旧 QUIC 连接被关闭，其上的在途流随之中断，应用侧旧 TCP 连接被关闭（现有 `UpdateServerAddr` 契约）。
   - 仅导出换本地端口时，路由只在流打开时查找，已建立的流继续连着旧实例直到任一端关闭。

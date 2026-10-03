@@ -54,7 +54,7 @@
 |---|---|---|---|
 | `TestTCPEndToEnd` | ✅ | 0.36s | App A → Sidecar A → Server → Sidecar B → App B (echo), single connection |
 | `TestTCPMultipleConnections` | ✅ | 0.36s | 5 concurrent TCP connections through tunnel |
-| `TestUDPEndToEnd` | ✅ | 0.35s | UDP packet forwarding end-to-end |
+| `TestUDPEndToEnd` | ✅ | 0.35s | UDP packet forwarding end-to-end, node-local only (Sidecar → Server → Sidecar over Unix sockets; not cross-node) |
 | `TestSC1_BasicTunnel_TCP` | ✅ | 0.81s | FRP-style single tunnel, no region |
 | `TestSC2b_FRPStyle_NoRegion` | ✅ | 0.81s | FRP parity scenario: no region concept |
 | `TestSC3_MultiServiceMux` | ✅ | 1.05s | Multiple services multiplexed over one QUIC connection |
