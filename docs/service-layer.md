@@ -81,6 +81,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 - **不承诺在途连接无损迁移**：
   - 隧道换地址时，旧 QUIC 连接被关闭，其上的在途流随之中断，应用侧旧 TCP 连接被关闭（现有 `UpdateServerAddr` 契约）。
   - 仅导出换本地端口时，路由只在流打开时查找，已建立的流继续连着旧实例直到任一端关闭。
+- 宿主关闭（`outpostnet-service` 收到信号或启动中途出错）：先取消并等待全部入口——入口立即停止接受新连接，在途连接有 `ShutdownGrace`（默认 5s）宽限，之后由入口关闭；入口全部返回后才依次停止 health、管理 API 与隧道。`Run` 返回时不残留入口 goroutine，入口端口已释放。
 - 认证、流头长度约束、优雅关闭（`StreamDone` 计数）与重连退避均沿用 `pkg/tunnel`，本票不改。
 
 ## 5. 协议支持（如实记录）

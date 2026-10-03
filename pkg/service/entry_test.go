@@ -192,3 +192,51 @@ func TestParseRef(t *testing.T) {
 		}
 	}
 }
+
+// TestEntryRunReturnsWithInFlightConnection: shutting an entry down must
+// not hang on an application connection that stays open. After the shutdown
+// grace the entry closes it and Run returns, so a host can wait for its
+// entries before stopping the transport underneath them.
+func TestEntryRunReturnsWithInFlightConnection(t *testing.T) {
+	v1 := startTaggedServer(t, "v1")
+	op := &tcpOpener{}
+	op.addr.Store(v1.Addr().String())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := service.NewEntry(service.EntryConfig{Target: service.Target{Service: "echo", NodeID: "node-b"}, ListenAddr: "127.0.0.1:0"}, op, nil)
+	done := make(chan struct{})
+	go func() { defer close(done); e.Run(ctx) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for e.Addr() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("entry did not start listening")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	c, err := net.Dial("tcp", e.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r := bufio.NewReader(c)
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	io.WriteString(c, "hi\n")
+	if line, err := r.ReadString('\n'); err != nil || line != "v1:hi\n" {
+		t.Fatalf("warmup = %q, %v", line, err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("Entry.Run did not return while an application connection stayed open")
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := r.ReadByte(); err == nil {
+		t.Fatal("in-flight connection still open after Run returned")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("in-flight connection still open after Run returned")
+	}
+}

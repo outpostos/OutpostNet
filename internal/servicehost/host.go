@@ -44,7 +44,15 @@ func New(cfg *service.Config, logger *slog.Logger) *Host {
 }
 
 // Run starts the host and blocks until ctx is cancelled.
+//
+// Startup order is tunnels -> exports -> peers -> management -> health ->
+// entries; teardown (deferred, so it also runs on every startup error) is the
+// reverse: entries are cancelled and waited for first, then health,
+// management and finally the tunnels the entries were using. Nothing started
+// here outlives Run.
 func (h *Host) Run(ctx context.Context) error {
+	// Background Net work started below (client connect loops, peer
+	// reconnects) is bound to this context; it is cancelled last.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -54,11 +62,10 @@ func (h *Host) Run(ctx context.Context) error {
 	netCfg.Exports = nil
 	netCfg.Imports = nil
 	tm := agent.NewTunnelManager(&netCfg, h.logger, nil)
+	defer tm.Stop()
 	if err := tm.Start(ctx); err != nil {
-		tm.Stop()
 		return fmt.Errorf("start tunnels: %w", err)
 	}
-	defer tm.Stop()
 
 	// Service: exports on every tunnel server.
 	exports := append([]agentconfig.ExportConfig(nil), h.cfg.Exports...)
@@ -83,7 +90,21 @@ func (h *Host) Run(ctx context.Context) error {
 	}
 	defer mgmt.Stop()
 
+	stopHealth, err := h.startHealth()
+	if err != nil {
+		return fmt.Errorf("start health server: %w", err)
+	}
+	defer stopHealth()
+
 	// Service: stable entries, resolved through the Net host per connection.
+	// They run under their own context so teardown can stop and wait for
+	// them before the tunnels go away.
+	entryCtx, cancelEntries := context.WithCancel(ctx)
+	var entryWG sync.WaitGroup
+	defer func() {
+		cancelEntries()
+		entryWG.Wait()
+	}()
 	var entries []*service.Entry
 	for i, tgt := range h.cfg.EntryTargets() {
 		entries = append(entries, service.NewEntry(service.EntryConfig{
@@ -91,20 +112,13 @@ func (h *Host) Run(ctx context.Context) error {
 			ListenAddr: h.cfg.Imports[i].ListenAddr,
 		}, service.NetOpener(tm), h.logger))
 	}
-	var entryWG sync.WaitGroup
 	for _, e := range entries {
 		entryWG.Add(1)
 		go func(e *service.Entry) {
 			defer entryWG.Done()
-			e.Run(ctx)
+			e.Run(entryCtx)
 		}(e)
 	}
-
-	stopHealth, err := h.startHealth()
-	if err != nil {
-		return fmt.Errorf("start health server: %w", err)
-	}
-	defer stopHealth()
 
 	h.mu.Lock()
 	h.tunnels = tm

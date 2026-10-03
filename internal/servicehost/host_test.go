@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -391,4 +392,87 @@ func TestConfigFileExportMoveAppliesWithoutRestart(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // let the watcher record the initial stat
 	write(appV2)
 	askEventually(t, entry, "v2:hello")
+}
+
+// entryGoroutines counts goroutines currently inside service.Entry code.
+func entryGoroutines() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "OutpostNet/pkg/service.(*Entry)")
+}
+
+// assertEntriesReleased checks, right after Run returned, that no entry
+// goroutine is left and the entry address can be bound again.
+func assertEntriesReleased(t *testing.T, entry string) {
+	t.Helper()
+	if n := entryGoroutines(); n != 0 {
+		t.Errorf("%d service entry goroutine frame(s) still running after Run returned", n)
+	}
+	ln, err := net.Listen("tcp", entry)
+	if err != nil {
+		t.Errorf("entry address %s still bound after Run returned: %v", entry, err)
+		return
+	}
+	ln.Close()
+}
+
+// TestRunStopsEntriesBeforeReturning: on normal shutdown Run cancels the
+// entries and waits for them (including an in-flight application
+// connection) before stopping the tunnels, so nothing outlives Run.
+func TestRunStopsEntriesBeforeReturning(t *testing.T) {
+	app := startApp(t, "v1")
+	nodeB := startHost(t, exportingNode(t, "node-b", app, token))
+	entry := freeAddr(t)
+	nodeA := startHost(t, consumingNode(t, "node-a", entry, tunnelAddr(t, nodeB), token))
+	askEventually(t, entry, "v1:hello")
+
+	inflight, err := dialEntry(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inflight.c.Close()
+	if got, err := inflight.ask("before"); err != nil || got != "v1:before" {
+		t.Fatalf("in-flight warmup = %q, %v", got, err)
+	}
+
+	nodeA.cancel()
+	select {
+	case <-nodeA.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not stop")
+	}
+	if nodeA.err != nil {
+		t.Fatalf("Run returned %v on normal shutdown", nodeA.err)
+	}
+	assertEntriesReleased(t, entry)
+	expectClosed(t, inflight, "host shutdown")
+}
+
+// TestRunReleasesEntriesOnStartupError: when a later startup step fails
+// (health address already in use), Run returns the error promptly and no
+// entry is left listening.
+func TestRunReleasesEntriesOnStartupError(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	app := startApp(t, "v1")
+	nodeB := startHost(t, exportingNode(t, "node-b", app, token))
+	entry := freeAddr(t)
+	cfg := consumingNode(t, "node-a", entry, tunnelAddr(t, nodeB), token)
+	cfg.HealthAddr = busy.Addr().String()
+
+	errc := make(chan error, 1)
+	go func() { errc <- servicehost.New(cfg, nil).Run(context.Background()) }()
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "health") {
+			t.Fatalf("Run error = %v, want health server error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the health server failed to start")
+	}
+	assertEntriesReleased(t, entry)
 }
