@@ -1,7 +1,7 @@
 # Service 层：稳定服务访问与 Net 通用通信的分离（四层改造 票09）
 
 > 状态：R1 实施说明。描述的是本仓库当前代码事实与本票改动；未实现的能力明确标注“未实现”。
-> 第 3–5 节为本票目标设计，在阶段 2（分离）与阶段 3（命令/样例/双节点测试）落地；以对应提交为准。
+> 第 3–5 节的设计已在本票阶段 2（分离）与阶段 3（命令/样例/双节点测试）落地，代码与测试位置见第 6 节。
 > 上位文档：工作空间 `docs/adr/0002-distributed-primitives-and-service-layers.md`、`CONTEXT.md`（身份寻址 `service@node_id`）。
 
 ## 1. 改造前现状核对（BASE 66b08e7）
@@ -82,3 +82,24 @@ cmd/outpostnet-agent ──► internal/agent（旧入口，内部导入/导出�
 | 节点内 `outpostnet-server` + `outpostnet-sidecar`（Unix socket） | 支持 | 支持（仅节点内，不跨节点，不经 QUIC 隧道） |
 
 跨节点 QUIC 上的 UDP（datagram 或流封装）在本仓库**未实现**；节点内 sidecar 的 UDP 能力不能视为跨节点 UDP。
+
+## 6. 落地位置与验证
+
+| 内容 | 位置 |
+|------|------|
+| Service 领域包 | `pkg/service/`：`target.go`（`Ref`/`Target`/`StreamOpener`）、`entry.go`（稳定入口）、`exports.go`（导出表）、`config.go`（Service 配置） |
+| 边界测试 | `pkg/service/boundary_test.go`（源码 import 图，非 `_test.go` 文件） |
+| Service 宿主 | `internal/servicehost/host.go`（复用 `agent.TunnelManager`/`PeerDirectory`/`ManagementServer`/`ConfigWatcher`） |
+| 命令 | `cmd/outpostnet-service`（`make build-service`） |
+| 旧入口改造 | `internal/agent/tunnel_manager.go`：静态/动态导入改为 `service.Entry`，`TunnelManager.OpenStream` 实现 `service.StreamOpener`；导出走 `service.RegisterExports`；`config_watcher.go`：`ReloadAgent` 走 `service.ApplyExports`，`ConfigWatcher.SetLoader` |
+| 双节点测试 | `internal/servicehost/host_test.go`：两套独立 Host（各自真实 QUIC 监听）+ 真实 TCP 应用 + token 认证；覆盖实例替换（换隧道端口，经 `PUT /v1/peers`）、同节点换端口（`ApplyExports` 与配置文件两种入口）、在途连接行为、错误 token |
+| 可运行样例 | `examples/service/`（三个独立进程：node-a、node-b、node-b 替换实例） |
+
+## 7. 已知限制
+
+- 动态路径沿用对等目录的角色规则：`node_id` 字典序小的一方拨号，且只有拨号方能打开服务流，因此消费方节点的 `node_id` 必须小于提供方；反向访问需要静态路径或后续改造。
+- `peers` 仅在启动时注入；运行期地址变化只通过 `PUT /v1/peers`（整表替换）。配置文件中 tunnels/imports/auth/tls/peers 的变化需重启，watcher 只会记录告警。
+- 端点切换期间（重连退避初始 1s）新连接会被入口立即关闭，不排队等待；应用需自行重试。
+- 不承诺在途连接无损迁移（见第 4 节）。
+- 本票只在单机多进程/同进程多监听上验证；多台物理机/真实网络下未验证。
+- 既有问题（本票未改）：`tunnel.ManagedClient` 的在途流计数 `sync.WaitGroup` 在 `GracefulShutdown` 等待期间仍可能被 `Add`，`go test -race ./internal/agent` 偶发报告于 relay 关停路径（`TestRelayDirectAndRelay`）。

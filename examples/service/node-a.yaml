@@ -1,0 +1,16 @@
+# node-a: the application here only knows 127.0.0.1:39080 = echo@node-b.
+node_id: node-a                   # "node-a" < "node-b": node-a dials (peer-directory role rule)
+health_addr: 127.0.0.1:39382
+management:
+  socket_path: /tmp/outpostnet-service-example/node-a.sock
+auth:
+  token: example-token
+tls:
+  insecure: true
+peers:                            # seed for the existing peer directory
+  - node_id: node-b
+    addr: 127.0.0.1:39443
+imports:                          # stable entries
+  - service: echo@node-b
+    listen_addr: 127.0.0.1:39080
+    protocol: tcp

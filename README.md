@@ -133,12 +133,13 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 
 | Feature | Description |
 |---------|-------------|
-| TCP & UDP | Full L4 proxy for HTTP, gRPC, DNS, gaming, and more |
+| TCP & UDP | TCP across nodes over the QUIC tunnel; UDP only node-local via server + sidecar (cross-node UDP not implemented) |
 | QUIC Tunnel | Encrypted transport with TLS 1.3 and multiplexed streams |
 | Token Auth | Shared-secret authentication between agents, no PKI needed |
 | Auto-Reconnect | Exponential backoff with config persistence for offline recovery |
 | K8s Controller | Annotation-driven service exposure with sidecar auto-injection |
 | Peer Directory | Named-node addressing with stable local listen addresses |
+| Service Entry | `outpostnet-service`: stable entries for `<service>@<node_id>` that follow instance replacement ([docs](docs/service-layer.md)) |
 | Relay | Three-region relay for networks without direct QUIC paths |
 | Metrics | Prometheus endpoint for tunnel state, streams, and traffic |
 
@@ -159,6 +160,7 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 - [Quick Start Guide](docs/quickstart.md)
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
+- [Service Layer (outpostnet-service)](docs/service-layer.md)
 - [Deployment Examples](deploy/examples/)
 
 ## Supported Platforms
