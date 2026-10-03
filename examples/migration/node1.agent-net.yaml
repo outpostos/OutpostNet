@@ -1,0 +1,19 @@
+# AFTER: outpostnet-agent keeps only Net duties (tunnels, peer directory fed by
+# OutpostLet, metrics, relays if any). imports/exports moved to node1.service.yaml.
+node_id: node1
+health_addr: ":8082"
+metrics:
+  addr: ":9090"
+management:
+  socket_path: /run/outpostnet/outpostnet.sock   # unchanged: OutpostLet keeps pushing here
+persistence:
+  dir: /var/lib/outpostnet
+tunnels:
+  - role: server
+    listen_addr: "192.0.2.11:5252"
+exports: []
+imports: []
+auth:
+  token: change-me
+tls:
+  insecure: true

@@ -11,6 +11,9 @@ Outpost OS four-layer refactor (Net state primitives / Service stable access / R
 - `outpostnet-service`: OutpostService stable entries for `<service>@<node_id>`; included in `make release`.
 - Loopback OutpostRange observation endpoints on `outpostnet-agent` (`--observation-addr`, default `127.0.0.1:17960`) and `outpostnet-service` (default `127.0.0.1:17961`). Upgrade OutpostRange before these components.
 
+### Documentation
+- `docs/service-migration.md`: moving stable entries from the combined `outpostnet-agent` (`imports`/`exports`) to `outpostnet-service` — config mapping, phased order, mixed-period behavior, rollback; example configs in `examples/migration/` are loaded by tests.
+
 ### Removed
 - `pkg/tunnel`: `Client.ServeImport` (use `pkg/service` entries or `outpostnet-service`).
 - `pkg/state`: decoding a bare-integer `protocol_version`; the wire form is `{"major":M,"minor":N}`.

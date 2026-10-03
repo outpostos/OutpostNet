@@ -58,7 +58,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 3. `internal/agent` 的流接口以传输术语表达：`TunnelManager.OpenPeerStream(ctx, nodeID, serviceName)` / `OpenRegionStream(ctx, region, serviceName)` 不携带任何 `pkg/service` 类型；Service 的 `Target` 由 `pkg/service` 侧适配器 `service.NetOpener` 映射到这两条传输路径（含流头约束校验）。由 `pkg/service/boundary_test.go` 的 `TestNetHostStreamAPIIsServiceAgnostic` 检查 `TunnelManager` 导出方法签名。
 4. `internal/servicehost` 复用 `internal/agent` 的隧道管理、对等目录与管理 API，不复制它们。
 
-**未完全拆开的部分（如实说明）**：`internal/agent` 同时是 Net 宿主和旧命令 `outpostnet-agent` 的**组合宿主**。为兼容旧配置（`imports`/`exports` 写在同一份 agent 配置里），它仍 import `pkg/service`，在包内组装旧配置的导入（`service.NewEntry`）与导出（`service.RegisterExports`、`ReloadAgent` 中的 `service.ApplyExports`）。也就是说 Net 宿主代码与旧入口的 Service 组装仍同在 `internal/agent` 一个包里，本票没有重写 `TunnelManager`。真正的通用层是 `pkg/tunnel`、`pkg/tunnel/tlsutil`（以及共享配置 `pkg/agentconfig`），它们不依赖 Service。
+**未完全拆开的部分（如实说明）**：`internal/agent` 同时是 Net 宿主和旧命令 `outpostnet-agent` 的**组合宿主**。为兼容旧配置（`imports`/`exports` 写在同一份 agent 配置里），它仍 import `pkg/service`，在包内组装旧配置的导入（`service.NewEntry`）与导出（`service.RegisterExports`、`ReloadAgent` 中的 `service.ApplyExports`）。也就是说 Net 宿主代码与旧入口的 Service 组装仍同在 `internal/agent` 一个包里，本票没有重写 `TunnelManager`。组合宿主的入口不报 Service 观测事实；把已有部署的入口迁到 `outpostnet-service` 的步骤见 [service-migration.md](service-migration.md)（票11x）。真正的通用层是 `pkg/tunnel`、`pkg/tunnel/tlsutil`（以及共享配置 `pkg/agentconfig`），它们不依赖 Service。
 
 边界测试覆盖范围（`pkg/service/boundary_test.go`）：
 

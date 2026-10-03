@@ -16,7 +16,8 @@ Service stable access, observed by Range). Responsibilities in this repository:
 
 `outpostnet-agent` keeps the combined `imports`/`exports` configuration for
 existing deployments (OutpostLet's e2e environment uses it); new stable-entry
-deployments use `outpostnet-service`. Upgrade OutpostRange before the
+deployments use `outpostnet-service` (moving an existing agent's entries:
+[service-migration.md](service-migration.md)). Upgrade OutpostRange before the
 components that report to it ([observation.md](observation.md) section 7).
 
 ## Core Concept

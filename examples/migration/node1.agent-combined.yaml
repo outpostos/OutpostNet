@@ -1,0 +1,29 @@
+# BEFORE: outpostnet-agent as the combined host (Net tunnels + Service entries/exports
+# in one config). OutpostLet pushes the peer directory to management.socket_path.
+# Migration steps: docs/service-migration.md
+node_id: node1
+health_addr: ":8082"
+metrics:
+  addr: ":9090"
+management:
+  socket_path: /run/outpostnet/outpostnet.sock   # OutpostLet outpostNet.socketPath
+persistence:
+  dir: /var/lib/outpostnet
+tunnels:
+  - role: server
+    listen_addr: "192.0.2.11:5252"                # OutpostLet outpostNet.tunnelPort = 5252
+exports:
+  - name: mesh-rest
+    local_addr: "127.0.0.1:8081"
+    protocol: tcp
+imports:
+  - service: mesh-rest@node2
+    listen_addr: "127.0.0.1:18480"
+    protocol: tcp
+  - service: mesh-rest@node3
+    listen_addr: "127.0.0.1:18481"
+    protocol: tcp
+auth:
+  token: change-me                                # same token on every node
+tls:
+  insecure: true                                  # use cert_file/key_file in production
