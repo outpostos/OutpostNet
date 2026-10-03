@@ -1,7 +1,10 @@
-# pkg/state: tombstone GC and durable log compaction (ticket 03b)
+# pkg/state: tombstone GC and durable log compaction (tickets 03b, 03d)
 
-Status: implemented on `feat/four-layer-03b-tombstone-gc`. Evidence is local
-unit and fault-injection tests on one machine; it is not a production
+Status: on `main` — 03b (PR #8, `59aa33d`) and the 03d requester horizon check
+and batched resync apply (PR #11, `e8f9de0`); 10-D1 (PR #13, `5d28562`) added
+push-round replication status and left the GC gate unchanged. Consumers enable
+GC in 03c (OutpostLet PR #61, OutpostMesh PR #45), off by default. Evidence is
+local unit and fault-injection tests on one machine; it is not a production
 multi-node or power-loss validation.
 
 ## Root cause
@@ -34,7 +37,10 @@ A tombstone `t` is collected only when all of the following hold:
    `TombstoneRetention == 0` (the default) disables GC entirely.
 2. **Peer acknowledgement** (replicated stores only, via
    `GossipEngine.CollectTombstones`): `t.Position <= min(push progress of every
-   peer currently returned by the PeerProvider)`. Push progress only advances
+   peer currently returned by the PeerProvider)`. This is the acknowledged
+   position only; the push-round fields of `ReplicationStatus`
+   (`OutboundRoundCaughtUp`, `OutboundRoundTime`, ticket 10-D1) never gate
+   collection. Push progress only advances
    after the peer answered the push (durably for `DurableStore`). This gate is
    an efficiency guard, not a proof that the peer holds `t`: every entry that is
    not rejected as *transient* advances the cursor, including non-transient
@@ -396,16 +402,22 @@ unreadable by 03b. The downgrade sequence is therefore: stop gossip on the node
 `Compact`, exit without any further write, then start the 03b binary.
 
 **Current limit: no operational entry point.** Nothing outside `pkg/state`
-calls `Compact`: no CLI, agent flag or endpoint exposes it, and the engine only
-runs `CompactIfNeeded`, which compacts on a record-count threshold
-(`CompactionMinRecords`) while gossip keeps running, so it cannot provide the
-sequence above. A "stop gossip, force `Compact`, exit" entry is tracked in
-ticket 11 and must exist before GC is enabled anywhere a downgrade may be
-needed. Until then the only downgrade path for a directory that holds `batch`
-records is to let the node catch up with every peer
-(`ReplicationStatus.CaughtUp`), stop it, clear its data directory and start the
-03b binary on the empty directory, which resyncs from its peers under the 03b
-rule; writes the node had not replicated are lost on that path.
+calls `Compact`: no CLI, agent flag or endpoint in this repository exposes it,
+and the engine only runs `CompactIfNeeded`, which compacts on a record-count
+threshold (`CompactionMinRecords`) while gossip keeps running, so it cannot
+provide the sequence above. A "stop gossip, force `Compact`, exit" entry was
+booked to ticket 11 by the 03d review and does not exist yet (checked at 11-D);
+it must exist before GC is enabled anywhere a downgrade may be needed. Until
+then the only downgrade path for a directory that holds `batch` records is to
+make sure every peer holds this node's writes, stop it, clear its data
+directory and start the 03b binary on the empty directory, which resyncs from
+its peers under the 03b rule; writes the node had not replicated are lost on
+that path. "Every peer holds this node's writes" means: stop the host's local
+writes, then wait until `ReplicationStatus` reports `OutboundRoundCaughtUp`
+with an `OutboundRoundTime` later than that point for every peer
+(`pkg/state/README.md`). `CaughtUp` also proves it when it holds, but while
+other nodes keep writing it is structurally false (10-D1) and may never be
+reached.
 
 **Why the format version is not raised.** The 03b binary is fixed, so only its
 existing error paths can be chosen from. Raising the version of `batch` records
@@ -435,8 +447,9 @@ snapshot header loses `adopted` and the `peer_progress` records lose
   value, is cleaned up by the digest check or a per-entry rejection rather than
   by a 410 on its first exchange.
 * Handling: no action is needed for safety. To restore the strict rule right
-  away, wait until the node has caught up with every peer
-  (`ReplicationStatus.CaughtUp`, so it holds no unreplicated writes), stop it,
+  away, make sure every peer holds this node's writes (as in "Current limit"
+  above: local writes stopped, then `OutboundRoundCaughtUp` with a later
+  `OutboundRoundTime` for every peer), stop it,
   clear its data directory and restart it: with horizon zero it is refused on
   its first exchange (rule "Not a zero horizon"), resyncs and records the peer
   horizon as adopted, which makes it apply the 03b comparison to every lower

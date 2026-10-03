@@ -120,6 +120,16 @@ Replication status (`GossipEngine.ReplicationStatus`):
   false, since when the peer has been behind. Neither field gates tombstone GC
   (that still uses the acknowledged position only), and `CaughtUp` remains
   `OutboundCaughtUp && InboundCaughtUp`.
+- Reading the push-round fact: with no local writes a partitioned peer has
+  nothing to be pushed, so `OutboundCaughtUp` and therefore
+  `OutboundRoundCaughtUp` stay true; the flag only turns false for a
+  partitioned peer once there are local changes it has not acknowledged.
+  Reachability is `InboundCaughtUp` and `LastError`/`LastErrorTime`, not this
+  flag. Under sustained writes anywhere in the connected set `CaughtUp` is
+  structurally false for the same reason as `OutboundCaughtUp`; to establish
+  "every peer holds this node's writes", stop local writes and wait for
+  `OutboundRoundCaughtUp` with an `OutboundRoundTime` after that point on
+  every peer.
 - A round that skips a peer in backoff is not a pull. A snapshot resync clears
   backoff but does not move `LastPullTime`; the next pull does.
 - These are local facts of this process: times are not persisted, so a fresh
@@ -127,7 +137,11 @@ Replication status (`GossipEngine.ReplicationStatus`):
   acknowledged position survives. Same semantics as OutpostMesh
   `GetReplicationStatus` (ticket 06); hosts map it to their own reporting
   (for example OutpostRange `ReplicationProgress`) instead of wrapping the
-  Syncer to re-derive it.
+  Syncer to re-derive it. Mapped today by OutpostLet (`outpostlet.metadata`)
+  and OutpostMesh (`outpostmesh.entities`), including the push-round fields
+  as Range `outbound_round_caught_up` / `outbound_round_time`; see
+  `docs/observation.md` section 4. OutpostNet's own processes do not run a
+  `GossipEngine` and report no replication status.
 - Credentials never appear: every pkg/state log line (debug through error) and
   every error returned by `SyncOnce`, `AntiEntropyOnce`, `ReplicationStatus` or
   `HTTPSyncer` names a peer by its address with the password masked
@@ -155,7 +169,9 @@ HTTP adapter:
 - Client response body size is bounded by `MaxResponseBytes` (default 1 MiB) for
   both success and error responses; oversized responses fail instead of being
   decoded as truncated JSON.
-- Protocol major-version mismatch returns HTTP 426.
+- `protocol_version` is the object `{"major":M,"minor":N}`; a body that does
+  not decode (for example a bare integer) is a 400, and a major-version
+  mismatch returns HTTP 426.
 
 Boundaries:
 
@@ -179,5 +195,7 @@ Boundaries:
   ticket 03b evaluated it and left it unchanged (still open). `Compact` holds the
   commit lock and the log lock for the whole rewrite, so writers wait for it,
   while readers are blocked only while the entry map is copied.
-- It does not import or adapt OutpostLet legacy wire formats; that remains ticket
-  04.
+- It does not import or adapt OutpostLet legacy wire formats. OutpostLet's
+  `/metadata/v1` (protocol v3) adapter lives in OutpostLet
+  (`pkg/services/metadata/legacy_wire.go`, ticket 04) together with its removal
+  condition; this package only speaks `/state/v1`.

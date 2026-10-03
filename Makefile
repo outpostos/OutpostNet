@@ -39,10 +39,10 @@ LDFLAGS = -ldflags "-X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gi
 
 # Release platforms
 RELEASE_PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
-RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller
+RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller outpostnet-service
 RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gitCommit=$(COMMIT) -X $(VERSION_PKG).buildDate=$(BUILD_TIME)"
 
-.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release docker-build-combined
+.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release
 
 # Default target
 all: clean fmt vet test build
@@ -126,29 +126,13 @@ deps:
 clean:
 	@echo "Cleaning..."
 	$(GOCLEAN)
-	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY) $(AGENT_BINARY)
+	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY) $(AGENT_BINARY) $(SERVICE_BINARY)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 
 clean-all: clean
 	@echo "Cleaning all generated files..."
 	@rm -f /tmp/outpostnet-*.pid /tmp/outpostnet-*.log
-
-# Docker targets
-docker-build:
-	@echo "Building Docker images..."
-	docker build -t outpostnet-server:$(VERSION) -t outpostnet-server:latest \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f build/docker/Dockerfile.server .
-	docker build -t outpostnet-sidecar:$(VERSION) -t outpostnet-sidecar:latest \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f build/docker/Dockerfile.sidecar .
-	docker build -t outpostnet-controller:$(VERSION) -t outpostnet-controller:latest \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f build/docker/Dockerfile.controller .
-	docker build -t outpostnet-agent:$(VERSION) -t outpostnet-agent:latest \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f build/docker/Dockerfile.agent .
 
 # K8s E2E test
 e2e-k8s:
@@ -188,8 +172,8 @@ bench-tunnel:
 release: fmt vet
 	@echo "Building release binaries for all platforms..."
 	@mkdir -p $(BUILD_DIR)/release
-	@for component in outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller; do \
-		for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	@for component in $(RELEASE_COMPONENTS); do \
+		for platform in $(RELEASE_PLATFORMS); do \
 			os=$$(echo $$platform | cut -d/ -f1); \
 			arch=$$(echo $$platform | cut -d/ -f2); \
 			binary=$$component-$(VERSION)-$$os-$$arch; \
@@ -204,28 +188,6 @@ release: fmt vet
 	@echo "Release archives built in $(BUILD_DIR)/release/"
 	@ls -lh $(BUILD_DIR)/release/
 
-# Build combined server+agent Docker image using pre-built linux/amd64 binaries
-docker-build-combined:
-	@echo "Building combined server+agent Docker image..."
-	@if [ ! -f $(BUILD_DIR)/release/outpostnet-server-$(VERSION)-linux-amd64.tar.gz ]; then \
-		echo "Run 'make release' first to build linux/amd64 binaries"; exit 1; \
-	fi
-	@mkdir -p $(BUILD_DIR)/release/docker-stage
-	@tar -xzf $(BUILD_DIR)/release/outpostnet-server-$(VERSION)-linux-amd64.tar.gz \
-		-C $(BUILD_DIR)/release/docker-stage
-	@tar -xzf $(BUILD_DIR)/release/outpostnet-agent-$(VERSION)-linux-amd64.tar.gz \
-		-C $(BUILD_DIR)/release/docker-stage
-	@mv $(BUILD_DIR)/release/docker-stage/outpostnet-server-$(VERSION)-linux-amd64 \
-		$(BUILD_DIR)/release/docker-stage/outpostnet-server
-	@mv $(BUILD_DIR)/release/docker-stage/outpostnet-agent-$(VERSION)-linux-amd64 \
-		$(BUILD_DIR)/release/docker-stage/outpostnet-agent
-	docker build \
-		-t outpostnet:$(VERSION) -t outpostnet:latest \
-		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f build/docker/Dockerfile.combined $(BUILD_DIR)/release/docker-stage
-	@rm -rf $(BUILD_DIR)/release/docker-stage
-	@echo "Built outpostnet:$(VERSION) and outpostnet:latest"
-
 # Help
 help:
 	@echo "OutpostNet v2 Makefile"
@@ -236,6 +198,7 @@ help:
 	@echo "  build-sidecar   - Build sidecar binary only"
 	@echo "  build-controller - Build controller binary only"
 	@echo "  build-agent     - Build agent binary only"
+	@echo "  build-service   - Build service (OutpostService entry) binary only"
 	@echo "  install         - Build and install binaries to project root"
 	@echo ""
 	@echo "  test            - Run all tests"
@@ -252,7 +215,6 @@ help:
 	@echo "  clean-all       - Clean all generated files"
 	@echo ""
 	@echo "  bench-tunnel         - Run QUIC tunnel benchmarks"
-	@echo "  release              - Build release archives for all platforms (4 components × 4 OS/arch)"
-	@echo "  docker-build         - Build individual Docker images (requires golang:1.25-alpine)"
-	@echo "  docker-build-combined - Build combined server+agent image using pre-built binaries"
+	@echo "  release              - Build release archives for all platforms (5 components × 4 OS/arch)"
+	@echo "  e2e-k8s / e2e-controller / e2e-cross-region / e2e-relay - Run hack/ E2E scripts (*-cleanup to tear down)"
 	@echo "  help                 - Show this help"

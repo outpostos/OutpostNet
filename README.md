@@ -64,7 +64,7 @@ See [docs/observation.md](docs/observation.md).
 ```bash
 git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
 make build-agent        # standalone agent only
-make build              # all four components
+make build              # all five components (agent, service, server, sidecar, controller)
 ```
 
 ## Quick Start
@@ -150,6 +150,20 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 | Relay | Three-region relay for networks without direct QUIC paths |
 | Metrics | Prometheus endpoint for tunnel state, streams, and traffic |
 
+## Role in Outpost OS
+
+Within the Outpost OS four-layer architecture OutpostNet is the Net layer and
+also ships the Service layer's entry point:
+
+| Layer | What this repository provides |
+|-------|-------------------------------|
+| Net — communication and state primitives | QUIC tunnels and the peer directory (`pkg/tunnel`, `outpostnet-agent`); generic state replication primitives (`pkg/state`: durable store, gossip, tombstone GC, read-only replication status). OutpostMesh and OutpostLet embed `pkg/state`; this repository does not interpret their state |
+| Service — stable access | `outpostnet-service`: stable local entries for `<service>@<node_id>` ([docs](docs/service-layer.md)) |
+| Range — observation | `outpostnet-agent` and `outpostnet-service` expose loopback observation endpoints for OutpostRange ([docs](docs/observation.md)); upgrade Range before them |
+
+Mesh (entities, tasks, objects) and Let (autonomous scheduling) live in their
+own repositories and report their own replication status.
+
 ## Comparison with FRP
 
 | | OutpostNet v2 | FRP |
@@ -168,6 +182,8 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
 - [Service Layer (outpostnet-service)](docs/service-layer.md)
+- [Observation producers (Range)](docs/observation.md)
+- [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
 - [Deployment Examples](deploy/examples/)
 
 ## Supported Platforms

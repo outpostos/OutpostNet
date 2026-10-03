@@ -141,6 +141,7 @@ When `node_id` is set, the agent listens on `management.socket_path` using HTTP 
 | `--metrics-addr <addr>` | `:9090` | Metrics address (overrides config) |
 | `--health-addr <addr>` | `:8082` | Health check address (overrides config) |
 | `--persistence-dir <path>` | `/var/lib/outpostnet` | Persistence directory (overrides config) |
+| `--observation-addr <addr>` | `127.0.0.1:17960` | Loopback OutpostRange observation endpoint; empty disables it. Needs `node_id` ([observation.md](observation.md)) |
 
 ### Health Check Endpoints
 
@@ -186,6 +187,7 @@ address changes at runtime go through `PUT /v1/peers`.
 | `--node-id <id>` | — | Node ID override |
 | `--health-addr <addr>` | `:8083` | Health address override |
 | `--watch-interval <dur>` | `5s` | Config poll interval for in-place export changes; `0` disables |
+| `--observation-addr <addr>` | `127.0.0.1:17961` | Loopback OutpostRange observation endpoint; empty disables it ([observation.md](observation.md)) |
 
 ---
 
@@ -257,6 +259,10 @@ imports:
 | agent health_addr | `:8082` |
 | agent metrics addr | `:9090` |
 | agent persistence dir | `/var/lib/outpostnet` |
+| agent observation addr | `127.0.0.1:17960` |
+| service health_addr | `:8083` |
+| service management socket | `/run/outpostnet/service.sock` |
+| service observation addr | `127.0.0.1:17961` |
 | server socket | `/var/run/outpostnet/server.sock` |
 | server heartbeat_timeout | `30s` |
 | sidecar heartbeat_interval | `10s` |

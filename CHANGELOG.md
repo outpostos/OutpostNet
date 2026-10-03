@@ -2,6 +2,23 @@
 
 All notable changes to OutpostNet will be documented in this file.
 
+## [Unreleased]
+
+Outpost OS four-layer refactor (Net state primitives / Service stable access / Range observation).
+
+### Added
+- `pkg/state`: generic state replication primitives — memory and durable stores, gossip push/pull and anti-entropy over authenticated `/state/v1`, tombstone GC with GC horizon and snapshot resync, durable log compaction, read-only `ReplicationStatus` including push-round catch-up (`OutboundRoundCaughtUp`, `OutboundRoundTime`). Used by OutpostMesh and OutpostLet.
+- `outpostnet-service`: OutpostService stable entries for `<service>@<node_id>`; included in `make release`.
+- Loopback OutpostRange observation endpoints on `outpostnet-agent` (`--observation-addr`, default `127.0.0.1:17960`) and `outpostnet-service` (default `127.0.0.1:17961`). Upgrade OutpostRange before these components.
+
+### Removed
+- `pkg/tunnel`: `Client.ServeImport` (use `pkg/service` entries or `outpostnet-service`).
+- `pkg/state`: decoding a bare-integer `protocol_version`; the wire form is `{"major":M,"minor":N}`.
+- Makefile `docker-build` and `docker-build-combined` targets, whose Dockerfiles were deleted in v1.0.1 (`2158a5b`).
+
+### Build
+- Building from source needs the private module `github.com/outpostos/OutpostRange` (`GOPRIVATE`/`GONOSUMDB`, SSH access).
+
 ## [2.0.0] - 2026-08-12
 
 Second major release. OutpostNet 2.0 adds full Kubernetes-native integration: a controller, mutating webhook, sidecar auto-injection, and cross-region peer discovery — while keeping the standalone agent from v1.x fully supported.

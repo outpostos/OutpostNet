@@ -1,9 +1,11 @@
 # OutpostNet 观测生产者（四层改造 票10-B-Net）
 
-> 状态：R1 实施说明。契约是 OutpostRange `563b72a` 的
-> `proto/outpostrange/observation/v1alpha1/observation.proto`，生产者规则见 Range
-> `docs/four-layer-producer-guide.md`。本文只写本仓库实际报告什么、从哪里取、哪些不报。
-> 落地位置与测试见第 8 节。
+> 状态：R1 实施说明（票10-B-Net 落地，票11-D 按已合并现状校订）。契约是 go.mod 钉住的 OutpostRange
+> `25a9bf2` 的 `proto/outpostrange/observation/v1alpha1/observation.proto`，生产者规则见 Range
+> `docs/four-layer-producer-guide.md`。本仓库报告的 111/15、116/20 字段在 `563b72a`（10-B 时的基线）与
+> `25a9bf2` 之间没有变化；其间新增的契约字段（10-D2 的 `PeerReplicationProgress` 10/11、
+> `LetRuntimeStatus` 8/9，10-F 的 `COMPONENT_RANGE_LOADGEN`）都不属于 Net 进程的事实。
+> 本文只写本仓库实际报告什么、从哪里取、哪些不报。落地位置与测试见第 8 节，升级顺序见第 7 节。
 
 ## 1. 谁暴露观测端点
 
@@ -24,7 +26,7 @@ HTTP 形态沿用 Range `docs/observation-api.md`：
 
 - `GET /outpostrange/observation/v1alpha1/snapshot` → `Snapshot`（protobuf JSON）。
 - `GET /outpostrange/observation/v1alpha1/events?after_seq=<n>` → SSE，每条 `data:` 是一个 `Event`。
-  `after_seq` 早于保留窗口时回 `410 Gone`。range-agent 563b72a 收到 410 后用同一 `after_seq` 重试，
+  `after_seq` 早于保留窗口时回 `410 Gone`。range-agent（563b72a 至 25a9bf2）收到 410 后用同一 `after_seq` 重试，
   不会重新取快照（Range 侧已记账，见第 9 节）。
 - `seq` 高 44 位为进程启动 epoch（`UnixMilli << 20`），低 20 位为 epoch 内序号。
 
@@ -50,8 +52,9 @@ HTTP 形态沿用 Range `docs/observation-api.md`：
 ### Net 复制进度（`net_replication_progress` 112、快照字段 16）
 
 OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`），因此 Net 进程**不报** 112/16。
-`pkg/state` 只提供公共只读复制状态接口（第 4 节），由内嵌它的 OutpostLet / OutpostMesh 在各自的流上报告
-（例如 `scope = outpostlet.scheduling`）。Net 进程流上 Net 复制一栏在 Range 中显示 missing 是真实情况。
+`pkg/state` 只提供公共只读复制状态接口（第 4 节），由内嵌它的宿主在各自的流上报告：OutpostLet 报 112
+（`scope = outpostlet.metadata`），OutpostMesh 报 114（`scope = outpostmesh.entities`）。Net 进程流上
+Net 复制一栏在 Range 中显示 missing 是真实情况。
 
 ## 3. Service 层报告的本地事实（`service_access_changed` 116、快照字段 20）
 
@@ -101,9 +104,17 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
   失败即清除，退避跳过的轮次不算轮次。它在 `OutboundCaughtUp` 为 true 时必为 true。`OutboundRoundTime`
   是最近一次追平轮次的开始时间，失败后保留，可据此判断结论新鲜度与“落后起始时间”。两者都不参与墓碑 GC
   确认门（仍只看确认位置），`CaughtUp` 定义不变。
-- Net 自身观测生产者（111/15 `net_peers`）不投影 `ReplicationStatus`，映射由 Let/Mesh 宿主完成。Range 契约
-  （563b72a `ReplicationProgress`）目前只有 `outbound_caught_up`，没有新口径字段；新字段的契约与投影待 10-D2（Range）
-  与 10-D3（生产者映射），在那之前不要把新口径塞进 `outbound_caught_up`（会改变现有契约语义）。
+- 契约与映射（已合并）：Range 10-D2（PR #18，`8f31afb`，包含在 `25a9bf2` 中）在 `PeerReplicationProgress` 增加
+  `outbound_round_caught_up`（10）与 `outbound_round_time`（11），语义与上面两个字段逐一对应；
+  `outbound_caught_up` 仍按原口径（零积压）填写，不能用新口径代填。生产者映射由内嵌 `pkg/state` 的宿主完成：
+  OutpostLet 10-D3（PR #67，`783a4b6`）在 112 `outpostlet.metadata` 每 peer 映射，OutpostMesh 10-D3（PR #50，
+  `797c97d`）在 114 `outpostmesh.entities` 每 peer 映射；两者都只在测得时设置（尚无追平轮次时不填 `outbound_round_time`）。
+- Net 自身生产者不投影 `ReplicationStatus`（含这两个字段）：Net 进程（`outpostnet-agent`、`outpostnet-service`）
+  不构造 `GossipEngine`，没有可报告的复制状态；它报告的 111/15 `net_peers` 是隧道连接事实，与复制追平无关，
+  把复制字段挂到 Net 流上会冒充一个不存在的复制者。
+- 读数注意：没有本地写入时，被分区的 peer 也没有可推送的内容，`OutboundCaughtUp` 为 true，`OutboundRoundCaughtUp`
+  随之为 true（10-D3-Let 真实装配测试实测）。“分区时为 false”的前提是存在对端未确认的本地写入；判断对端是否连通
+  要结合 `InboundCaughtUp`、`LastError`/`LastErrorTime`（Range 投影即如此）。
 - 并发安全：只在引擎锁内复制每 peer 状态，不持锁调用 Store。
 - 不泄露凭据：`pkg/state` 的全部日志与导出 API 返回的错误只以“密码已遮蔽”的 peer 地址出现；任何 `Syncer` 的每 peer 错误在返回、记日志、进状态前去掉地址里的密码；`HTTPSyncer` 把 bearer token 与对端回显的 URL 密码替换为 `[REDACTED]`。脱敏收敛在 `pkg/state/redact.go`。
 - `pkg/state` 不依赖 OutpostRange；映射到 proto 由宿主完成。
@@ -127,12 +138,18 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 - 观测只读产品状态（隧道状态、入口打开流的结果），不写产品状态，不新增产品到 Range 的运行期网络依赖。
 - 不实现故障注入。
 
-## 7. 依赖与构建
+## 7. 依赖、构建与升级顺序
 
-- 新增依赖 `github.com/outpostos/OutpostRange`（私有仓）的生成 proto 包，仅 `internal/observation`（及 `cmd/`）引用。
+- 依赖 `github.com/outpostos/OutpostRange`（私有仓，go.mod 钉在 `25a9bf2`，票11-D 对齐）的生成 proto 包，
+  仅 `internal/observation`、`internal/agent`、`internal/servicehost` 与 `cmd/` 引用。
   `pkg/state`、`pkg/tunnel`、`pkg/service` 不得依赖 OutpostRange，由边界测试强制。
 - 构建需要 `GOPRIVATE=github.com/outpostos GONOSUMDB=github.com/outpostos`，私有仓经 SSH
-  （`git config url.git@github.com:.insteadOf https://github.com/`）。GitHub Actions 没有私有模块凭据时会拉取失败（CI-01）。
+  （`git config url.git@github.com:.insteadOf https://github.com/`）。GitHub Actions 经只读部署密钥拉取（CI-01，
+  `.github/workflows/ci.yml`，secret `OUTPOSTRANGE_DEPLOY_KEY`）。
+- 升级顺序：**先升级 Range（collector、range-agent、judge）到不低于 go.mod 所钉的版本，再升级 Net 进程。**
+  Range 用拒绝未知字段的 protobuf JSON 解码（Range `docs/four-layer-producer-guide.md` 第 1 节）：生产者若带着
+  旧 Range 不认识的字段上报，旧 range-agent 解析失败并重连、旧 collector 回 400，观测停滞（产品不受影响）。
+  Net 当前报告的字段旧到 `563b72a` 也认识，所以这条顺序对本仓库是约束而非已知故障。
 
 ## 8. 落地位置
 
@@ -144,7 +161,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 | 观测生产者 | `internal/observation/`：`eventlog.go`（有界日志、seq epoch、慢订阅者丢弃）、`reporter.go`（快照）、`netpeers.go`（111/15 与采样）、`serviceaccess.go`（116/20，包装入口开流）、`server.go`（回环 HTTP/SSE） |
 | 宿主接线 | `internal/agent/observation.go`（`StartObservation`，两个宿主共用）、`internal/agent/agent.go`（`EnableObservation`）、`internal/servicehost/observation.go` + `host.go` |
 | 命令 | `cmd/outpostnet-agent`、`cmd/outpostnet-service` 的 `--observation-addr` |
-| Range 契约解析（测试） | `internal/observation/observationtest`：按 range-agent 563b72a 的做法严格解码（拒绝未知字段）、按流校验 seq、生成 117 订阅快照事件。Range 的 `internal/rangeagent`、`internal/observationjson` 受 Go internal 规则限制不能从本模块导入，故按其源码复刻 |
+| Range 契约解析（测试） | `internal/observation/observationtest`：按 range-agent 563b72a 的做法严格解码（拒绝未知字段）、按流校验 seq、生成 117 订阅快照事件。Range 的 `internal/rangeagent`、`internal/observationjson` 受 Go internal 规则限制不能从本模块导入，故按其源码复刻；票11-D 核对这两个目录在 `563b72a` 与 `25a9bf2` 之间只有测试文件变化，复刻仍有效 |
 | 边界测试 | `pkg/service/boundary_test.go` `TestNetLibrariesDoNotDependOnOutpostRange` |
 
 测试：
@@ -163,7 +180,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 ## 9. 已知限制
 
 - `rtt_ms`、被动接受的隧道连接、Net 复制进度（本仓进程不运行复制）不报。
-- range-agent 563b72a 遇到 `410 Gone` 时以同一 `after_seq` 重试，不重新取快照（`RunObservationEndpoint` 只在启动时取快照）；
+- range-agent（563b72a 至 25a9bf2）遇到 `410 Gone` 时以同一 `after_seq` 重试，不重新取快照（`RunObservationEndpoint` 只在启动时取快照）；
   若订阅者落后超过保留窗口（4096 条）会一直拿到 410。属于 Range 侧行为，记录不改。
 - “后端不回数据就关连接”会被判为 `UNREACHABLE`（第 3 节）。
 - Net 链路的变化检测包含 `last_error_time`：分区期间每次重连失败都会刷新它，采样（1s）发现后发一条
