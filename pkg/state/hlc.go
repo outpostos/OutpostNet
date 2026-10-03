@@ -119,6 +119,13 @@ func (c *hlcClock) Update(remote Timestamp) (Timestamp, error) {
 	return c.last, nil
 }
 
+// Current returns the last issued or restored timestamp.
+func (c *hlcClock) Current() Timestamp {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.last
+}
+
 func (c *hlcClock) Restore(ts Timestamp) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -67,6 +67,24 @@ Durable store:
   record is durably saved. If progress saving fails, the sync returns an error
   and recovery can safely replay the unconfirmed entries.
 
+Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
+
+- `TombstoneRetention` (both stores, default 0 = off) enables tombstone
+  collection. Local stores call `CollectTombstones`; stores attached to a
+  `GossipEngine` must collect through `GossipEngine.CollectTombstones`, which
+  additionally waits until every current peer acknowledged the tombstone. Its
+  `PeerProvider` must return the configured membership, not the live peers; an
+  empty peer list is refused with `ErrTombstoneGCNoPeers`.
+- Collected keys raise the store's GC horizon. `Apply`, snapshot resync
+  included, refuses an absent key at or below the horizon. Peers with a lower
+  horizon, or whose digest still holds a value collected here, are refused with
+  `ResyncRequiredError` (HTTP 410) and resync from a snapshot. A consumer position
+  below the GC floor reports `NeedsSnapshot`.
+- `DurableStore.Compact` rewrites the log as a snapshot through a synced temp
+  file, rename and directory sync; `CompactionMinRecords` (default 0 = off)
+  enables `CompactIfNeeded`. A directory sync failure after rename makes the
+  store fail-closed.
+
 Policies:
 
 - `MergePolicy` is the single source for Store merge ordering and Gossip digest
@@ -102,9 +120,11 @@ Boundaries:
   are outside what this store can detect; epoch and lineage guards for a
   directory that was deleted or replaced underneath the node are tracked
   separately.
-- `CompareAndSet` appends while holding the store's entry lock, so a slow `fsync`
-  can delay concurrent readers of that store; `Put`, `Delete`, and `Apply` append
-  outside it. This lock scope is a known bound, not a correctness claim, and
-  narrowing it is tracked with durable-log compaction rather than claimed here.
+- `CompareAndSet` and `Apply` append while holding the store's entry lock, so a
+  slow `fsync` can delay concurrent readers of that store; `Put` and `Delete`
+  append outside it. This lock scope is a known bound, not a correctness claim;
+  ticket 03b evaluated it and left it unchanged (still open). `Compact` holds the
+  commit lock and the log lock for the whole rewrite, so writers wait for it,
+  while readers are blocked only while the entry map is copied.
 - It does not import or adapt OutpostLet legacy wire formats; that remains ticket
   04.

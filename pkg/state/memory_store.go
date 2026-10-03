@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // MemoryStoreConfig configures an in-memory state replica.
@@ -15,9 +16,14 @@ type MemoryStoreConfig struct {
 	NodeID        string
 	Policy        MergePolicy
 	PhysicalClock PhysicalClock
+	// TombstoneRetention enables tombstone GC: CollectTombstones removes
+	// tombstones whose HLC wall time is at least this old. Zero (the default)
+	// keeps every tombstone. See docs/state-tombstone-gc.md.
+	TombstoneRetention time.Duration
 }
 
-// MemoryStore is an in-memory state replica. It keeps tombstones in memory.
+// MemoryStore is an in-memory state replica. It keeps tombstones in memory
+// until they are collected (opt-in, TombstoneRetention).
 type MemoryStore struct {
 	*storeCore
 }
@@ -27,7 +33,7 @@ var _ Store = (*MemoryStore)(nil)
 
 // NewMemoryStore creates a state replica.
 func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock)
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +52,18 @@ type storeCore struct {
 	// the replica stops serving (DurableStore.Close).
 	ready atomic.Bool
 
+	// retention is the minimum tombstone age before collection; 0 disables GC.
+	retention time.Duration
+	// replicated is set once a GossipEngine owns replication of this store, after
+	// which peer-blind collection is refused.
+	replicated atomic.Bool
+	// horizon and floor are guarded by mu. See GCHorizon and GCFloor.
+	horizon Timestamp
+	floor   uint64
+	// purgeHook persists purge sets. It is set by DurableStore before the store
+	// is published and is nil for MemoryStore.
+	purgeHook func(purgeSet) error
+
 	commitMu    sync.Mutex
 	mu          sync.RWMutex
 	observersMu sync.RWMutex
@@ -53,9 +71,12 @@ type storeCore struct {
 	nextObsID   uint64
 }
 
-func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock) (*storeCore, error) {
+func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, retention time.Duration) (*storeCore, error) {
 	if nodeID == "" {
 		return nil, fmt.Errorf("state store node id is required")
+	}
+	if retention < 0 {
+		return nil, fmt.Errorf("state tombstone retention must not be negative")
 	}
 	core := &storeCore{
 		nodeID:    nodeID,
@@ -63,6 +84,7 @@ func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock) (*s
 		entries:   make(map[string]Entry),
 		hlc:       newHLCClock(physical),
 		observers: make(map[uint64]func(Entry)),
+		retention: retention,
 	}
 	core.ready.Store(true)
 	return core, nil
@@ -134,8 +156,8 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 	if persist != nil {
 		// The durable append, including its fsync and any rollback, runs while mu is
 		// held here, so a slow disk delays concurrent readers of this store.
-		// Put/Delete/Apply append outside mu. This lock scope is pre-existing and
-		// narrowing it is tracked with durable-log compaction, not claimed here.
+		// Put/Delete append outside mu; Apply also appends under mu. This lock scope
+		// is pre-existing; 03b evaluated it and left narrowing it open.
 		if err := persist(entry); err != nil {
 			s.mu.Unlock()
 			return Entry{}, false, err
@@ -184,6 +206,9 @@ func (s *storeCore) Apply(ctx context.Context, incoming Entry) (bool, error) {
 	return s.apply(ctx, incoming, nil)
 }
 
+// apply merges a remote entry. Every path, snapshot resync included, refuses an
+// absent key at or below the local GC horizon: a peer's horizon says nothing
+// about whether that peer saw the deletes this store collected.
 func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entry) error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -213,6 +238,15 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 		s.mu.Unlock()
 		return false, nil
 	}
+	if !found && s.beyondHorizonLocked(incoming) {
+		horizon := s.horizon
+		s.mu.Unlock()
+		if incoming.Deleted {
+			// An absent key already reads as deleted; an old tombstone changes nothing.
+			return false, nil
+		}
+		return false, &BeyondGCHorizonError{Key: incoming.Key, EntryHLC: incoming.Version.HLC, Horizon: horizon}
+	}
 	entry := copyEntry(incoming)
 	entry.Position = s.clock.Merge(maxUint64(entry.Position, entry.ChangeID.Counter))
 	if persist != nil {
@@ -240,6 +274,7 @@ func (s *storeCore) LocalStatus() LocalStatus {
 func (s *storeCore) CheckConsumerPosition(position uint64) ConsumerPositionStatus {
 	current := s.CurrentPosition()
 	ready := s.ready.Load()
+	floor := s.GCFloor()
 	status := ConsumerPositionStatus{
 		Ready:           ready,
 		CurrentPosition: current,
@@ -252,6 +287,9 @@ func (s *storeCore) CheckConsumerPosition(position uint64) ConsumerPositionStatu
 	case position == 0:
 		status.NeedsSnapshot = true
 		status.Reason = "no prior position; start from snapshot"
+	case position < floor:
+		status.NeedsSnapshot = true
+		status.Reason = "consumer position precedes removed tombstones (GC floor)"
 	case position > current:
 		status.NeedsSnapshot = true
 		status.Reason = "consumer position is ahead of local state"
