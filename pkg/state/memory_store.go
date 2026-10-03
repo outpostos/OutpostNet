@@ -60,6 +60,10 @@ type storeCore struct {
 	// horizon and floor are guarded by mu. See GCHorizon and GCFloor.
 	horizon Timestamp
 	floor   uint64
+	// adopted is the highest peer horizon adopted through a snapshot resync. A
+	// requester below it is not vouched for (removals done elsewhere). Guarded by
+	// mu.
+	adopted Timestamp
 	// purgeHook persists purge sets. It is set by DurableStore before the store
 	// is published and is nil for MemoryStore.
 	purgeHook func(purgeSet) error

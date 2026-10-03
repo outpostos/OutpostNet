@@ -83,6 +83,8 @@ type purgeSet struct {
 	Horizon Timestamp
 	Floor   uint64
 	Removed []removedEntry
+	// Adopted is the peer horizon adopted by a resync; zero for collection.
+	Adopted Timestamp
 }
 
 func (t Timestamp) isZero() bool { return t == Timestamp{} }
@@ -112,10 +114,21 @@ func timestampValue(ts *Timestamp) Timestamp {
 // snapshot resync. MemoryStore and DurableStore implement it.
 type gcStore interface {
 	GCHorizon() Timestamp
+	GCFloor() uint64
+	adoptedHorizon() Timestamp
 	tombstoneGCEnabled() bool
 	markReplicated()
 	collectTombstones(ctx context.Context, safePosition uint64, gated bool) (TombstoneGCResult, error)
 	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error)
+}
+
+// peerAckStore is implemented by stores that persist, with each acknowledged
+// push position, the node ID that answered at that peer address. DurableStore
+// implements it; GossipEngine uses it to vouch for lower-horizon requesters
+// across restarts.
+type peerAckStore interface {
+	savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error
+	peersAnsweringAs(nodeID string) []string
 }
 
 type resyncResult struct {
@@ -136,6 +149,13 @@ func (s *storeCore) GCFloor() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.floor
+}
+
+// adoptedHorizon returns the highest peer horizon adopted through a resync.
+func (s *storeCore) adoptedHorizon() Timestamp {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.adopted
 }
 
 func (s *storeCore) tombstoneGCEnabled() bool { return s.retention > 0 }
@@ -209,6 +229,7 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	}
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
 	s.floor = maxUint64(s.floor, set.Floor)
+	s.adopted = maxTimestamp(s.adopted, set.Adopted)
 	s.clock.SetAtLeast(s.floor)
 	// Local writes must order after every removed or adopted entry; otherwise a
 	// store whose physical clock lags the horizon would issue writes at or below
@@ -238,6 +259,11 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	s.mu.RLock()
 	set := purgeSet{Horizon: maxTimestamp(s.horizon, peerHorizon), Floor: s.floor}
 	horizonChanged := set.Horizon != s.horizon
+	if horizonChanged {
+		// Removals behind the adopted part of the horizon were done by the peer;
+		// this store cannot vouch that any requester acknowledged them.
+		set.Adopted = peerHorizon
+	}
 	for _, entry := range s.entries {
 		if _, ok := held[entry.Key]; ok {
 			continue
@@ -287,8 +313,9 @@ func (s *storeCore) beyondHorizonLocked(entry Entry) bool {
 // Both stores must keep the GC surface; a regression would silently disable
 // gated collection and resync in GossipEngine.
 var (
-	_ gcStore = (*MemoryStore)(nil)
-	_ gcStore = (*DurableStore)(nil)
+	_ gcStore      = (*MemoryStore)(nil)
+	_ gcStore      = (*DurableStore)(nil)
+	_ peerAckStore = (*DurableStore)(nil)
 	_ interface {
 		CompactIfNeeded(context.Context) (bool, error)
 	} = (*DurableStore)(nil)

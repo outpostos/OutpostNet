@@ -44,8 +44,10 @@ type GossipEngine struct {
 
 type peerState struct {
 	lastPushPosition uint64
-	failures         int
-	nextAttempt      time.Time
+	// nodeID is the node that answered the latest acknowledged push here.
+	nodeID      string
+	failures    int
+	nextAttempt time.Time
 
 	// Exchange results reported by ReplicationStatus. Times are the local
 	// clock; zero means "not in this process".
@@ -178,7 +180,7 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 			continue
 		}
 		pushed := g.pushSuccessPosition(addr, since, changes, resp)
-		if err := g.recordPushSuccess(ctx, addr, pushed); err != nil {
+		if err := g.recordPushSuccess(ctx, addr, pushed, resp); err != nil {
 			errs = append(errs, g.recordPeerFailure(addr, "push-progress", err, now))
 			continue
 		}
@@ -266,7 +268,7 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 		return nil, err
 	}
 	horizon := g.storeHorizon()
-	if err := g.checkRequesterHorizon(horizon, req.GCHorizon); err != nil {
+	if err := g.checkRequesterHorizon(ctx, horizon, req.GCHorizon, req.SourceNodeID); err != nil {
 		return nil, err
 	}
 	var accepted, rejected int
@@ -299,6 +301,7 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 		Rejected:        rejected,
 		Rejections:      rejections,
 		GCHorizon:       timestampPtr(g.storeHorizon()),
+		NodeID:          g.nodeID,
 	}, nil
 }
 
@@ -312,9 +315,11 @@ func (g *GossipEngine) HandlePull(ctx context.Context, req PullRequest) ([]Entry
 }
 
 // HandlePullResponse answers a pull with paging and GC horizon metadata. A
-// digest pull from a requester whose GC horizon is lower than ours, or whose
-// digest still holds a value we collected, is refused with ResyncRequiredError. Position pulls (no digest) are always served: they
-// are how a lagging requester pages through our snapshot during resync.
+// digest pull from a requester whose GC horizon is lower than ours and that we
+// cannot vouch for, or whose digest still holds a value we collected, is
+// refused with ResyncRequiredError. Position pulls (no digest) are always
+// served: they are how a lagging requester pages through our snapshot during
+// resync.
 func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) (*PullResponse, error) {
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
 		return nil, err
@@ -328,7 +333,7 @@ func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) 
 		GCHorizon:       timestampPtr(horizon),
 	}
 	if len(req.Digest) > 0 {
-		if err := g.checkRequesterHorizon(horizon, req.GCHorizon); err != nil {
+		if err := g.checkRequesterHorizon(ctx, horizon, req.GCHorizon, req.SourceNodeID); err != nil {
 			return nil, err
 		}
 		if err := g.checkRequesterHoldsCollected(ctx, horizon, req.Digest); err != nil {
@@ -466,8 +471,16 @@ func (g *GossipEngine) peerLastPushPosition(ctx context.Context, addr string) (u
 	return g.peerStateLocked(addr).lastPushPosition, nil
 }
 
-func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushed uint64) error {
-	if progress, ok := g.store.(PeerProgressStore); ok {
+func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushed uint64, resp *PushResponse) error {
+	var nodeID string
+	if resp != nil {
+		nodeID = resp.NodeID
+	}
+	if acks, ok := g.store.(peerAckStore); ok {
+		if err := acks.savePeerAck(ctx, addr, nodeID, pushed); err != nil {
+			return err
+		}
+	} else if progress, ok := g.store.(PeerProgressStore); ok {
 		if err := progress.SavePeerProgress(ctx, addr, pushed); err != nil {
 			return err
 		}
@@ -477,6 +490,9 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	state := g.peerStateLocked(addr)
 	if pushed > state.lastPushPosition {
 		state.lastPushPosition = pushed
+	}
+	if nodeID != "" {
+		state.nodeID = nodeID
 	}
 	state.failures = 0
 	state.nextAttempt = time.Time{}
@@ -767,12 +783,65 @@ func (g *GossipEngine) localHorizon() *Timestamp {
 }
 
 // checkRequesterHorizon refuses an incremental exchange from a requester whose
-// GC horizon is lower than ours: it may hold or miss state we collected.
-func (g *GossipEngine) checkRequesterHorizon(local Timestamp, requester *Timestamp) error {
-	if local.isZero() || timestampValue(requester).Compare(local) >= 0 {
+// GC horizon is lower than ours unless we can vouch that it received every
+// tombstone we removed. A lower horizon alone only means the requester has not
+// collected yet; see docs/state-tombstone-gc.md "Requester horizon check".
+func (g *GossipEngine) checkRequesterHorizon(ctx context.Context, local Timestamp, requester *Timestamp, requesterID string) error {
+	requesterHorizon := timestampValue(requester)
+	if local.isZero() || requesterHorizon.Compare(local) >= 0 {
+		return nil
+	}
+	vouched, err := g.requesterVouched(ctx, requesterHorizon, requesterID)
+	if err != nil {
+		return err
+	}
+	if vouched {
 		return nil
 	}
 	return &ResyncRequiredError{Peer: g.nodeID, Horizon: local}
+}
+
+// requesterVouched reports whether the requester acknowledged every tombstone
+// this store removed itself (our push progress towards the address that
+// answered as requesterID reaches the GC floor) and its horizon covers every
+// horizon this store adopted from a peer, whose removals we cannot vouch for.
+func (g *GossipEngine) requesterVouched(ctx context.Context, requesterHorizon Timestamp, requesterID string) (bool, error) {
+	gs, ok := g.store.(gcStore)
+	if !ok || requesterID == "" {
+		return false, nil
+	}
+	if requesterHorizon.Compare(gs.adoptedHorizon()) < 0 {
+		return false, nil
+	}
+	floor := gs.GCFloor()
+	for _, addr := range g.peersAnsweringAs(requesterID) {
+		acknowledged, err := g.peerLastPushPosition(ctx, addr)
+		if err != nil {
+			return false, err
+		}
+		if acknowledged >= floor {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// peersAnsweringAs returns the peer addresses whose acknowledged pushes were
+// answered by nodeID, from the durable record when the store keeps one and from
+// this process otherwise.
+func (g *GossipEngine) peersAnsweringAs(nodeID string) []string {
+	var peers []string
+	if acks, ok := g.store.(peerAckStore); ok {
+		peers = acks.peersAnsweringAs(nodeID)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for addr, state := range g.peerStates {
+		if state.nodeID == nodeID {
+			peers = append(peers, addr)
+		}
+	}
+	return peers
 }
 
 // checkRequesterHoldsCollected refuses a digest pull whose digest holds a live

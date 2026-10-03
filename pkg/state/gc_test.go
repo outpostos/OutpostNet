@@ -315,13 +315,24 @@ func TestLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T) {
 	if err != nil || result.Collected != 1 {
 		t.Fatalf("node-a GC: %+v err=%v", result, err)
 	}
-	// node-b still has a zero horizon, so node-a refuses its next push and
-	// node-b adopts the horizon through a snapshot resync, dropping the tombstone.
+	// node-b still has a zero horizon, but it acknowledged the collected
+	// tombstone (ticket 03d): node-a vouches for it and accepts its push instead
+	// of forcing a snapshot resync. node-b reaches the same horizon by
+	// collecting the tombstone on its own tick.
 	if err := b.sync(t); err != nil {
 		t.Fatalf("node-b sync: %v", err)
 	}
+	if !b.store.GCHorizon().isZero() {
+		t.Fatalf("node-b was resynced although node-a can vouch for it: horizon %+v", b.store.GCHorizon())
+	}
+	if entry := mustGet(t, b.store, "doomed"); !entry.Deleted {
+		t.Fatalf("node-b lost its tombstone: %+v", entry)
+	}
+	if result, err := b.engine.CollectTombstones(ctx); err != nil || result.Collected != 1 {
+		t.Fatalf("node-b GC: %+v err=%v", result, err)
+	}
 	if b.store.GCHorizon() != a.store.GCHorizon() {
-		t.Fatalf("node-b did not adopt node-a's horizon: %+v vs %+v", b.store.GCHorizon(), a.store.GCHorizon())
+		t.Fatalf("node-b did not reach node-a's horizon: %+v vs %+v", b.store.GCHorizon(), a.store.GCHorizon())
 	}
 	assertAbsent(t, a.store, "doomed")
 	assertAbsent(t, b.store, "doomed")

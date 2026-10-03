@@ -1,0 +1,285 @@
+package state
+
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+	"testing"
+)
+
+// Ticket 03d: in a healthy cluster (no partition, every member acknowledges
+// every push) nodes collect the same tombstones on different maintenance ticks.
+// That stagger alone must never force a snapshot resync.
+
+// countingSyncer counts snapshot resync pages pulled through it.
+type countingSyncer struct {
+	loopSyncer
+	snapshots *atomic.Int64
+	strip     bool
+}
+
+func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
+	resp, err := s.loopSyncer.Push(ctx, addr, req)
+	if resp != nil && s.strip {
+		resp.NodeID = ""
+	}
+	return resp, err
+}
+
+func (s countingSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
+	if req.SincePosition == 0 {
+		// Every resync starts with the page at position 0.
+		s.snapshots.Add(1)
+	}
+	return s.loopSyncer.PullSnapshot(ctx, addr, req)
+}
+
+type churnNode struct {
+	id     string
+	store  gcTestStore
+	engine *GossipEngine
+}
+
+// gcTestStore is the store surface the churn harness needs from both stores.
+type gcTestStore interface {
+	Store
+	GCHorizon() Timestamp
+}
+
+type churnCluster struct {
+	nodes   []*churnNode
+	clock   *fixedPhysicalClock
+	net     *loopNet
+	resyncs atomic.Int64
+	// stripNodeID, when set for a pusher, removes node_id from the push
+	// responses it receives, modelling 03b peers that never send it.
+	stripNodeID map[string]bool
+}
+
+func newChurnCluster(t *testing.T, size int, durable bool) *churnCluster {
+	t.Helper()
+	cluster := &churnCluster{clock: &fixedPhysicalClock{now: 1_000_000}, net: newLoopNet(), stripNodeID: map[string]bool{}}
+	ids := make([]string, size)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("node-%d", i)
+	}
+	for _, id := range ids {
+		dir := ""
+		if durable {
+			dir = t.TempDir()
+		}
+		cluster.nodes = append(cluster.nodes, cluster.openNode(t, id, ids, dir))
+	}
+	t.Cleanup(func() {
+		for _, node := range cluster.nodes {
+			if closer, ok := node.store.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
+	})
+	return cluster
+}
+
+// openNode opens (or, for a durable dir, reopens) a node and registers its
+// engine in the loop network. Every other id is a peer.
+func (c *churnCluster) openNode(t *testing.T, id string, ids []string, dir string) *churnNode {
+	t.Helper()
+	var peers []string
+	for _, other := range ids {
+		if other != id {
+			peers = append(peers, other)
+		}
+	}
+	var store gcTestStore
+	if dir != "" {
+		store = mustDurableStore(t, DurableStoreConfig{Dir: dir, NodeID: id, PhysicalClock: c.clock, TombstoneRetention: testRetention})
+	} else {
+		store = mustGCMemoryStore(t, id, c.clock, testRetention)
+	}
+	engine, err := NewGossipEngine(GossipConfig{
+		NodeID:       id,
+		Store:        store,
+		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, strip: c.stripNodeID[id]},
+		PeerProvider: NewStaticPeerProvider(peers),
+	})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+	c.net.mu.Lock()
+	c.net.engines[id] = engine
+	c.net.mu.Unlock()
+	return &churnNode{id: id, store: store, engine: engine}
+}
+
+func (c *churnCluster) exchange(t *testing.T, node *churnNode) {
+	t.Helper()
+	for _, peer := range node.engine.peerProvider.Peers() {
+		clearPeerBackoffForTest(node.engine, peer)
+	}
+	if err := node.engine.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("%s push: %v", node.id, err)
+	}
+	if err := node.engine.AntiEntropyOnce(context.Background()); err != nil {
+		t.Fatalf("%s anti-entropy: %v", node.id, err)
+	}
+}
+
+// runTTLChurn drives a TTL workload: every round each node writes fresh keys and
+// deletes the keys it wrote ttlRounds earlier, every node exchanges with every
+// peer, and node i runs its maintenance (tombstone collection) only on the
+// rounds where round % stagger == i, so the nodes collect the same tombstones on
+// different ticks. The clock advances so tombstones age past retention.
+func runTTLChurn(t *testing.T, cluster *churnCluster, rounds int) (collected int) {
+	t.Helper()
+	ctx := context.Background()
+	const keysPerRound, ttlRounds = 3, 4
+	stagger := len(cluster.nodes) + 1
+	for round := 0; round < rounds; round++ {
+		cluster.clock.now += retentionMS() / 8
+		for index, node := range cluster.nodes {
+			for k := 0; k < keysPerRound; k++ {
+				if _, err := node.store.Put(ctx, fmt.Sprintf("%s/r%d/k%d", node.id, round, k), []byte("v")); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+				if round >= ttlRounds {
+					if _, err := node.store.Delete(ctx, fmt.Sprintf("%s/r%d/k%d", node.id, round-ttlRounds, k)); err != nil {
+						t.Fatalf("Delete: %v", err)
+					}
+				}
+			}
+			// Interleave maintenance with exchanges so that a node with a raised
+			// horizon talks to peers that have not collected yet.
+			if round%stagger == index {
+				result, err := node.engine.CollectTombstones(ctx)
+				if err != nil {
+					t.Fatalf("%s CollectTombstones: %v", node.id, err)
+				}
+				collected += result.Collected
+			}
+			cluster.exchange(t, node)
+		}
+	}
+	return collected
+}
+
+func assertChurnClusterConverged(t *testing.T, cluster *churnCluster) {
+	t.Helper()
+	for _, node := range cluster.nodes {
+		cluster.exchange(t, node)
+	}
+	want := liveKeyValues(t, cluster.nodes[0].store)
+	for _, node := range cluster.nodes[1:] {
+		if got := liveKeyValues(t, node.store); got != want {
+			t.Fatalf("live state diverged: %s has %s, %s has %s", cluster.nodes[0].id, want, node.id, got)
+		}
+		if node.store.GCHorizon().isZero() {
+			t.Fatalf("%s never collected anything; the workload did not exercise GC", node.id)
+		}
+	}
+}
+
+func TestHealthyStaggeredGCNeverForcesResync(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		size    int
+		durable bool
+		rounds  int
+	}{
+		{name: "two-replicas-memory", size: 2, rounds: 240},
+		{name: "three-replicas-memory", size: 3, rounds: 240},
+		{name: "two-replicas-durable", size: 2, durable: true, rounds: 60},
+		{name: "three-replicas-durable", size: 3, durable: true, rounds: 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := newChurnCluster(t, tc.size, tc.durable)
+			collected := runTTLChurn(t, cluster, tc.rounds)
+			assertChurnClusterConverged(t, cluster)
+			if collected == 0 {
+				t.Fatalf("no tombstone was collected; the workload did not exercise GC")
+			}
+			if got := cluster.resyncs.Load(); got != 0 {
+				t.Fatalf("healthy cluster with staggered GC performed %d snapshot resyncs (collected %d tombstones), want 0", got, collected)
+			}
+			t.Logf("%s: collected %d tombstones over %d rounds, %d resyncs", tc.name, collected, tc.rounds, cluster.resyncs.Load())
+		})
+	}
+}
+
+// stageLowerHorizon runs a short TTL load and then lets node-0 collect on its
+// own, so every other node's horizon is lower than node-0's while all of them
+// acknowledged everything node-0 collected.
+func stageLowerHorizon(t *testing.T, cluster *churnCluster) {
+	t.Helper()
+	runTTLChurn(t, cluster, 24)
+	ctx := context.Background()
+	lead := cluster.nodes[0]
+	for _, node := range cluster.nodes {
+		if _, err := node.store.Delete(ctx, node.id+"/late"); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		cluster.exchange(t, node)
+	}
+	cluster.clock.now += 2 * retentionMS()
+	if result, err := lead.engine.CollectTombstones(ctx); err != nil || result.Collected == 0 {
+		t.Fatalf("node-0 GC: %+v err=%v", result, err)
+	}
+	for _, node := range cluster.nodes[1:] {
+		if node.store.GCHorizon().Compare(lead.store.GCHorizon()) >= 0 {
+			t.Fatalf("setup: %s horizon %+v must be below node-0's %+v", node.id, node.store.GCHorizon(), lead.store.GCHorizon())
+		}
+	}
+	cluster.resyncs.Store(0)
+}
+
+// A durable responder keeps vouching for its acknowledged peers across a
+// restart and a compaction: the node ID that answered each peer address is
+// persisted with the push progress.
+func TestVouchedRequesterSurvivesRestartAndCompaction(t *testing.T) {
+	ctx := context.Background()
+	cluster := newChurnCluster(t, 2, true)
+	stageLowerHorizon(t, cluster)
+
+	lead := cluster.nodes[0]
+	durable := lead.store.(*DurableStore)
+	dir := durable.dir
+	if _, err := durable.Compact(ctx); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := durable.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cluster.nodes[0] = cluster.openNode(t, lead.id, []string{"node-0", "node-1"}, dir)
+
+	follower := cluster.nodes[1]
+	if _, err := follower.store.Put(ctx, "after-restart", []byte("x")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	cluster.exchange(t, follower)
+	if got := cluster.resyncs.Load(); got != 0 {
+		t.Fatalf("restarted responder forced %d resyncs on a peer it had vouched for", got)
+	}
+	assertStoredValue(t, cluster.nodes[0].store, "after-restart", "x")
+}
+
+// A responder never vouches for a requester whose push responses carry no
+// node_id (a 03b node): the 03b rule applies and the lower horizon resyncs.
+func TestRequesterWithoutNodeIDIsNotVouched(t *testing.T) {
+	cluster := &churnCluster{clock: &fixedPhysicalClock{now: 1_000_000}, net: newLoopNet(), stripNodeID: map[string]bool{"node-0": true}}
+	ids := []string{"node-0", "node-1"}
+	for _, id := range ids {
+		cluster.nodes = append(cluster.nodes, cluster.openNode(t, id, ids, ""))
+	}
+	stageLowerHorizon(t, cluster)
+
+	follower := cluster.nodes[1]
+	if _, err := follower.store.Put(context.Background(), "probe", []byte("x")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	cluster.exchange(t, follower)
+	if got := cluster.resyncs.Load(); got == 0 {
+		t.Fatalf("lower-horizon requester without node_id was not refused")
+	}
+	if follower.store.GCHorizon() != cluster.nodes[0].store.GCHorizon() {
+		t.Fatalf("refused requester did not resync to the responder horizon")
+	}
+}
