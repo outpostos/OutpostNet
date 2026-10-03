@@ -60,9 +60,8 @@ type storeCore struct {
 	// horizon and floor are guarded by mu. See GCHorizon and GCFloor.
 	horizon Timestamp
 	floor   uint64
-	// entryHook and purgeHook persist resync entries and purge sets. They are set
-	// by DurableStore before the store is published and are nil for MemoryStore.
-	entryHook func(Entry) error
+	// purgeHook persists purge sets. It is set by DurableStore before the store
+	// is published and is nil for MemoryStore.
 	purgeHook func(purgeSet) error
 
 	commitMu    sync.Mutex

@@ -115,13 +115,10 @@ type gcStore interface {
 	tombstoneGCEnabled() bool
 	markReplicated()
 	collectTombstones(ctx context.Context, safePosition uint64, gated bool) (TombstoneGCResult, error)
-	resyncFromSnapshot(ctx context.Context, snapshot []Entry, peerHorizon Timestamp) (resyncResult, error)
+	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error)
 }
 
 type resyncResult struct {
-	Applied int
-	// Refused counts snapshot values for keys this store already collected.
-	Refused int
 	Purged  int
 	Horizon Timestamp
 }
@@ -214,9 +211,10 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	return removed
 }
 
-// resyncFromSnapshot merges a peer's full state and then, in one atomic purge,
-// drops every local entry at or below the peer horizon that the peer does not
-// hold, and adopts that horizon.
+// finishResync completes a snapshot resync after every snapshot page was
+// applied through Apply: in one atomic purge it drops every local entry at or
+// below the peer horizon whose key the peer does not hold, and adopts that
+// horizon. held is the set of keys the peer's snapshot carried.
 //
 // Snapshot entries go through the same local horizon check as any Apply: a
 // snapshot value for a key this store collected (absent, HLC <= local horizon)
@@ -224,32 +222,18 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 // not prove the peer saw that delete. The peer still holding such a value is
 // cleaned up by its own resync from us (beyond_gc_horizon push rejection or a
 // digest pull answered with 410).
-func (s *storeCore) resyncFromSnapshot(ctx context.Context, snapshot []Entry, peerHorizon Timestamp) (resyncResult, error) {
+func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error) {
 	var result resyncResult
-	keys := make(map[string]struct{}, len(snapshot))
-	for _, entry := range snapshot {
-		keys[entry.Key] = struct{}{}
-		applied, err := s.apply(ctx, entry, s.entryHook)
-		if err != nil {
-			var beyond *BeyondGCHorizonError
-			if errors.As(err, &beyond) {
-				result.Refused++
-				continue
-			}
-			return result, fmt.Errorf("apply resync snapshot entry %q: %w", entry.Key, err)
-		}
-		if applied {
-			result.Applied++
-		}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
-
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
 	s.mu.RLock()
 	set := purgeSet{Horizon: maxTimestamp(s.horizon, peerHorizon), Floor: s.floor}
 	horizonChanged := set.Horizon != s.horizon
 	for _, entry := range s.entries {
-		if _, ok := keys[entry.Key]; ok {
+		if _, ok := held[entry.Key]; ok {
 			continue
 		}
 		if entry.Version.HLC.Compare(peerHorizon) > 0 {

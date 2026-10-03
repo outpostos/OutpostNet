@@ -204,7 +204,6 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		compactionHook:       cfg.compactionHook,
 		compactionMinRecords: cfg.CompactionMinRecords,
 	}
-	core.entryHook = store.appendEntry
 	core.purgeHook = store.appendPurge
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()

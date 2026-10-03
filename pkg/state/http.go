@@ -98,7 +98,7 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 
 // Pull retrieves entries from a remote peer.
 func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
-	resp, err := s.PullSnapshot(ctx, addr, req)
+	resp, err := s.pull(ctx, addr, req)
 	if err != nil {
 		return nil, err
 	}
@@ -106,8 +106,16 @@ func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]
 }
 
 // PullSnapshot performs a pull and returns the full response, including the
-// peer's GC horizon and paging cursor.
+// peer's GC horizon and paging cursor. A paged position pull (Limit > 0, no
+// digest) asks the peer to keep each page within this syncer's response limit.
 func (s *HTTPSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
+	if req.MaxBytes == 0 && req.Limit > 0 && len(req.Digest) == 0 {
+		req.MaxBytes = s.maxResponseBytes
+	}
+	return s.pull(ctx, addr, req)
+}
+
+func (s *HTTPSyncer) pull(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
 	if req.PolicyID == "" {
 		req.PolicyID = s.policyID

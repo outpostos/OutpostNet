@@ -2,9 +2,11 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -340,11 +342,70 @@ func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) 
 		return nil, err
 	}
 	resp.Entries = entries
-	if req.Limit > 0 && len(entries) == req.Limit {
+	more := req.Limit > 0 && len(entries) == req.Limit
+	if req.MaxBytes > 0 {
+		fit, err := fitPullPage(resp, req.MaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if fit < len(entries) {
+			resp.Entries = entries[:fit]
+			more = true
+		}
+	}
+	if more {
 		resp.More = true
-		resp.NextSincePosition = entries[len(entries)-1].Position
+		resp.NextSincePosition = resp.Entries[len(resp.Entries)-1].Position
 	}
 	return resp, nil
+}
+
+// fitPullPage returns how many leading entries of resp fit, encoded, into
+// maxBytes together with the response envelope (paging fields included). A
+// first entry that cannot fit on its own is an error: paging cannot make
+// progress past it.
+func fitPullPage(resp *PullResponse, maxBytes int64) (int, error) {
+	envelope := *resp
+	envelope.Entries = []Entry{}
+	envelope.More = true
+	envelope.NextSincePosition = math.MaxUint64
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return 0, fmt.Errorf("encode pull response envelope: %w", err)
+	}
+	// +1 for the newline the HTTP encoder appends.
+	used := int64(len(encoded)) + 1
+	for index, entry := range resp.Entries {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return 0, fmt.Errorf("encode pull entry %q: %w", entry.Key, err)
+		}
+		size := int64(len(encoded))
+		if index > 0 {
+			size++ // separating comma
+		}
+		if used+size > maxBytes {
+			if index == 0 {
+				return 0, &PullEntryTooLargeError{Key: entry.Key, Bytes: used + size, MaxBytes: maxBytes}
+			}
+			return index, nil
+		}
+		used += size
+	}
+	return len(resp.Entries), nil
+}
+
+// PullEntryTooLargeError reports that a single entry cannot be returned within
+// the requester's response limit, so a byte-bounded page cannot advance.
+type PullEntryTooLargeError struct {
+	Key      string
+	Bytes    int64
+	MaxBytes int64
+}
+
+func (e *PullEntryTooLargeError) Error() string {
+	return fmt.Sprintf("state entry %q needs a %d-byte pull response, above the requester's %d-byte response limit; raise HTTPSyncerConfig.MaxResponseBytes on the requester",
+		e.Key, e.Bytes, e.MaxBytes)
 }
 
 // LocalDigest returns the local summary using the engine policy.
@@ -540,7 +601,9 @@ type SnapshotSyncer interface {
 	PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error)
 }
 
-// resyncPageSize bounds one snapshot page so it fits the default response size.
+// resyncPageSize bounds the entry count of one snapshot page. The byte size of a
+// page is bounded separately by PullRequest.MaxBytes, which HTTPSyncer sets to
+// its response limit.
 const resyncPageSize = 256
 
 // CollectTombstones removes tombstones that are older than the store retention
@@ -586,8 +649,10 @@ func (g *GossipEngine) maintain(ctx context.Context) {
 	}
 }
 
-// resyncFrom pages through the peer's full state and lets the store merge it,
-// purge what the peer refuses and adopt the peer horizon.
+// resyncFrom pages through the peer's full state, applying each page through
+// the store's normal Apply as it arrives, and then lets the store purge what the
+// peer refuses and adopt the peer horizon. Only the set of snapshot keys is kept
+// across pages, not the entries.
 func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon Timestamp) error {
 	gs, ok := g.store.(gcStore)
 	if !ok {
@@ -598,9 +663,10 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		return fmt.Errorf("peer %s requires snapshot resync, syncer cannot pull snapshots: %w", addr, ErrTombstoneGCUnsupported)
 	}
 	var (
-		snapshot []Entry
-		since    uint64
-		horizon  Timestamp
+		held             = make(map[string]struct{})
+		since            uint64
+		horizon          Timestamp
+		applied, refused int
 	)
 	for page := 0; ; page++ {
 		resp, err := snapshotter.PullSnapshot(ctx, addr, PullRequest{
@@ -618,8 +684,27 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 			// The first page's horizon was read before any snapshot entry, so it is
 			// covered by everything the peer returns afterwards.
 			horizon = timestampValue(resp.GCHorizon)
+			if horizon.Compare(knownHorizon) < 0 {
+				return fmt.Errorf("resync snapshot from %s reports horizon %+v below the refused horizon %+v", addr, horizon, knownHorizon)
+			}
 		}
-		snapshot = append(snapshot, resp.Entries...)
+		for _, entry := range resp.Entries {
+			held[entry.Key] = struct{}{}
+			ok, err := g.store.Apply(ctx, entry)
+			if err != nil {
+				var beyond *BeyondGCHorizonError
+				if errors.As(err, &beyond) {
+					// We deleted and collected this key; the peer still holds an old
+					// value. Refuse it; the peer is cleaned up by its own resync.
+					refused++
+					continue
+				}
+				return fmt.Errorf("apply resync snapshot entry %q from %s: %w", entry.Key, addr, err)
+			}
+			if ok {
+				applied++
+			}
+		}
 		if !resp.More {
 			break
 		}
@@ -628,17 +713,14 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		}
 		since = resp.NextSincePosition
 	}
-	if horizon.Compare(knownHorizon) < 0 {
-		return fmt.Errorf("resync snapshot from %s reports horizon %+v below the refused horizon %+v", addr, horizon, knownHorizon)
-	}
-	result, err := gs.resyncFromSnapshot(ctx, snapshot, horizon)
+	result, err := gs.finishResync(ctx, held, horizon)
 	if err != nil {
 		return fmt.Errorf("resync from %s: %w", addr, err)
 	}
 	slog.Warn("state gossip: resynced from peer snapshot",
 		"peer", addr,
-		"applied", result.Applied,
-		"refused", result.Refused,
+		"applied", applied,
+		"refused", refused,
 		"purged", result.Purged,
 		"horizonWallMS", result.Horizon.WallMS,
 	)

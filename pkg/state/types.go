@@ -141,6 +141,10 @@ type PullRequest struct {
 	Digest          map[string]DigestRecord `json:"digest,omitempty"`
 	// GCHorizon is the requester's GC horizon; omitted when zero.
 	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
+	// MaxBytes bounds the encoded size of a position pull response: the
+	// responder ends the page (More) before it would exceed it. Omitted when
+	// zero (no byte bound).
+	MaxBytes int64 `json:"max_bytes,omitempty"`
 }
 
 // PullResponse is returned by the HTTP pull endpoint.
