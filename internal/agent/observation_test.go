@@ -3,10 +3,10 @@ package agent
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -59,13 +59,13 @@ func startTunnelServer(t *testing.T) (*tunnel.Server, context.CancelFunc) {
 func observedAgentConfig(t *testing.T, nodeID string, tunnels []agentconfig.TunnelConfig) *agentconfig.Config {
 	return &agentconfig.Config{
 		NodeID:      nodeID,
-		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", freePort(t)),
-		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", freePort(t))},
+		HealthAddr:  loopbackAny,
+		Metrics:     agentconfig.MetricsConfig{Addr: loopbackAny},
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 		Tunnels:     tunnels,
 		TLS:         agentconfig.TLSConfig{Insecure: true},
 		Auth:        agentconfig.AuthConfig{Token: "agent-observation-token"},
-		Management:  agentconfig.ManagementConfig{SocketPath: fmt.Sprintf("/tmp/outpostnet-obs-%d.sock", freePort(t))},
+		Management:  agentconfig.ManagementConfig{SocketPath: filepath.Join(t.TempDir(), "mgmt.sock")},
 	}
 }
 
@@ -86,11 +86,13 @@ func runObservedAgent(t *testing.T, cfg *agentconfig.Config, observationAddr str
 	})
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		resp, err := http.Get("http://" + cfg.HealthAddr + "/readyz")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return a, errCh
+		if health := a.BoundAddrs().Health; health != nil {
+			resp, err := http.Get("http://" + health.String() + "/readyz")
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return a, errCh
+				}
 			}
 		}
 		select {

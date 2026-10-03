@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -27,17 +26,13 @@ func TestCrossRegionEndToEnd(t *testing.T) {
 	t.Logf("echo server on %s", echoLn.Addr())
 
 	// 2. Start Agent A (cloud) as tunnel server.
-	agentAHealthPort := freePort(t)
-	agentAMetricsPort := freePort(t)
-	agentATunnelPort := freePort(t)
-
 	agentACfg := &agentconfig.Config{
 		Region: "cloud",
 		Tunnels: []agentconfig.TunnelConfig{
 			{
 				RemoteRegion: "edge-a",
 				Role:         "server",
-				ListenAddr:   fmt.Sprintf("127.0.0.1:%d", agentATunnelPort),
+				ListenAddr:   loopbackAny,
 			},
 		},
 		Exports: []agentconfig.ExportConfig{
@@ -47,68 +42,46 @@ func TestCrossRegionEndToEnd(t *testing.T) {
 				Protocol:  "tcp",
 			},
 		},
-		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", agentAHealthPort),
-		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", agentAMetricsPort)},
+		HealthAddr:  loopbackAny,
+		Metrics:     agentconfig.MetricsConfig{Addr: loopbackAny},
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 		TLS:         agentconfig.TLSConfig{Insecure: true},
 	}
 
-	agentA := New(agentACfg, nil)
-	ctxA, cancelA := context.WithCancel(context.Background())
-	defer cancelA()
-
-	errChA := make(chan error, 1)
-	go func() { errChA <- agentA.Run(ctxA) }()
-
-	// Wait for Agent A to be ready.
-	waitForReady(t, agentAHealthPort, 5*time.Second)
+	agentA := runAgent(t, New(agentACfg, nil))
 	t.Log("Agent A (cloud) ready")
 
 	// 3. Start Agent B (edge) as tunnel client.
-	agentBHealthPort := freePort(t)
-	agentBMetricsPort := freePort(t)
-	importPort := freePort(t)
-
 	agentBCfg := &agentconfig.Config{
 		Region: "edge-a",
 		Tunnels: []agentconfig.TunnelConfig{
 			{
 				RemoteRegion: "cloud",
 				Role:         "client",
-				RemoteAddr:   fmt.Sprintf("127.0.0.1:%d", agentATunnelPort),
+				RemoteAddr:   tunnelServerAddr(t, agentA, 0),
 			},
 		},
 		Imports: []agentconfig.ImportConfig{
 			{
 				Name:         "echo-svc",
-				ListenAddr:   fmt.Sprintf("127.0.0.1:%d", importPort),
+				ListenAddr:   loopbackAny,
 				RemoteRegion: "cloud",
 				Protocol:     "tcp",
 			},
 		},
-		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", agentBHealthPort),
-		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", agentBMetricsPort)},
+		HealthAddr:  loopbackAny,
+		Metrics:     agentconfig.MetricsConfig{Addr: loopbackAny},
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 		TLS:         agentconfig.TLSConfig{Insecure: true},
 	}
 
-	agentB := New(agentBCfg, nil)
-	ctxB, cancelB := context.WithCancel(context.Background())
-	defer cancelB()
-
-	errChB := make(chan error, 1)
-	go func() { errChB <- agentB.Run(ctxB) }()
-
-	// Wait for Agent B to be ready.
-	waitForReady(t, agentBHealthPort, 5*time.Second)
+	agentB := runAgent(t, New(agentBCfg, nil))
+	importTarget := importAddr(t, agentB, "echo-svc")
 	t.Log("Agent B (edge) ready")
-
-	// Give import proxy time to start.
-	time.Sleep(300 * time.Millisecond)
 
 	// 4. SC-1: Verify cross-region TCP connectivity.
 	t.Run("SC-1_CrossRegionConnectivity", func(t *testing.T) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", importPort), 5*time.Second)
+		conn, err := net.DialTimeout("tcp", importTarget, 5*time.Second)
 		if err != nil {
 			t.Fatalf("dial import proxy: %v", err)
 		}
@@ -136,7 +109,7 @@ func TestCrossRegionEndToEnd(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", importPort), 5*time.Second)
+				conn, err := net.DialTimeout("tcp", importTarget, 5*time.Second)
 				if err != nil {
 					errCh <- fmt.Errorf("stream %d dial: %w", i, err)
 					return
@@ -168,7 +141,7 @@ func TestCrossRegionEndToEnd(t *testing.T) {
 
 	// 6. Large data transfer through cross-region tunnel.
 	t.Run("LargeDataTransfer", func(t *testing.T) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", importPort), 5*time.Second)
+		conn, err := net.DialTimeout("tcp", importTarget, 5*time.Second)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -195,20 +168,4 @@ func TestCrossRegionEndToEnd(t *testing.T) {
 	// Cleanup.
 	agentA.Stop()
 	agentB.Stop()
-}
-
-func waitForReady(t *testing.T, port int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			// Health server is up, wait a bit more for agent to mark ready.
-			time.Sleep(300 * time.Millisecond)
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("port %d did not become reachable within %v", port, timeout)
 }

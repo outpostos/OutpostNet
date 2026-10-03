@@ -151,6 +151,12 @@ When `node_id` is set, the agent listens on `management.socket_path` using HTTP 
 | `GET /readyz` | Readiness check |
 | `GET /metrics` | Prometheus metrics |
 
+`/readyz` answers 200 only after the health and metrics servers, every `role: server` tunnel
+listener and every import entry are bound. An import whose `listen_addr` is busy is logged and
+retried in the background without blocking readiness. Any agent listen address may use port `0`;
+the agent picks a free port, and code embedding the agent reads the bound addresses with
+`Agent.BoundAddrs()` (the tests do this instead of pre-picking ports).
+
 ---
 
 ## outpostnet-service

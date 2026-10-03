@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,7 @@ type TunnelManager struct {
 	clientsByRegion map[string]*tunnel.ManagedClient
 	clientsByNode   map[string]*tunnel.ManagedClient
 	relay           *RelayManager
+	imports         map[string]*service.Entry
 
 	connectPeerClient      func(context.Context, *tunnel.ManagedClient) error
 	connectPeerClientUntil func(context.Context, *tunnel.ManagedClient)
@@ -129,6 +131,7 @@ func NewTunnelManager(cfg *agentconfig.Config, logger *slog.Logger, metrics *Met
 		metrics:         metrics,
 		clientsByRegion: make(map[string]*tunnel.ManagedClient),
 		clientsByNode:   make(map[string]*tunnel.ManagedClient),
+		imports:         make(map[string]*service.Entry),
 	}
 	tm.connectPeerClient = func(ctx context.Context, mc *tunnel.ManagedClient) error {
 		return mc.Connect(ctx)
@@ -259,7 +262,7 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 		if isServiceImport(imp) || imp.RemoteRegion != tc.RemoteRegion {
 			continue
 		}
-		go tm.serveImport(ctx, mc, imp)
+		tm.serveImport(ctx, mc, imp)
 	}
 
 	tm.logger.Info("tunnel client connected", "remote_region", tc.RemoteRegion, "addr", tc.RemoteAddr)
@@ -288,10 +291,37 @@ func (tm *TunnelManager) serveImport(ctx context.Context, mc *tunnel.ManagedClie
 	opener := service.StreamOpenerFunc(func(ctx context.Context, t service.Target) (io.ReadWriteCloser, error) {
 		return openTrackedStream(ctx, mc, t.Service)
 	})
-	service.NewEntry(service.EntryConfig{
+	tm.runImportEntry(ctx, imp.Name, service.NewEntry(service.EntryConfig{
 		Target:     service.Target{Service: imp.Name, Region: imp.RemoteRegion},
 		ListenAddr: imp.ListenAddr,
-	}, opener, tm.logger).Run(ctx)
+	}, opener, tm.logger))
+}
+
+// runImportEntry binds entry before returning, so the import accepts
+// connections (and a port 0 is resolved) by the time the agent is ready, then
+// serves it in the background. A failed bind is logged and left to the
+// entry's re-listen loop, as before.
+func (tm *TunnelManager) runImportEntry(ctx context.Context, key string, entry *service.Entry) {
+	if err := entry.Listen(); err != nil {
+		tm.logger.Warn("import listen failed; retrying", "import", key, "error", err)
+	}
+	tm.mu.Lock()
+	tm.imports[key] = entry
+	tm.mu.Unlock()
+	go entry.Run(ctx)
+}
+
+// ImportAddrs returns the bound address of every import entry, keyed by
+// service (service imports) or name (static imports); nil while an entry is
+// not listening.
+func (tm *TunnelManager) ImportAddrs() map[string]net.Addr {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	addrs := make(map[string]net.Addr, len(tm.imports))
+	for key, entry := range tm.imports {
+		addrs[key] = entry.Addr()
+	}
+	return addrs
 }
 
 // StartDynamicImports serves every "<service>@<node_id>" import as a Service
@@ -307,7 +337,7 @@ func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
 			continue
 		}
 		entry := service.NewEntry(service.EntryConfig{Target: ref.Target(), ListenAddr: imp.ListenAddr}, service.NetOpener(tm), tm.logger)
-		go entry.Run(ctx)
+		tm.runImportEntry(ctx, imp.Service, entry)
 	}
 }
 
