@@ -114,4 +114,4 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 - 端点切换期间（重连退避初始 1s）新连接会被入口立即关闭，不排队等待；应用需自行重试。
 - 不承诺在途连接无损迁移（见第 4 节）。
 - 本票只在单机多进程/同进程多监听上验证；多台物理机/真实网络下未验证。
-- 既有问题（本票未改）：`tunnel.ManagedClient` 的在途流计数 `sync.WaitGroup` 在 `GracefulShutdown` 等待期间仍可能被 `Add`，`go test -race ./internal/agent` 偶发报告于 relay 关停路径（`TestRelayDirectAndRelay`）。
+- `tunnel.ManagedClient.GracefulShutdown` 开始后不再接受新流（`OpenServiceStream`/`OpenRelayStream` 返回 `net.ErrClosed`），只等待已登记的在途流，超时后强制关闭。（票09b 已修复原 `sync.WaitGroup` 在等待期间被 `Add` 的竞态。）
