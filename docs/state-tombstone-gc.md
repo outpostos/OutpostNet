@@ -91,8 +91,17 @@ exact identities removed) is committed before the entries leave memory.
   also triggers a resync of the pusher.
 * **Snapshot resync.** The resyncing node pages through the peer's full state
   (`PullRequest{SincePosition, Limit, MaxBytes}` without digest, never refused)
-  and applies each page as it arrives through normal `Apply` (LWW plus the local
-  horizon rejection above; only the set of snapshot keys is kept across pages).
+  and merges each page as it arrives with the same rules as `Apply` (validation,
+  HLC offset, LWW plus the local horizon rejection above; only the set of
+  snapshot keys is kept across pages). The accepted entries of a page are
+  committed together (ticket 03d, 03b F4): `DurableStore` writes them as one
+  `batch` record with one fsync, so a resync costs one fsync per page plus one
+  for the purge instead of one per entry (522 entries: 523 fsyncs before, 4
+  after). A page is all or nothing: an entry that fails validation or the HLC
+  offset check aborts the page before anything is written, the page becomes
+  visible only after its record is durable, a failed write is rolled back, and
+  a crash in the middle of the record leaves an unterminated line that recovery
+  discards, so a cold start sees whole pages only.
   Then it atomically (one `purge` record) removes every local entry whose HLC is
   `<= peer horizon` and whose key the peer does not have, and adopts the peer
   horizon, raising its HLC to at least that horizon (the same as replaying the
@@ -274,18 +283,26 @@ anti-entropy tick when they are enabled. Stores without an engine call
 * Wire additions are optional JSON fields (`gc_horizon` in push/pull requests and
   in push and pull responses; `gc_horizon` in the 410 error body; `max_bytes` in
   pull requests, sent only by `HTTPSyncer.PullSnapshot` for paged position
-  pulls; `more` / `next_since_position` in pull responses) and a new rejection
-  reason `beyond_gc_horizon`. Peers that do not send `gc_horizon` are treated as
+  pulls; `more` / `next_since_position` in pull responses; `node_id` in push
+  responses, ticket 03d, sent regardless of GC) and a new rejection reason
+  `beyond_gc_horizon`. Peers that do not send `gc_horizon` are treated as
   horizon zero: once a node has a non-zero horizon it refuses their incremental
-  exchange with 410. Enabling GC therefore requires every peer of the keyspace to
-  run this version.
+  exchange with 410 unless it can vouch for them (see "Requester horizon
+  check"). Enabling GC therefore requires every peer of the keyspace to run a
+  version with GC support (03b or later); mixing 03b and 03d nodes is safe and
+  only keeps the 03b resync behavior on pairs that involve a 03b node.
 * `ListEntries`/`ChangesSince`/`Get` no longer return collected tombstones; a
   consumer must treat "absent" as "deleted" and honor `NeedsSnapshot`.
 * `TombstoneRetention` must exceed the longest expected peer partition plus
   `MaxClockOffsetMS`; otherwise partitioned peers are forced into resync and
   lose their unreplicated writes older than the horizon.
-* Durable directories written by this version may contain `purge` and `snapshot`
-  records; older binaries refuse them as unknown record types rather than
-  misreading them.
+* Durable directories written by this version may contain `purge`, `snapshot`
+  and (03d) `batch` records; older binaries refuse them as unknown record types
+  rather than misreading them, so a node that ran a resync under 03d cannot be
+  downgraded to 03b without compacting first (`Compact` rewrites batches as
+  ordinary `entry` records). Optional record fields added by 03d
+  (`peer_node_id` on `peer_progress`, `adopted` on `purge` and `snapshot`) are
+  ignored by 03b binaries; a 03b binary that reopens such a directory just stops
+  vouching.
 * Out of scope: epoch/lineage guards (03a) and narrowing `CompareAndSet`'s
   append-under-lock scope (still a known bound).

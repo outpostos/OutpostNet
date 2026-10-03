@@ -31,6 +31,9 @@ const (
 	durableRecordPeerProgress = "peer_progress"
 	// durableRecordPurge commits a tombstone GC pass or a resync purge.
 	durableRecordPurge = "purge"
+	// durableRecordBatch commits the accepted entries of one resync snapshot page
+	// together: one record, one fsync.
+	durableRecordBatch = "batch"
 	// durableRecordSnapshot is the first record of a compacted log. It restores
 	// counters, HLC, horizon and floor that collected entries no longer carry.
 	durableRecordSnapshot = "snapshot"
@@ -152,8 +155,10 @@ type durableRecord struct {
 	Sequence      uint64 `json:"sequence"`
 	Type          string `json:"type"`
 	Entry         *Entry `json:"entry,omitempty"`
-	Peer          string `json:"peer,omitempty"`
-	Position      uint64 `json:"position,omitempty"`
+	// Batch holds the entries of a batch record with their local positions.
+	Batch    []durableBatchEntry `json:"batch,omitempty"`
+	Peer     string              `json:"peer,omitempty"`
+	Position uint64              `json:"position,omitempty"`
 	// PeerNodeID is the node ID that answered at Peer (peer_progress records).
 	PeerNodeID string `json:"peer_node_id,omitempty"`
 	// Purge fields: the horizon and floor after the purge and the exact entry
@@ -167,6 +172,13 @@ type durableRecord struct {
 	// Snapshot header fields: the change/position counter and HLC at compaction.
 	Counter uint64     `json:"counter,omitempty"`
 	HLC     *Timestamp `json:"hlc,omitempty"`
+}
+
+// durableBatchEntry is one entry of a batch record. Entry.Position is not
+// serialized, so the local position travels next to it.
+type durableBatchEntry struct {
+	Entry    Entry  `json:"entry"`
+	Position uint64 `json:"position"`
 }
 
 // CompactionResult reports one compaction.
@@ -214,6 +226,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		compactionMinRecords: cfg.CompactionMinRecords,
 	}
 	core.purgeHook = store.appendPurge
+	core.batchHook = store.appendBatch
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -458,6 +471,21 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		}
 		record.Entry.Position = record.Position
 		return s.restoreEntry(*record.Entry)
+	case durableRecordBatch:
+		if len(record.Batch) == 0 {
+			return fmt.Errorf("durable batch record has no entries")
+		}
+		for _, item := range record.Batch {
+			if item.Position == 0 {
+				return fmt.Errorf("durable batch entry %q missing local position", item.Entry.Key)
+			}
+			entry := item.Entry
+			entry.Position = item.Position
+			if err := s.restoreEntry(entry); err != nil {
+				return err
+			}
+		}
+		return nil
 	case durableRecordPeerProgress:
 		if strings.TrimSpace(record.Peer) == "" {
 			return fmt.Errorf("durable peer progress missing peer")
@@ -494,6 +522,17 @@ func (s *DurableStore) appendEntry(entry Entry) error {
 		Position: entry.Position,
 	}, func() {
 	})
+}
+
+// appendBatch writes the accepted entries of one resync snapshot page as a
+// single record, so the whole page costs one fsync and is recovered all or
+// nothing.
+func (s *DurableStore) appendBatch(entries []Entry) error {
+	batch := make([]durableBatchEntry, len(entries))
+	for index, entry := range entries {
+		batch[index] = durableBatchEntry{Entry: copyEntry(entry), Position: entry.Position}
+	}
+	return s.appendRecord(durableRecord{Type: durableRecordBatch, Batch: batch}, func() {})
 }
 
 func (s *DurableStore) appendPurge(set purgeSet) error {

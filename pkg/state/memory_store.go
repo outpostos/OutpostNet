@@ -67,6 +67,9 @@ type storeCore struct {
 	// purgeHook persists purge sets. It is set by DurableStore before the store
 	// is published and is nil for MemoryStore.
 	purgeHook func(purgeSet) error
+	// batchHook persists the accepted entries of one resync snapshot page as a
+	// single durable record. Set by DurableStore; nil for MemoryStore.
+	batchHook func([]Entry) error
 
 	commitMu    sync.Mutex
 	mu          sync.RWMutex

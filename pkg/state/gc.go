@@ -119,7 +119,17 @@ type gcStore interface {
 	tombstoneGCEnabled() bool
 	markReplicated()
 	collectTombstones(ctx context.Context, safePosition uint64, gated bool) (TombstoneGCResult, error)
+	applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error)
 	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error)
+}
+
+// snapshotPageResult reports how one resync snapshot page was merged.
+type snapshotPageResult struct {
+	// Applied entries changed local state.
+	Applied int
+	// Refused entries are values for keys this store collected (absent, at or
+	// below the local horizon).
+	Refused int
 }
 
 // peerAckStore is implemented by stores that persist, with each acknowledged
@@ -302,6 +312,79 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	}
 	result.Purged = len(removed)
 	result.Horizon = set.Horizon
+	return result, nil
+}
+
+// applySnapshotPage merges one resync snapshot page with the same rules as
+// Apply (validation, HLC offset, LWW, local horizon refusal), but commits every
+// accepted entry of the page together: DurableStore writes them as one record
+// with one fsync instead of one per entry, and the page becomes visible only
+// after that record is durable. A page is all or nothing: an entry that fails
+// validation or the HLC offset check aborts the page before anything is
+// written, and a crash mid-write leaves an unterminated record that recovery
+// discards.
+func (s *storeCore) applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error) {
+	var result snapshotPageResult
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
+	for _, incoming := range page {
+		if err := s.policy.ValidateApply(incoming); err != nil {
+			return result, fmt.Errorf("validate snapshot entry %q: %w", incoming.Key, err)
+		}
+		if _, err := s.hlc.Update(incoming.Version.HLC); err != nil {
+			return result, fmt.Errorf("reject remote HLC for key %q from %q: %w", incoming.Key, incoming.Version.WriterNodeID, err)
+		}
+	}
+	// commitMu excludes every other mutation, so the decisions taken under the
+	// read lock still hold when the batch is installed.
+	accepted := make([]Entry, 0, len(page))
+	pending := make(map[string]int, len(page))
+	s.mu.RLock()
+	for _, incoming := range page {
+		existing, found := s.entries[incoming.Key]
+		if index, ok := pending[incoming.Key]; ok {
+			existing, found = accepted[index], true
+		}
+		if found && s.policy.CompareEntries(incoming, existing) <= 0 {
+			continue
+		}
+		if !found && s.beyondHorizonLocked(incoming) {
+			if !incoming.Deleted {
+				result.Refused++
+			}
+			continue
+		}
+		entry := copyEntry(incoming)
+		entry.Position = s.clock.Merge(maxUint64(entry.Position, entry.ChangeID.Counter))
+		if index, ok := pending[entry.Key]; ok {
+			accepted[index] = entry
+			continue
+		}
+		pending[entry.Key] = len(accepted)
+		accepted = append(accepted, entry)
+	}
+	s.mu.RUnlock()
+	if len(accepted) == 0 {
+		return result, nil
+	}
+	if s.batchHook != nil {
+		if err := s.batchHook(accepted); err != nil {
+			return result, err
+		}
+	}
+	s.mu.Lock()
+	for _, entry := range accepted {
+		s.entries[entry.Key] = entry
+	}
+	s.mu.Unlock()
+	for _, entry := range accepted {
+		s.notify(entry)
+	}
+	result.Applied = len(accepted)
 	return result, nil
 }
 

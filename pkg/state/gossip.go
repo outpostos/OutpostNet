@@ -734,21 +734,16 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		}
 		for _, entry := range resp.Entries {
 			held[entry.Key] = struct{}{}
-			ok, err := g.store.Apply(ctx, entry)
-			if err != nil {
-				var beyond *BeyondGCHorizonError
-				if errors.As(err, &beyond) {
-					// We deleted and collected this key; the peer still holds an old
-					// value. Refuse it; the peer is cleaned up by its own resync.
-					refused++
-					continue
-				}
-				return fmt.Errorf("apply resync snapshot entry %q from %s: %w", entry.Key, shown, err)
-			}
-			if ok {
-				applied++
-			}
 		}
+		// The page is merged like Apply and committed as one batch. Values for
+		// keys we deleted and collected are refused (counted): the peer still
+		// holds them and is cleaned up by its own resync.
+		merged, err := gs.applySnapshotPage(ctx, resp.Entries)
+		if err != nil {
+			return fmt.Errorf("apply resync snapshot page %d from %s: %w", page, shown, err)
+		}
+		applied += merged.Applied
+		refused += merged.Refused
 		if !resp.More {
 			break
 		}
