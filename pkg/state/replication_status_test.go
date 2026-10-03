@@ -253,6 +253,10 @@ func TestReplicationStatusIsSafeDuringConcurrentExchanges(t *testing.T) {
 					t.Errorf("inconsistent catch-up flags: %+v", p)
 					return
 				}
+				if p.OutboundCaughtUp && !p.OutboundRoundCaughtUp {
+					t.Errorf("OutboundCaughtUp must imply OutboundRoundCaughtUp: %+v", p)
+					return
+				}
 			}
 		}
 	}()
