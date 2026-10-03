@@ -1,0 +1,29 @@
+# AFTER: outpostnet-service owns the stable entries and exports of node1.
+# It runs next to outpostnet-agent, so its tunnel port, management socket and
+# health address differ from the agent's. Peers point at the peers'
+# outpostnet-service tunnel port (5253), not the agent's (5252).
+node_id: node1
+health_addr: "127.0.0.1:8083"
+management:
+  socket_path: /run/outpostnet/service.sock
+tunnels:
+  - role: server
+    listen_addr: "192.0.2.11:5253"
+peers:                                            # startup seed; runtime changes via PUT /v1/peers
+  - {node_id: node2, addr: "192.0.2.12:5253"}
+  - {node_id: node3, addr: "192.0.2.13:5253"}
+exports:
+  - name: mesh-rest
+    local_addr: "127.0.0.1:8081"
+    protocol: tcp
+imports:                                          # same listen_addr as before: applications do not change
+  - service: mesh-rest@node2
+    listen_addr: "127.0.0.1:18480"
+    protocol: tcp
+  - service: mesh-rest@node3
+    listen_addr: "127.0.0.1:18481"
+    protocol: tcp
+auth:
+  token: change-me
+tls:
+  insecure: true
