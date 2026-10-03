@@ -27,9 +27,11 @@ type Agent struct {
 	metricsServer *http.Server
 	mgmtServer    *ManagementServer
 
-	mu     sync.Mutex
-	ready  bool
-	cancel context.CancelFunc
+	mu          sync.Mutex
+	ready       bool
+	cancel      context.CancelFunc
+	healthAddr  net.Addr
+	metricsAddr net.Addr
 
 	observationAddr string
 	observation     *Observation
@@ -86,7 +88,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	// configured, or when node_id enables the peer directory.
 	startTunnels := len(a.cfg.Tunnels) > 0 || hasServiceImports(a.cfg.Imports)
 	if startTunnels || a.cfg.NodeID != "" {
-		a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
+		tm := NewTunnelManager(a.cfg, a.logger, a.metrics)
+		a.mu.Lock()
+		a.tunnels = tm
+		a.mu.Unlock()
 	}
 
 	// Observation starts before the tunnels so their first connection
@@ -129,7 +134,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.ready = true
 	a.mu.Unlock()
 
-	a.logger.Info("agent ready", "health_addr", a.cfg.HealthAddr)
+	a.logger.Info("agent ready", "health_addr", a.BoundAddrs().Health)
 
 	// Block until context is cancelled.
 	<-ctx.Done()
@@ -158,57 +163,86 @@ func (a *Agent) Stop() {
 	}
 }
 
+// BoundAddrs is what a running agent actually listens on. A configured
+// port 0 is resolved here, which is how a caller discovers the port the
+// agent picked.
+type BoundAddrs struct {
+	// Health and Metrics are nil until their servers are listening.
+	Health  net.Addr
+	Metrics net.Addr
+	// TunnelServers are the role=server tunnel listeners, in config order.
+	TunnelServers []net.Addr
+	// Imports are the import entries keyed by service (service imports) or
+	// name (static imports). An entry whose listen failed is nil while it
+	// retries.
+	Imports map[string]net.Addr
+}
+
+// BoundAddrs reports the agent's bound listeners. Everything is bound
+// before the agent reports ready, except imports whose listen failed.
+func (a *Agent) BoundAddrs() BoundAddrs {
+	a.mu.Lock()
+	b := BoundAddrs{Health: a.healthAddr, Metrics: a.metricsAddr}
+	tm := a.tunnels
+	a.mu.Unlock()
+	if tm != nil {
+		for _, srv := range tm.Servers() {
+			b.TunnelServers = append(b.TunnelServers, srv.Addr())
+		}
+		b.Imports = tm.ImportAddrs()
+	}
+	return b
+}
+
 func (a *Agent) startHealthServer() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/readyz", a.handleReadyz)
 
-	a.healthServer = &http.Server{
-		Addr:              a.cfg.HealthAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		if err := a.healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	// Give it a moment to fail on bind errors.
-	select {
-	case err := <-errCh:
+	a.healthServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	addr, err := a.serveHTTP(a.healthServer, a.cfg.HealthAddr, "health")
+	if err != nil {
 		return err
-	case <-time.After(100 * time.Millisecond):
-		return nil
 	}
+	a.mu.Lock()
+	a.healthAddr = addr
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *Agent) startMetricsServer() error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", a.metrics.Handler())
 
-	a.metricsServer = &http.Server{
-		Addr:              a.cfg.Metrics.Addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	a.metricsServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	addr, err := a.serveHTTP(a.metricsServer, a.cfg.Metrics.Addr, "metrics")
+	if err != nil {
+		return err
 	}
+	a.mu.Lock()
+	a.metricsAddr = addr
+	a.mu.Unlock()
+	a.logger.Info("metrics server started", "addr", addr)
+	return nil
+}
 
-	errCh := make(chan error, 1)
+// serveHTTP binds addr now, so a bind error fails startup and a port 0 is
+// resolved before anyone asks for it, then serves srv on that listener.
+// An empty addr means ":http", as for http.Server.ListenAndServe.
+func (a *Agent) serveHTTP(srv *http.Server, addr, name string) (net.Addr, error) {
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		if err := a.metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			a.logger.Error(name+" server stopped", "error", err)
 		}
 	}()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-time.After(100 * time.Millisecond):
-		a.logger.Info("metrics server started", "addr", a.cfg.Metrics.Addr)
-		return nil
-	}
+	return ln.Addr(), nil
 }
 
 func (a *Agent) stopMetricsServer() {
