@@ -134,7 +134,8 @@ resyncs back and forth. `TestHealthyStaggeredGCNeverForcesResync` (TTL load,
 staggered collection, every member acknowledging) measured with the 03b rule:
 392 resyncs in 600 rounds with two in-memory replicas, 882 with three, 72 and
 162 in 120 rounds with two and three `DurableStore` replicas. With the rule
-below: 0 in all four. `TestPartitionBeyondRetentionStillForcesResync` shows a
+below: 0 in all four once every node has a horizon (see "Healthy cluster").
+`TestPartitionBeyondRetentionStillForcesResync` shows a
 node partitioned and dropped from the membership for longer than the retention
 is still resynced when it rejoins, nothing is resurrected, and the healthy load
 afterwards is back to 0.
@@ -155,6 +156,15 @@ answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
 * **No unvouched adopted removals**: `H_Q >= A_R`, where `A_R` is the highest
   peer horizon `R` adopted through a snapshot resync. `R` cannot vouch for
   removals another node performed, so for those the 03b comparison applies.
+* **Not a zero horizon**: `H_Q` is non-zero, or `F_R` is zero. A zero horizon
+  means `Q` never collected or adopted anything, which is also what a node looks
+  like whose data directory was wiped and that came back with the same node ID
+  at the same address: the push progress it inherits was acknowledged by the
+  state that is gone. Such a requester is refused on its first exchange and
+  adopts `H_R` (`TestWipedRequesterWithSameIdentityIsRefusedOnFirstExchange`).
+  The cost in a healthy cluster is one resync per node, once in its lifetime:
+  when the first node of a fresh cluster collects, every node that has not
+  collected yet adopts its horizon instead; a horizon never returns to zero.
 
 The digest check (case 2 above) and the per-entry `beyond_gc_horizon` rejection
 are unchanged and apply to vouched requesters as well.
@@ -180,16 +190,26 @@ run unchanged.
 **Healthy cluster.** With stable membership, every member acknowledged every
 collected tombstone before any node collected it (the GC gate), no node holds a
 value below another node's horizon for a key the other lacks, no push entry is
-refused and no resync adopts anything. Every lower-horizon request comes from a
-vouched member, so no 410 is sent and no resync runs.
+refused and no resync adopts anything. Once every member has a non-zero horizon,
+every lower-horizon request comes from a vouched member, so no 410 is sent and
+no resync runs. Before that, each member that has not collected yet resyncs
+once from the first collector (the zero-horizon condition above):
+`TestHealthyStaggeredGCNeverForcesResync` measures 1 (two replicas) and 2 (three
+replicas) such resyncs in the first 24 rounds and 0 in the remaining 576 (memory)
+or 96 (`DurableStore`) rounds.
 
 **Residual (unchanged class).** Vouching relies on push progress, which is keyed
 by peer address: if a different node takes over an address, the node ID learned
 from its first push response replaces the old one and it inherits that
 address's progress, exactly as the push cursor already does. A requester whose
-state was restored from an older backup or whose directory was wiped is still
-vouched by the address progress; it is cleaned up through the digest check
-rather than by a 410 on its first push. Both are lineage problems tracked by 03a.
+directory was wiped has horizon zero and is not vouched (see the rule). A
+requester restored from an older backup that already had a non-zero horizon
+`>= A_R` is still vouched by the address progress: until it exchanges with a
+node that refuses it, it accepts stale values for keys deleted and collected
+after the backup (from a lagging node outside the membership, say) and may pass
+them on to other nodes whose horizon does not cover them. It is cleaned up
+through the digest check or a refused push rather than by a 410 on its first
+push. Both are lineage problems tracked by 03a.
 
 **Mixed versions.** No request field changes; the push response gains the
 optional `node_id`. A 03b responder ignores vouching and keeps refusing lower

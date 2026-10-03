@@ -142,10 +142,17 @@ func (c *churnCluster) exchange(t *testing.T, node *churnNode) {
 // different ticks. The clock advances so tombstones age past retention.
 func runTTLChurn(t *testing.T, cluster *churnCluster, rounds int) (collected int) {
 	t.Helper()
+	return runTTLChurnRounds(t, cluster, 0, rounds)
+}
+
+// runTTLChurnRounds runs rounds [from, to) of the runTTLChurn load, so a test
+// can measure a later phase of the same load separately.
+func runTTLChurnRounds(t *testing.T, cluster *churnCluster, from, to int) (collected int) {
+	t.Helper()
 	ctx := context.Background()
 	const keysPerRound, ttlRounds = 3, 4
 	stagger := len(cluster.nodes) + 1
-	for round := 0; round < rounds; round++ {
+	for round := from; round < to; round++ {
 		cluster.clock.now += retentionMS() / 8
 		for index, node := range cluster.nodes {
 			for k := 0; k < keysPerRound; k++ {
@@ -197,6 +204,30 @@ func assertChurnClusterConverged(t *testing.T, cluster *churnCluster) {
 	}
 }
 
+// warmUpRounds is long enough for every node of the churn load to age
+// tombstones past the retention and collect on its own tick at least once.
+const warmUpRounds = 24
+
+// assertFirstCollectionAdoption checks the only resyncs a healthy cluster may
+// perform: while a node still has horizon zero it is not vouched by a node that
+// collected (03d review C), so the first collector in a fresh cluster resyncs
+// each other node once and they adopt its horizon. A horizon never returns to
+// zero, so that is at most one resync per other node in the cluster lifetime.
+func assertFirstCollectionAdoption(t *testing.T, cluster *churnCluster) int64 {
+	t.Helper()
+	for _, node := range cluster.nodes {
+		if node.store.GCHorizon().isZero() {
+			t.Fatalf("%s still has horizon zero after the warm-up", node.id)
+		}
+	}
+	got := cluster.resyncs.Load()
+	if limit := int64(len(cluster.nodes) - 1); got > limit {
+		t.Fatalf("warm-up performed %d snapshot resyncs, want at most %d (one first-horizon adoption per other node)", got, limit)
+	}
+	cluster.resyncs.Store(0)
+	return got
+}
+
 func TestHealthyStaggeredGCNeverForcesResync(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -211,15 +242,18 @@ func TestHealthyStaggeredGCNeverForcesResync(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cluster := newChurnCluster(t, tc.size, tc.durable)
-			collected := runTTLChurn(t, cluster, tc.rounds)
+			collected := runTTLChurnRounds(t, cluster, 0, warmUpRounds)
+			adoptions := assertFirstCollectionAdoption(t, cluster)
+			collected += runTTLChurnRounds(t, cluster, warmUpRounds, tc.rounds)
 			assertChurnClusterConverged(t, cluster)
 			if collected == 0 {
 				t.Fatalf("no tombstone was collected; the workload did not exercise GC")
 			}
 			if got := cluster.resyncs.Load(); got != 0 {
-				t.Fatalf("healthy cluster with staggered GC performed %d snapshot resyncs (collected %d tombstones), want 0", got, collected)
+				t.Fatalf("healthy cluster with staggered GC performed %d snapshot resyncs after every node had a horizon (collected %d tombstones), want 0", got, collected)
 			}
-			t.Logf("%s: collected %d tombstones over %d rounds, %d resyncs", tc.name, collected, tc.rounds, cluster.resyncs.Load())
+			t.Logf("%s: collected %d tombstones over %d rounds; %d first-horizon adoption resyncs in the first %d rounds, %d resyncs afterwards",
+				tc.name, collected, tc.rounds, adoptions, warmUpRounds, cluster.resyncs.Load())
 		})
 	}
 }
@@ -321,10 +355,8 @@ func (c *churnCluster) exchangeTolerant(node *churnNode) error {
 func TestPartitionBeyondRetentionStillForcesResync(t *testing.T) {
 	ctx := context.Background()
 	cluster := newChurnCluster(t, 3, false)
-	runTTLChurn(t, cluster, 24)
-	if got := cluster.resyncs.Load(); got != 0 {
-		t.Fatalf("healthy warm-up resynced %d times", got)
-	}
+	runTTLChurn(t, cluster, warmUpRounds)
+	assertFirstCollectionAdoption(t, cluster)
 	a, b, l := cluster.nodes[0], cluster.nodes[1], cluster.nodes[2]
 	if _, err := a.store.Put(ctx, "shared", []byte("v1")); err != nil {
 		t.Fatalf("Put: %v", err)

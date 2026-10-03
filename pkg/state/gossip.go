@@ -800,6 +800,10 @@ func (g *GossipEngine) checkRequesterHorizon(ctx context.Context, local Timestam
 // this store removed itself (our push progress towards the address that
 // answered as requesterID reaches the GC floor) and its horizon covers every
 // horizon this store adopted from a peer, whose removals we cannot vouch for.
+// A requester with horizon zero is never vouched once we removed anything: it
+// has not collected or adopted anything yet, which is also what a node whose
+// directory was wiped, and that kept its node ID and address, looks like; the
+// push progress it inherits was acknowledged by the state that is gone.
 func (g *GossipEngine) requesterVouched(ctx context.Context, requesterHorizon Timestamp, requesterID string) (bool, error) {
 	gs, ok := g.store.(gcStore)
 	if !ok || requesterID == "" {
@@ -809,6 +813,9 @@ func (g *GossipEngine) requesterVouched(ctx context.Context, requesterHorizon Ti
 		return false, nil
 	}
 	floor := gs.GCFloor()
+	if requesterHorizon.isZero() && floor > 0 {
+		return false, nil
+	}
 	for _, addr := range g.peersAnsweringAs(requesterID) {
 		acknowledged, err := g.peerLastPushPosition(ctx, addr)
 		if err != nil {

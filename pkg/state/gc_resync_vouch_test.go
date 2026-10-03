@@ -49,6 +49,12 @@ func TestResyncPurgeWithoutHorizonChangeIsNotVouched(t *testing.T) {
 		t.Fatalf("node-q GC: %+v err=%v", result, err)
 	}
 	horizonQ := q.store.GCHorizon()
+	// R still has horizon zero facing Q's floor: its next push is refused and it
+	// adopts H_Q through a resync (03d review C). From here on H_Q >= A_R.
+	c.exchange(t, r)
+	if r.store.GCHorizon() != horizonQ {
+		t.Fatalf("setup: node-r did not adopt node-q's horizon: %+v vs %+v", r.store.GCHorizon(), horizonQ)
+	}
 
 	// R writes k, replicated to Q.
 	if _, err := r.store.Put(ctx, "k", []byte("v")); err != nil {
@@ -91,6 +97,7 @@ func TestResyncPurgeWithoutHorizonChangeIsNotVouched(t *testing.T) {
 
 	// R pushes k to P, P refuses it as beyond_gc_horizon, R resyncs from P and
 	// purges k. Its own horizon does not move.
+	c.resyncs.Store(0)
 	r.peers.Store([]string{"node-q", "node-p"})
 	clearPeerBackoffForTest(r.engine, "node-p")
 	if err := r.engine.SyncOnce(ctx); err != nil {
@@ -118,5 +125,49 @@ func TestResyncPurgeWithoutHorizonChangeIsNotVouched(t *testing.T) {
 	var resync *ResyncRequiredError
 	if err := pushProbe(r.engine, "node-q", horizonQ); !errors.As(err, &resync) {
 		t.Fatalf("node-r vouched for node-q (horizon %+v below the adopted %+v) although node-q holds the value node-r purged for node-p: err=%v", horizonQ, horizonP, err)
+	}
+}
+
+// A node whose data directory was wiped and that comes back with the same node
+// ID at the same address has horizon zero. Its push progress at the responder
+// still covers the responder's floor, but that progress was acknowledged by the
+// state that was wiped. A zero horizon facing a non-zero floor is not vouched:
+// the very first exchange is refused with 410 and the node adopts the
+// responder's horizon instead of accepting stale values for collected keys.
+func TestWipedRequesterWithSameIdentityIsRefusedOnFirstExchange(t *testing.T) {
+	ctx := context.Background()
+	cluster := newChurnCluster(t, 2, true)
+	runTTLChurn(t, cluster, 24)
+	lead, wiped := cluster.nodes[0], cluster.nodes[1]
+	if lead.store.(gcStore).GCFloor() == 0 {
+		t.Fatalf("setup: node-0 never collected")
+	}
+	if err := wiped.store.(*DurableStore).Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cluster.nodes[1] = cluster.openNode(t, wiped.id, []string{"node-0", "node-1"}, t.TempDir())
+	wiped = cluster.nodes[1]
+	if !wiped.store.GCHorizon().isZero() {
+		t.Fatalf("setup: wiped node has horizon %+v", wiped.store.GCHorizon())
+	}
+
+	var resync *ResyncRequiredError
+	if err := pushProbe(lead.engine, wiped.id, Timestamp{}); !errors.As(err, &resync) {
+		t.Fatalf("node-0 vouched for a requester with horizon zero although its floor is %d: err=%v", lead.store.(gcStore).GCFloor(), err)
+	}
+
+	cluster.resyncs.Store(0)
+	if _, err := wiped.store.Put(ctx, "node-1/fresh", []byte("x")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	clearPeerBackoffForTest(wiped.engine, lead.id)
+	if err := wiped.engine.SyncOnce(ctx); err != nil {
+		t.Fatalf("node-1 push: %v", err)
+	}
+	if got := cluster.resyncs.Load(); got != 1 {
+		t.Fatalf("wiped node resynced %d times on its first push, want 1", got)
+	}
+	if wiped.store.GCHorizon() != lead.store.GCHorizon() {
+		t.Fatalf("wiped node did not adopt node-0's horizon: %+v vs %+v", wiped.store.GCHorizon(), lead.store.GCHorizon())
 	}
 }
