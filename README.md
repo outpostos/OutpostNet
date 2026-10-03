@@ -182,6 +182,7 @@ own repositories and report their own replication status.
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
 - [Service Layer (outpostnet-service)](docs/service-layer.md)
+- [Migrating agent imports/exports to outpostnet-service](docs/service-migration.md)
 - [Observation producers (Range)](docs/observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
 - [Deployment Examples](deploy/examples/)

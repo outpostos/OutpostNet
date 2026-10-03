@@ -92,7 +92,7 @@ tls:
 | `listen_addr` | string | Yes | Local listen address, format `host:port` |
 | `protocol` | string | Yes | `tcp` or `udp` (accepted for compatibility; the agent's cross-node QUIC tunnel forwards TCP only — `udp` is not implemented there and is served as TCP) |
 
-`service` is additive to the static `name` form. With `service: <name>@<node_id>`, the agent keeps `listen_addr` stable and resolves the peer tunnel through the local peer directory. Missing peers stay pending and retry without exiting the process. Export `local_addr` changes for an existing name are re-pointed in place by `ReloadAgent` (new streams only).
+`service` is additive to the static `name` form. With `service: <name>@<node_id>`, the agent keeps `listen_addr` stable and resolves the peer tunnel through the local peer directory. Missing peers stay pending and retry without exiting the process. The `outpostnet-agent` command does not watch its config file: any change, including imports and exports, takes effect on restart. (`ReloadAgent` re-points export `local_addr` in place for code that embeds the agent and calls it; `outpostnet-service` does this from its config watcher.)
 
 #### `management`
 
@@ -108,6 +108,8 @@ When `node_id` is set, the agent listens on `management.socket_path` using HTTP 
 |----------|-------------|
 | `PUT /v1/peers` | Replace the full peer list. Body: `[{"node_id":"node-b","addr":"127.0.0.1:4242"}]` |
 | `GET /v1/peers` | Return peer entries with tunnel status: `connected`, `reconnecting`, or `pending` |
+
+The directory is kept in memory only: after an agent restart it is empty until the next `PUT`. The `GET` output can be sent back to `PUT` unchanged (`status` is ignored), which is how [service-migration.md](service-migration.md) restores it.
 
 #### `auth`
 
@@ -165,6 +167,7 @@ the agent picks a free port, and code embedding the agent reads the bound addres
 for a service identity `<service>@<node_id>`; the command reuses the agent's QUIC tunnels, peer
 directory and management API underneath. Design and protocol support: [service-layer.md](service-layer.md).
 Runnable two-node example: [`examples/service/`](../examples/service/README.md).
+Moving an agent's `imports`/`exports` to `outpostnet-service`: [service-migration.md](service-migration.md).
 
 The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports`, `tls`, `auth`,
 `management`, `health_addr`) plus `peers`, with these differences:
