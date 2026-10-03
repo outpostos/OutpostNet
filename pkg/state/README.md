@@ -72,7 +72,9 @@ Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
 - `TombstoneRetention` (both stores, default 0 = off) enables tombstone
   collection. Local stores call `CollectTombstones`; stores attached to a
   `GossipEngine` must collect through `GossipEngine.CollectTombstones`, which
-  additionally waits until every current peer acknowledged the tombstone.
+  additionally waits until every current peer acknowledged the tombstone. Its
+  `PeerProvider` must return the configured membership, not the live peers; an
+  empty peer list is refused with `ErrTombstoneGCNoPeers`.
 - Collected keys raise the store's GC horizon. `Apply` refuses an absent key at or
   below the horizon, peers with a lower horizon are refused with
   `ResyncRequiredError` (HTTP 410) and resync from a snapshot. A consumer position

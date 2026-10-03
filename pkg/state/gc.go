@@ -17,6 +17,11 @@ var (
 	// ErrTombstoneGCReplicated reports a peer-blind GC request on a store that is
 	// replicated by a GossipEngine. Use GossipEngine.CollectTombstones instead.
 	ErrTombstoneGCReplicated = errors.New("state store is replicated; collect tombstones through GossipEngine.CollectTombstones")
+	// ErrTombstoneGCNoPeers reports a collection request on a replicated store
+	// whose PeerProvider returned no peers. An empty list cannot be told apart
+	// from a transient isolation of a liveness-based provider, so nothing is
+	// collected; the PeerProvider must return the configured membership.
+	ErrTombstoneGCNoPeers = errors.New("state store is replicated but the PeerProvider returned no peers; refusing to collect tombstones without peer acknowledgement")
 	// ErrTombstoneGCUnsupported reports that a store or syncer does not implement
 	// the tombstone GC / snapshot resync surface.
 	ErrTombstoneGCUnsupported = errors.New("state tombstone GC or snapshot resync is not supported by this store or syncer")

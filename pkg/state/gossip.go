@@ -544,8 +544,10 @@ type SnapshotSyncer interface {
 const resyncPageSize = 256
 
 // CollectTombstones removes tombstones that are older than the store retention
-// and acknowledged by every peer the PeerProvider currently returns. With no
-// peers, retention alone decides.
+// and acknowledged by every peer the PeerProvider currently returns. The
+// PeerProvider must return the configured membership, not the currently live
+// peers. An empty peer list is refused with ErrTombstoneGCNoPeers instead of
+// falling back to retention alone.
 func (g *GossipEngine) CollectTombstones(ctx context.Context) (TombstoneGCResult, error) {
 	gs, ok := g.store.(gcStore)
 	if !ok {
@@ -553,7 +555,7 @@ func (g *GossipEngine) CollectTombstones(ctx context.Context) (TombstoneGCResult
 	}
 	peers := g.peerProvider.Peers()
 	if len(peers) == 0 {
-		return gs.collectTombstones(ctx, 0, false)
+		return TombstoneGCResult{}, ErrTombstoneGCNoPeers
 	}
 	var safe uint64
 	for index, addr := range peers {

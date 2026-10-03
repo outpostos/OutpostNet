@@ -373,20 +373,25 @@ func TestLaggingPusherIsRefusedWithResyncRequired(t *testing.T) {
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
 	net := newLoopNet()
-	a := newLoopNode(t, net, "node-a", clock)
+	a := newLoopNode(t, net, "node-a", clock, "node-b")
+	newLoopNode(t, net, "node-b", clock)
 	l := newLoopNode(t, net, "node-l", clock, "node-a")
 
 	stale, err := l.store.Put(ctx, "doomed", []byte("stale"))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// node-a saw and deleted the key long ago and collected the tombstone.
+	// node-a saw and deleted the key long ago and collected the tombstone once
+	// its only listed peer, node-b, acknowledged it.
 	if _, err := a.store.Apply(ctx, stale); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	clock.now += 1_000
 	if _, err := a.store.Delete(ctx, "doomed"); err != nil {
 		t.Fatalf("Delete: %v", err)
+	}
+	if err := a.sync(t); err != nil {
+		t.Fatalf("node-a sync to node-b: %v", err)
 	}
 	clock.now += 2 * retentionMS()
 	if result, err := a.engine.CollectTombstones(ctx); err != nil || result.Collected != 1 {
@@ -492,17 +497,6 @@ func TestHTTPResyncRequiredIs410AndSnapshotPagesOverHTTP(t *testing.T) {
 	const token = "secret"
 
 	serverStore := mustGCMemoryStore(t, "node-a", clock, testRetention)
-	serverSyncer, err := NewHTTPSyncer(HTTPSyncerConfig{NodeID: "node-a", AuthToken: token})
-	if err != nil {
-		t.Fatalf("NewHTTPSyncer: %v", err)
-	}
-	serverEngine, err := NewGossipEngine(GossipConfig{NodeID: "node-a", Store: serverStore, Syncer: serverSyncer})
-	if err != nil {
-		t.Fatalf("NewGossipEngine: %v", err)
-	}
-	server := newHTTPServerForNode(t, &httpTestNode{id: "node-a", engine: serverEngine}, token, nil)
-	defer server.Close()
-
 	clientStore := mustGCMemoryStore(t, "node-l", clock, testRetention)
 	stale, err := clientStore.Put(ctx, "doomed", []byte("stale"))
 	if err != nil {
@@ -521,9 +515,20 @@ func TestHTTPResyncRequiredIs410AndSnapshotPagesOverHTTP(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 	clock.now += 2 * retentionMS()
-	if result, err := serverEngine.CollectTombstones(ctx); err != nil || result.Collected != 1 {
+	// node-a collects as a local store before it starts replicating.
+	if result, err := serverStore.CollectTombstones(ctx); err != nil || result.Collected != 1 {
 		t.Fatalf("GC: %+v err=%v", result, err)
 	}
+	serverSyncer, err := NewHTTPSyncer(HTTPSyncerConfig{NodeID: "node-a", AuthToken: token})
+	if err != nil {
+		t.Fatalf("NewHTTPSyncer: %v", err)
+	}
+	serverEngine, err := NewGossipEngine(GossipConfig{NodeID: "node-a", Store: serverStore, Syncer: serverSyncer})
+	if err != nil {
+		t.Fatalf("NewGossipEngine: %v", err)
+	}
+	server := newHTTPServerForNode(t, &httpTestNode{id: "node-a", engine: serverEngine}, token, nil)
+	defer server.Close()
 
 	clientSyncer, err := NewHTTPSyncer(HTTPSyncerConfig{NodeID: "node-l", AuthToken: token, Client: server.Client()})
 	if err != nil {
@@ -567,4 +572,31 @@ func TestHTTPResyncRequiredIs410AndSnapshotPagesOverHTTP(t *testing.T) {
 		t.Fatalf("anti-entropy after resync: %v", err)
 	}
 	assertAbsent(t, serverStore, "doomed")
+}
+
+// Review 03b F3: an engine whose PeerProvider momentarily returns no peers (a
+// liveness-based provider during isolation) must not fall back to retention-only
+// collection.
+func TestReplicatedGCRefusesEmptyPeerList(t *testing.T) {
+	ctx := context.Background()
+	clock := &fixedPhysicalClock{now: 1_000_000}
+	net := newLoopNet()
+	a := newLoopNode(t, net, "node-a", clock)
+	if _, err := a.store.Put(ctx, "k", []byte("v")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := a.store.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	clock.now += 2 * retentionMS()
+	result, err := a.engine.CollectTombstones(ctx)
+	if !errors.Is(err, ErrTombstoneGCNoPeers) || result.Collected != 0 {
+		t.Fatalf("expected ErrTombstoneGCNoPeers and no collection, got %+v err=%v", result, err)
+	}
+	if entry := mustGet(t, a.store, "k"); !entry.Deleted {
+		t.Fatalf("tombstone must survive a refused collection: %+v", entry)
+	}
+	if !a.store.GCHorizon().isZero() {
+		t.Fatalf("horizon moved on a refused collection: %+v", a.store.GCHorizon())
+	}
 }

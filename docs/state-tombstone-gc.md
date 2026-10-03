@@ -41,6 +41,14 @@ A tombstone `t` is collected only when all of the following hold:
 3. **Local-only stores** (no engine): `Store.CollectTombstones` uses the
    retention condition alone.
 
+The `PeerProvider` of a replicated store must return the **configured
+membership** of the keyspace, not the set of peers that are currently alive or
+reachable: a peer missing from the list is not asked to acknowledge anything. If
+the provider returns no peers at all, `GossipEngine.CollectTombstones` refuses
+with `ErrTombstoneGCNoPeers` and collects nothing; there is no retention-only
+fallback for a replicated store, because an empty list cannot be told apart
+from a transient isolation.
+
 Collection is one atomic step under the commit lock: the removal (and, for
 `DurableStore`, a single `purge` record carrying the new horizon, floor and the
 exact identities removed) is committed before the entries leave memory.
