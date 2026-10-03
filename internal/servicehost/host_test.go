@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,7 +97,12 @@ func (r *runningHost) stop(t *testing.T) {
 
 func startHost(t *testing.T, cfg *service.Config) *runningHost {
 	t.Helper()
-	h := servicehost.New(cfg, nil)
+	return startHostWithLogger(t, cfg, nil)
+}
+
+func startHostWithLogger(t *testing.T, cfg *service.Config, logger *slog.Logger) *runningHost {
+	t.Helper()
+	h := servicehost.New(cfg, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &runningHost{h: h, cancel: cancel, done: make(chan struct{})}
 	go func() { r.err = h.Run(ctx); close(r.done) }()
@@ -307,17 +314,103 @@ func TestStableEntryFollowsReplacedInstance(t *testing.T) {
 	}
 }
 
-// TestStableEntryRejectedWithoutValidToken keeps the existing tunnel auth:
-// an entry on a node with the wrong token never reaches the service.
+// logBuffer captures a host's log output so tests can wait for specific
+// events (for example the tunnel server rejecting a token).
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *logBuffer) logger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(b, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// waitFor polls cond until it holds or the timeout expires.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// peerStatus returns the GET /v1/peers status of nodeID ("" if absent).
+func peerStatus(t *testing.T, socket, nodeID string) string {
+	t.Helper()
+	resp, err := unixHTTP(socket).Get("http://unix/v1/peers")
+	if err != nil {
+		t.Fatalf("GET /v1/peers: %v", err)
+	}
+	defer resp.Body.Close()
+	var st []struct {
+		NodeID string `json:"node_id"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range st {
+		if p.NodeID == nodeID {
+			return p.Status
+		}
+	}
+	return ""
+}
+
+// TestStableEntryRejectedWithoutValidToken keeps the existing tunnel auth.
+// Same topology twice against one exporting node: the consumer with the
+// right token reaches the service (positive control); the consumer with a
+// wrong token is rejected by the tunnel server's auth, its peer never
+// becomes connected, and its entry closes every application connection
+// without a reply.
 func TestStableEntryRejectedWithoutValidToken(t *testing.T) {
 	app := startApp(t, "v1")
-	nodeB := startHost(t, exportingNode(t, "node-b", app, token))
-	entry := freeAddr(t)
-	startHost(t, consumingNode(t, "node-a", entry, tunnelAddr(t, nodeB), "wrong-token"))
+	var bLog, badLog logBuffer
+	nodeB := startHostWithLogger(t, exportingNode(t, "node-b", app, token), bLog.logger())
+	peerAddr := tunnelAddr(t, nodeB)
 
-	time.Sleep(1500 * time.Millisecond) // allow connect attempts to fail
+	// Positive control: right token, same exporting node.
+	goodEntry := freeAddr(t)
+	startHost(t, consumingNode(t, "node-a", goodEntry, peerAddr, token))
+	askEventually(t, goodEntry, "v1:hello")
+
+	// Wrong token. node-a2 sorts before node-b, so it is the dialing side.
+	badEntry := freeAddr(t)
+	badCfg := consumingNode(t, "node-a2", badEntry, peerAddr, "wrong-token")
+	startHostWithLogger(t, badCfg, badLog.logger())
+
+	defer func() {
+		if t.Failed() {
+			t.Logf("node-b log:\n%s\nnode-a2 log:\n%s", bLog.String(), badLog.String())
+		}
+	}()
+	waitFor(t, 15*time.Second, "tunnel server to reject the wrong token", func() bool {
+		// Server side: the tunnel auth handshake rejected the token.
+		// Client side: node-a2's peer tunnel saw the auth failure.
+		return strings.Contains(bLog.String(), `error="token mismatch"`) &&
+			strings.Contains(badLog.String(), "authentication failed")
+	})
+	if st := peerStatus(t, badCfg.Management.SocketPath, "node-b"); st == "connected" || st == "" {
+		t.Fatalf("wrong-token peer status = %q, want a non-connected directory entry", st)
+	}
+
 	for i := 0; i < 3; i++ {
-		s, err := dialEntry(entry)
+		s, err := dialEntry(badEntry)
 		if err != nil {
 			t.Fatalf("entry should still listen: %v", err)
 		}
@@ -326,7 +419,15 @@ func TestStableEntryRejectedWithoutValidToken(t *testing.T) {
 		if err == nil {
 			t.Fatalf("unauthenticated node reached the service: %q", got)
 		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			t.Fatalf("entry left the connection hanging instead of closing it: %v", err)
+		}
 	}
+	if st := peerStatus(t, badCfg.Management.SocketPath, "node-b"); st == "connected" {
+		t.Fatal("wrong-token peer became connected")
+	}
+	// The control consumer is unaffected.
+	askEventually(t, goodEntry, "v1:hello")
 }
 
 // TestManagementStatusReportsPeer checks the reused GET /v1/peers input.
