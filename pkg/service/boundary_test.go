@@ -190,3 +190,58 @@ func TestNetHostStreamAPIIsServiceAgnostic(t *testing.T) {
 		t.Fatal("no exported TunnelManager methods found; test is not checking anything")
 	}
 }
+
+// directImports returns every non-test import of one in-module package dir.
+func directImports(t *testing.T, root, pkg string) []string {
+	t.Helper()
+	dir := filepath.Join(root, strings.TrimPrefix(strings.TrimPrefix(pkg, modulePath), "/"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package %s: %v", pkg, err)
+	}
+	var out []string
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, imp := range f.Imports {
+			out = append(out, strings.Trim(imp.Path.Value, `"`))
+		}
+	}
+	return out
+}
+
+// TestNetLibrariesDoNotDependOnOutpostRange keeps the observation contract
+// out of the libraries Let and Mesh embed (ticket 10-B): only the producer
+// layer (internal/observation, the hosts and cmd/) may import OutpostRange.
+// The walk covers each package and its in-module dependencies; third-party
+// modules cannot import the private OutpostRange module.
+func TestNetLibrariesDoNotDependOnOutpostRange(t *testing.T) {
+	root := repoRoot(t)
+	const rangeModule = "github.com/outpostos/OutpostRange"
+	libraries := []string{
+		modulePath + "/pkg/state",
+		modulePath + "/pkg/tunnel",
+		modulePath + "/pkg/tunnel/tlsutil",
+		modulePath + "/pkg/service",
+		modulePath + "/pkg/protocol",
+		modulePath + "/pkg/agentconfig",
+	}
+	for _, lib := range libraries {
+		chains := transitiveDeps(t, root, lib)
+		chains[lib] = []string{lib}
+		for pkg, chain := range chains {
+			for _, imp := range directImports(t, root, pkg) {
+				if imp == rangeModule || strings.HasPrefix(imp, rangeModule+"/") {
+					t.Errorf("%s must not depend on %s (chain: %s -> %s)", lib, rangeModule, strings.Join(chain, " -> "), imp)
+				}
+			}
+		}
+	}
+}

@@ -21,10 +21,11 @@ import (
 // NewServiceCommand creates the `outpostnet-service` command.
 func NewServiceCommand() *cobra.Command {
 	var (
-		configFile    string
-		nodeID        string
-		healthAddr    string
-		watchInterval time.Duration
+		configFile      string
+		nodeID          string
+		healthAddr      string
+		observationAddr string
+		watchInterval   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "outpostnet-service",
@@ -55,18 +56,25 @@ func NewServiceCommand() *cobra.Command {
 			if err := service.ValidateConfig(cfg); err != nil {
 				return fmt.Errorf("validate config: %w", err)
 			}
-			return run(cfg, configFile, watchInterval, override)
+			return run(cfg, configFile, watchInterval, observationAddr, override)
 		},
 	}
 	cmd.Version = version.Get().String()
 	cmd.Flags().StringVar(&configFile, "config", "", "Path to the Service YAML config file (required)")
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID override")
 	cmd.Flags().StringVar(&healthAddr, "health-addr", "", "Health endpoint address override (default :8083)")
+	cmd.Flags().StringVar(&observationAddr, "observation-addr", DefaultObservationAddr,
+		"Loopback address of the OutpostRange observation API (component OUTPOSTSERVICE); empty disables it. "+
+			"Observation failures are logged and never stop the service")
 	cmd.Flags().DurationVar(&watchInterval, "watch-interval", 5*time.Second, "Config file poll interval for in-place export changes (0 disables)")
 	return cmd
 }
 
-func run(cfg *service.Config, configFile string, watchInterval time.Duration, override func(*service.Config)) error {
+// DefaultObservationAddr is the default OutpostRange observation endpoint of
+// outpostnet-service (outpostnet-agent uses 127.0.0.1:17960).
+const DefaultObservationAddr = "127.0.0.1:17961"
+
+func run(cfg *service.Config, configFile string, watchInterval time.Duration, observationAddr string, override func(*service.Config)) error {
 	logger := slog.Default()
 	logger.Info("outpostnet-service starting", "version", version.Get().GitVersion, "node_id", cfg.NodeID,
 		"health", cfg.HealthAddr, "management", cfg.Management.SocketPath)
@@ -75,6 +83,7 @@ func run(cfg *service.Config, configFile string, watchInterval time.Duration, ov
 	defer stop()
 
 	h := servicehost.New(cfg, logger)
+	h.EnableObservation(observationAddr)
 	if watchInterval > 0 {
 		go func() {
 			// Start watching once the host owns its tunnel servers, so an

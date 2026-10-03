@@ -46,6 +46,14 @@ type peerState struct {
 	lastPushPosition uint64
 	failures         int
 	nextAttempt      time.Time
+
+	// Exchange results reported by ReplicationStatus. Times are the local
+	// clock; zero means "not in this process".
+	lastSuccess   time.Time // latest acknowledged push or fully applied pull
+	lastPull      time.Time // start of the latest fully applied pull
+	lastError     string    // redacted text of the latest failed exchange
+	lastErrorTime time.Time
+	lastErrorOp   string
 }
 
 // NewGossipEngine creates a replication engine. If Policy is provided it must
@@ -131,12 +139,12 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 	now := time.Now()
 	for _, addr := range g.peerProvider.Peers() {
 		if ok, until := g.allowAttempt(addr, now); !ok {
-			slog.Debug("state gossip: peer in backoff", "peer", addr, "until", until)
+			slog.Debug("state gossip: peer in backoff", "peer", redactedPeerURL(addr), "until", until)
 			continue
 		}
 		since, err := g.peerLastPushPosition(ctx, addr)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, redactPeerErr(addr, err))
 			continue
 		}
 		changes, err := g.store.ChangesSince(ctx, since, 0)
@@ -160,29 +168,25 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 				// horizon. Resync from it; the cursor stays put and the next round
 				// pushes whatever survived the resync.
 				if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
-					g.recordPeerFailure(addr, "push-resync", err, now)
-					errs = append(errs, err)
+					errs = append(errs, g.recordPeerFailure(addr, "push-resync", err, now))
 					continue
 				}
 				g.recordPeerSuccess(addr)
 				continue
 			}
-			g.recordPeerFailure(addr, "push", err, now)
-			errs = append(errs, err)
+			errs = append(errs, g.recordPeerFailure(addr, "push", err, now))
 			continue
 		}
 		pushed := g.pushSuccessPosition(addr, since, changes, resp)
 		if err := g.recordPushSuccess(ctx, addr, pushed); err != nil {
-			g.recordPeerFailure(addr, "push-progress", err, now)
-			errs = append(errs, err)
+			errs = append(errs, g.recordPeerFailure(addr, "push-progress", err, now))
 			continue
 		}
 		if hasBeyondHorizonRejection(resp) {
 			// The peer refused entries for keys it collected. We hold stale state for
 			// them, so we resync from the peer, which purges those entries locally.
 			if err := g.resyncFrom(ctx, addr, timestampValue(resp.GCHorizon)); err != nil {
-				g.recordPeerFailure(addr, "push-resync", err, now)
-				errs = append(errs, err)
+				errs = append(errs, g.recordPeerFailure(addr, "push-resync", err, now))
 				continue
 			}
 		}
@@ -196,13 +200,16 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 	now := time.Now()
 	for _, addr := range g.peerProvider.Peers() {
 		if ok, until := g.allowAttempt(addr, now); !ok {
-			slog.Debug("state gossip: peer in backoff", "peer", addr, "until", until)
+			slog.Debug("state gossip: peer in backoff", "peer", redactedPeerURL(addr), "until", until)
 			continue
 		}
 		digest, err := g.LocalDigest(ctx)
 		if err != nil {
 			return err
 		}
+		// A pull reports the peer's state as of when it was asked, so its start
+		// time is what "inbound caught up" can claim.
+		started := time.Now()
 		entries, err := g.syncer.Pull(ctx, addr, PullRequest{
 			ProtocolVersion: StateProtocolVersion,
 			PolicyID:        g.policy.ID(),
@@ -214,15 +221,13 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			var resync *ResyncRequiredError
 			if errors.As(err, &resync) {
 				if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
-					g.recordPeerFailure(addr, "pull-resync", err, now)
-					errs = append(errs, err)
+					errs = append(errs, g.recordPeerFailure(addr, "pull-resync", err, now))
 					continue
 				}
 				g.recordPeerSuccess(addr)
 				continue
 			}
-			g.recordPeerFailure(addr, "pull", err, now)
-			errs = append(errs, err)
+			errs = append(errs, g.recordPeerFailure(addr, "pull", err, now))
 			continue
 		}
 		var applyErrs []error
@@ -237,21 +242,20 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 					beyondHorizon++
 					continue
 				}
-				applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", addr, entry.Key, err))
+				applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", redactedPeerURL(addr), entry.Key, err))
 			}
 		}
 		if beyondHorizon > 0 {
 			slog.Warn("state gossip: refused pulled entries below the local GC horizon; peer must resync",
-				"peer", addr,
+				"peer", redactedPeerURL(addr),
 				"refused", beyondHorizon,
 			)
 		}
 		if err := errors.Join(applyErrs...); err != nil {
-			g.recordPeerFailure(addr, "pull-apply", err, now)
-			errs = append(errs, err)
+			errs = append(errs, g.recordPeerFailure(addr, "pull-apply", err, now))
 			continue
 		}
-		g.recordPeerSuccess(addr)
+		g.recordPullSuccess(addr, started)
 	}
 	return errors.Join(errs...)
 }
@@ -476,25 +480,48 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	}
 	state.failures = 0
 	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
 	return nil
 }
 
+// recordPeerSuccess clears backoff after an exchange that is neither an
+// acknowledged push nor a fully applied pull (a snapshot resync). It does not
+// move lastPull: the conservative inbound claim waits for the next pull.
 func (g *GossipEngine) recordPeerSuccess(addr string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures = 0
 	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
 }
 
-func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now time.Time) {
+func (g *GossipEngine) recordPullSuccess(addr string, started time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.peerStateLocked(addr)
+	state.failures = 0
+	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
+	state.lastPull = started
+}
+
+// recordPeerFailure records a failed exchange and returns err with the peer
+// password removed, for the caller to return.
+func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now time.Time) error {
+	err = redactPeerErr(addr, err)
+	message := err.Error()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures++
 	backoff := saturatedBackoff(g.backoffBase, g.backoffMax, state.failures)
 	state.nextAttempt = now.Add(backoff)
-	slog.Warn("state gossip: peer sync failed", "peer", addr, "operation", operation, "err", err, "retryAt", state.nextAttempt)
+	state.lastError = message
+	state.lastErrorTime = time.Now()
+	state.lastErrorOp = operation
+	slog.Warn("state gossip: peer sync failed", "peer", redactedPeerURL(addr), "operation", operation, "err", message, "retryAt", state.nextAttempt)
+	return err
 }
 
 func saturatedBackoff(base, max time.Duration, failures int) time.Duration {
@@ -536,7 +563,7 @@ func (g *GossipEngine) pushSuccessPosition(peer string, since uint64, changes []
 			firstTransient = rejectedPosition
 		}
 		slog.Warn("state gossip: transient push rejection",
-			"peer", peer,
+			"peer", redactedPeerURL(peer),
 			"key", rejection.Key,
 			"reason", rejection.Reason,
 			"offsetMS", rejection.OffsetMS,
@@ -654,13 +681,14 @@ func (g *GossipEngine) maintain(ctx context.Context) {
 // peer refuses and adopt the peer horizon. Only the set of snapshot keys is kept
 // across pages, not the entries.
 func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon Timestamp) error {
+	shown := redactedPeerURL(addr)
 	gs, ok := g.store.(gcStore)
 	if !ok {
-		return fmt.Errorf("peer %s requires snapshot resync: %w", addr, ErrTombstoneGCUnsupported)
+		return fmt.Errorf("peer %s requires snapshot resync: %w", shown, ErrTombstoneGCUnsupported)
 	}
 	snapshotter, ok := g.syncer.(SnapshotSyncer)
 	if !ok {
-		return fmt.Errorf("peer %s requires snapshot resync, syncer cannot pull snapshots: %w", addr, ErrTombstoneGCUnsupported)
+		return fmt.Errorf("peer %s requires snapshot resync, syncer cannot pull snapshots: %w", shown, ErrTombstoneGCUnsupported)
 	}
 	var (
 		held             = make(map[string]struct{})
@@ -678,14 +706,14 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 			Limit:           resyncPageSize,
 		})
 		if err != nil {
-			return fmt.Errorf("pull resync snapshot page %d from %s: %w", page, addr, err)
+			return fmt.Errorf("pull resync snapshot page %d from %s: %w", page, shown, err)
 		}
 		if page == 0 {
 			// The first page's horizon was read before any snapshot entry, so it is
 			// covered by everything the peer returns afterwards.
 			horizon = timestampValue(resp.GCHorizon)
 			if horizon.Compare(knownHorizon) < 0 {
-				return fmt.Errorf("resync snapshot from %s reports horizon %+v below the refused horizon %+v", addr, horizon, knownHorizon)
+				return fmt.Errorf("resync snapshot from %s reports horizon %+v below the refused horizon %+v", shown, horizon, knownHorizon)
 			}
 		}
 		for _, entry := range resp.Entries {
@@ -699,7 +727,7 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 					refused++
 					continue
 				}
-				return fmt.Errorf("apply resync snapshot entry %q from %s: %w", entry.Key, addr, err)
+				return fmt.Errorf("apply resync snapshot entry %q from %s: %w", entry.Key, shown, err)
 			}
 			if ok {
 				applied++
@@ -709,16 +737,16 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 			break
 		}
 		if resp.NextSincePosition <= since {
-			return fmt.Errorf("resync snapshot from %s did not advance past position %d", addr, since)
+			return fmt.Errorf("resync snapshot from %s did not advance past position %d", shown, since)
 		}
 		since = resp.NextSincePosition
 	}
 	result, err := gs.finishResync(ctx, held, horizon)
 	if err != nil {
-		return fmt.Errorf("resync from %s: %w", addr, err)
+		return fmt.Errorf("resync from %s: %w", shown, err)
 	}
 	slog.Warn("state gossip: resynced from peer snapshot",
-		"peer", addr,
+		"peer", shown,
 		"applied", applied,
 		"refused", refused,
 		"purged", result.Purged,

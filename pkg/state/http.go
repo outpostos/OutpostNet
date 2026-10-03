@@ -87,10 +87,10 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 	if err := s.doJSON(ctx, http.MethodPost, addr, PushPath, req, &resp); err != nil {
 		return nil, err
 	}
-	if err := validateProtocolResponse(addr, "push", resp.ProtocolVersion); err != nil {
+	if err := validateProtocolResponse(redactedPeerURL(addr), "push", resp.ProtocolVersion); err != nil {
 		return nil, err
 	}
-	if err := validatePolicyResponse(addr, "push", req.PolicyID, resp.PolicyID); err != nil {
+	if err := validatePolicyResponse(redactedPeerURL(addr), "push", req.PolicyID, resp.PolicyID); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -127,10 +127,10 @@ func (s *HTTPSyncer) pull(ctx context.Context, addr string, req PullRequest) (*P
 	if err := s.doJSON(ctx, http.MethodPost, addr, PullPath, req, &resp); err != nil {
 		return nil, err
 	}
-	if err := validateProtocolResponse(addr, "pull", resp.ProtocolVersion); err != nil {
+	if err := validateProtocolResponse(redactedPeerURL(addr), "pull", resp.ProtocolVersion); err != nil {
 		return nil, err
 	}
-	if err := validatePolicyResponse(addr, "pull", req.PolicyID, resp.PolicyID); err != nil {
+	if err := validatePolicyResponse(redactedPeerURL(addr), "pull", req.PolicyID, resp.PolicyID); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -142,9 +142,13 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 		return fmt.Errorf("marshal %s %s request: %w", method, path, err)
 	}
 	url := buildPeerURL(addr, path)
+	// Errors name the peer by its redacted URL and never repeat the bearer
+	// token, even if a peer echoes it back in an error body: callers log these
+	// errors and GossipEngine.ReplicationStatus reports them.
+	shown := redactedPeerURL(url)
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("build %s %s request: %w", method, url, err)
+		return fmt.Errorf("build %s %s request: %w", method, shown, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -153,33 +157,37 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, url, err)
+		return fmt.Errorf("%s %s: %w", method, shown, err)
 	}
 	defer resp.Body.Close()
 	body, err := readLimitedResponseBody(resp, s.maxResponseBytes)
 	if err != nil {
-		return fmt.Errorf("read %s %s response: %w", method, url, err)
+		return fmt.Errorf("read %s %s response: %w", method, shown, err)
 	}
 	if resp.StatusCode == http.StatusGone {
 		var gone resyncRequiredBody
 		if err := json.Unmarshal(body, &gone); err == nil && !gone.GCHorizon.isZero() {
-			return &ResyncRequiredError{Peer: addr, Horizon: gone.GCHorizon}
+			return &ResyncRequiredError{Peer: redactedPeerURL(addr), Horizon: gone.GCHorizon}
 		}
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: status %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(body)))
+		// A peer may echo the request credentials: the bearer token or the
+		// password of the URL it was reached at.
+		text := strings.ReplaceAll(strings.TrimSpace(string(body)), s.authToken, redactedSecret)
+		text = redactPeerError(addr, text)
+		return fmt.Errorf("%s %s: status %d: %s", method, shown, resp.StatusCode, text)
 	}
 	if respBody == nil {
 		return nil
 	}
 	if err := json.Unmarshal(body, respBody); err != nil {
-		return fmt.Errorf("decode %s %s response: %w", method, url, err)
+		return fmt.Errorf("decode %s %s response: %w", method, shown, err)
 	}
 	return nil
 }
 
 func buildPeerURL(addr, path string) string {
-	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+	if hasHTTPScheme(addr) {
 		return strings.TrimRight(addr, "/") + path
 	}
 	return "http://" + strings.TrimRight(addr, "/") + path

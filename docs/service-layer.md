@@ -67,6 +67,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 | `TestNetCommonLayerDoesNotImportService` | `pkg/tunnel`、`pkg/tunnel/tlsutil`、`pkg/protocol`、`pkg/state`、`pkg/agentconfig` | 传递依赖中无 `pkg/service`、`internal/servicehost`、`internal/agent` |
 | `TestServiceDomainDoesNotDependOnTransportOrHosts` | `pkg/service` | 传递依赖中无 `pkg/tunnel*` 与任何 `internal/*` |
 | `TestNetHostStreamAPIIsServiceAgnostic` | `internal/agent`（仅 `TunnelManager` 导出方法签名） | 签名不使用 `pkg/service` 类型；**不**检查 `internal/agent` 的 import（组合宿主允许 import `pkg/service`） |
+| `TestNetLibrariesDoNotDependOnOutpostRange`（票10-B） | `pkg/state`、`pkg/tunnel*`、`pkg/service`、`pkg/protocol`、`pkg/agentconfig` | 自身及模块内传递依赖不 import OutpostRange（观测契约只在 `internal/observation` 与宿主层使用，见 `docs/observation.md`） |
 
 职责：
 

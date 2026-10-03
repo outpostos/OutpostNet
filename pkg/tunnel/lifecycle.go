@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"net"
@@ -62,6 +63,10 @@ type ManagedClient struct {
 	conn  *quic.Conn
 	state ConnState
 
+	// Latest failed dial/auth attempt or lost connection, for Status.
+	lastError     string
+	lastErrorTime time.Time
+
 	// In-flight stream accounting for graceful shutdown. A sync.WaitGroup is
 	// not usable here: streams may be opened concurrently with
 	// GracefulShutdown, and WaitGroup forbids Add from zero racing with Wait.
@@ -101,6 +106,39 @@ func (mc *ManagedClient) setState(s ConnState) {
 	}
 }
 
+// ClientStatus is a read-only view of a ManagedClient for observers.
+type ClientStatus struct {
+	State      ConnState
+	ServerAddr string
+	// LastError is the latest failed dial or authentication attempt, or the
+	// reason the latest connection was lost. It is kept after the client
+	// reconnects; compare LastErrorTime. Empty when nothing failed yet.
+	LastError     string
+	LastErrorTime time.Time
+}
+
+// Status returns the current state, remote address and latest failure.
+func (mc *ManagedClient) Status() ClientStatus {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return ClientStatus{
+		State:         mc.state,
+		ServerAddr:    mc.cfg.ServerAddr,
+		LastError:     mc.lastError,
+		LastErrorTime: mc.lastErrorTime,
+	}
+}
+
+func (mc *ManagedClient) recordError(err error) {
+	if err == nil {
+		return
+	}
+	mc.mu.Lock()
+	mc.lastError = err.Error()
+	mc.lastErrorTime = time.Now()
+	mc.mu.Unlock()
+}
+
 // State returns the current connection state.
 func (mc *ManagedClient) State() ConnState {
 	mc.mu.RLock()
@@ -125,6 +163,7 @@ func (mc *ManagedClient) Connect(ctx context.Context) error {
 	mc.mu.RUnlock()
 	conn, err := dialAndAuth(ctx, cfg)
 	if err != nil {
+		mc.recordError(err)
 		mc.setState(StateDisconnected)
 		return err
 	}
@@ -186,6 +225,7 @@ func (mc *ManagedClient) monitor(ctx context.Context) {
 			return
 		case <-conn.Context().Done():
 			// Connection lost.
+			mc.recordError(fmt.Errorf("connection lost: %w", context.Cause(conn.Context())))
 			mc.logger.Warn("connection lost, reconnecting...", "error", conn.Context().Err())
 			mc.reconnect(ctx)
 		}
@@ -214,6 +254,7 @@ func (mc *ManagedClient) reconnect(ctx context.Context) {
 
 		conn, err := dialAndAuth(ctx, cfg)
 		if err != nil {
+			mc.recordError(err)
 			mc.logger.Error("reconnect failed", "attempt", attempt, "error", err)
 			// Exponential backoff.
 			delay = time.Duration(math.Min(
