@@ -24,7 +24,8 @@ HTTP 形态沿用 Range `docs/observation-api.md`：
 
 - `GET /outpostrange/observation/v1alpha1/snapshot` → `Snapshot`（protobuf JSON）。
 - `GET /outpostrange/observation/v1alpha1/events?after_seq=<n>` → SSE，每条 `data:` 是一个 `Event`。
-  `after_seq` 早于保留窗口时回 `410 Gone`（range-agent 会重新取快照）。
+  `after_seq` 早于保留窗口时回 `410 Gone`。range-agent 563b72a 收到 410 后用同一 `after_seq` 重试，
+  不会重新取快照（Range 侧已记账，见第 9 节）。
 - `seq` 高 44 位为进程启动 epoch（`UnixMilli << 20`），低 20 位为 epoch 内序号。
 
 ## 2. Net 层报告的本地事实（`net_peer_changed` 111、快照字段 15）
@@ -108,8 +109,9 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 - 观测 HTTP 服务在独立 goroutine 里启动；监听失败（端口占用等）或运行期出错只记 `slog.Error`，
   `outpostnet-agent` / `outpostnet-service` 继续运行（参考 OutpostLet `pkg/agent/agent.go` 与
   `TestObservationServiceListenFailureDoesNotStopAgent`）。
-- 记录事实非阻塞：事件写入有界环形缓冲（默认 1024 条），满了丢最旧的并计数；订阅者通道满（慢订阅者）
-  时关闭该订阅，range-agent 用 `after_seq` 重连，不反压产品路径。
+- 记录事实非阻塞：事件写入有界环形缓冲（默认 4096 条，`DefaultEventBufferSize`），满了丢最旧的并计数；
+  每个订阅者另有一条 1024 条的通道，通道满（慢订阅者）时关闭该订阅，range-agent 用 `after_seq` 重连，
+  不反压产品路径。
 - 观测只读产品状态（隧道状态、入口打开流的结果），不写产品状态，不新增产品到 Range 的运行期网络依赖。
 - 不实现故障注入。
 
@@ -151,6 +153,9 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 - range-agent 563b72a 遇到 `410 Gone` 时以同一 `after_seq` 重试，不重新取快照（`RunObservationEndpoint` 只在启动时取快照）；
   若订阅者落后超过保留窗口（4096 条）会一直拿到 410。属于 Range 侧行为，记录不改。
 - “后端不回数据就关连接”会被判为 `UNREACHABLE`（第 3 节）。
+- Net 链路的变化检测包含 `last_error_time`：分区期间每次重连失败都会刷新它，采样（1s）发现后发一条
+  `net_peer_changed`，即每个对端每次退避各一条事件（退避 1s 起、翻倍、封顶 30s）。这是如实报告每次失败的时间，
+  不做合并。
 - 只在单机多进程/同进程多 Host 上验证，未在多台机器上验证。
 
 ## 10. 验证记录（322b90c，2026-10-03，单机）
