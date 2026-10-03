@@ -387,6 +387,26 @@ it run `Compact` (which rewrites every `batch` as ordinary `entry` records), and
 retry the downgrade; the same directory after `Compact` opens under 03b without
 error and with the same horizon (measured).
 
+**Precondition: compact after writes have stopped.** `Compact` only rewrites
+the records that exist when it runs. A 03d node that keeps gossiping after
+`Compact` writes a new `batch` record on its next resync (any peer's 410, a
+refused push or a digest refusal triggers one), and the directory is again
+unreadable by 03b. The downgrade sequence is therefore: stop gossip on the node
+(no `Run`, `SyncOnce` or `AntiEntropyOnce`, so no resync can start), call
+`Compact`, exit without any further write, then start the 03b binary.
+
+**Current limit: no operational entry point.** Nothing outside `pkg/state`
+calls `Compact`: no CLI, agent flag or endpoint exposes it, and the engine only
+runs `CompactIfNeeded`, which compacts on a record-count threshold
+(`CompactionMinRecords`) while gossip keeps running, so it cannot provide the
+sequence above. A "stop gossip, force `Compact`, exit" entry is tracked in
+ticket 11 and must exist before GC is enabled anywhere a downgrade may be
+needed. Until then the only downgrade path for a directory that holds `batch`
+records is to let the node catch up with every peer
+(`ReplicationStatus.CaughtUp`), stop it, clear its data directory and start the
+03b binary on the empty directory, which resyncs from its peers under the 03b
+rule; writes the node had not replicated are lost on that path.
+
 **Why the format version is not raised.** The 03b binary is fixed, so only its
 existing error paths can be chosen from. Raising the version of `batch` records
 makes 03b report `replay durable state log line 2: unsupported durable record
