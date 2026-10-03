@@ -16,11 +16,19 @@ import (
 type countingSyncer struct {
 	loopSyncer
 	snapshots *atomic.Int64
-	strip     func() bool
+	// pushRefused counts pushes refused with ResyncRequiredError. HandlePush
+	// returns that error only from the request-level horizon check, so this is
+	// the number of lower-horizon 410s the pusher received.
+	pushRefused *atomic.Int64
+	strip       func() bool
 }
 
 func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
 	resp, err := s.loopSyncer.Push(ctx, addr, req)
+	var resync *ResyncRequiredError
+	if errors.As(err, &resync) {
+		s.pushRefused.Add(1)
+	}
 	if resp != nil && s.strip() {
 		resp.NodeID = ""
 	}
@@ -53,6 +61,8 @@ type churnCluster struct {
 	clock   *fixedPhysicalClock
 	net     *loopNet
 	resyncs atomic.Int64
+	// pushRefused counts request-level lower-horizon 410s on pushes.
+	pushRefused atomic.Int64
 	// stripNodeID, when set for a pusher, removes node_id from the push
 	// responses it receives, modelling 03b peers that never send it.
 	stripNodeID map[string]bool
@@ -110,7 +120,7 @@ func (c *churnCluster) attachNode(t *testing.T, id string, peers []string, store
 	engine, err := NewGossipEngine(GossipConfig{
 		NodeID:       id,
 		Store:        store,
-		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, strip: func() bool { return c.stripNodeID[id] }},
+		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, pushRefused: &c.pushRefused, strip: func() bool { return c.stripNodeID[id] }},
 		PeerProvider: PeerProviderFunc(func() []string { return peerList.Load() }),
 	})
 	if err != nil {
@@ -397,6 +407,37 @@ func TestPartitionBeyondRetentionStillForcesResync(t *testing.T) {
 	cluster.net.setBlocked("node-1", "node-2", false)
 	a.peers.Store([]string{"node-1", "node-2"})
 	b.peers.Store([]string{"node-0", "node-2"})
+
+	// The rejoin is refused by the request-level lower-horizon check, not only
+	// by the digest check or a per-entry rejection: node-2's horizon is non-zero
+	// and covers node-0's adopted horizon, so the only reason it is not vouched
+	// is that it never acknowledged the tombstones node-0 collected while it was
+	// out of the membership. Its first push carries only a fresh key.
+	horizonL := l.store.GCHorizon()
+	if horizonL.isZero() || horizonL.Compare(a.store.GCHorizon()) >= 0 || horizonL.Compare(a.store.(gcStore).adoptedHorizon()) < 0 {
+		t.Fatalf("setup: node-2 horizon %+v must be non-zero, below node-0's %+v and at least its adopted %+v",
+			horizonL, a.store.GCHorizon(), a.store.(gcStore).adoptedHorizon())
+	}
+	if vouched, err := a.engine.requesterVouched(ctx, horizonL, l.id); err != nil || vouched {
+		t.Fatalf("node-0 vouches for node-2 after the partition: vouched=%v err=%v", vouched, err)
+	}
+	if _, err := l.store.Put(ctx, "node-2/rejoin", []byte("x")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	cluster.resyncs.Store(0)
+	cluster.pushRefused.Store(0)
+	for _, peer := range l.engine.peerProvider.Peers() {
+		clearPeerBackoffForTest(l.engine, peer)
+	}
+	if err := l.engine.SyncOnce(ctx); err != nil {
+		t.Fatalf("node-2 rejoin push: %v", err)
+	}
+	if cluster.pushRefused.Load() == 0 || cluster.resyncs.Load() == 0 {
+		t.Fatalf("node-2's rejoin push was not refused with a lower-horizon 410 (refused %d, resyncs %d)",
+			cluster.pushRefused.Load(), cluster.resyncs.Load())
+	}
+	t.Logf("rejoin push: %d lower-horizon 410s, %d resyncs", cluster.pushRefused.Load(), cluster.resyncs.Load())
+
 	var errs error
 	for round := 0; round < 4; round++ {
 		errs = nil

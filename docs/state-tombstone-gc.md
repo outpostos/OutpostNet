@@ -138,7 +138,11 @@ below: 0 in all four once every node has a horizon (see "Healthy cluster").
 `TestPartitionBeyondRetentionStillForcesResync` shows a
 node partitioned and dropped from the membership for longer than the retention
 is still resynced when it rejoins, nothing is resurrected, and the healthy load
-afterwards is back to 0.
+afterwards is back to 0. Its first push after the rejoin carries only a fresh
+key and is refused by the request-level lower-horizon check (asserted: the push
+gets `ResyncRequiredError`, the node's horizon is non-zero and covers the
+responder's adopted horizon, so the refusal comes from the unacknowledged
+floor), not by the digest check or a per-entry rejection.
 
 **Rule.** Responder `R` (horizon `H_R`, GC floor `F_R`, adopted horizon `A_R`)
 answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
