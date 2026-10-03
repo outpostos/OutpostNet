@@ -175,8 +175,10 @@ The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports
 | Unknown fields | Rejected |
 
 Runtime changes: export `local_addr` add/change/remove applies in place when the config file
-changes (`--watch-interval`, default 5s). Tunnels, entries, auth, TLS and `peers` require a
-restart; peer address changes at runtime go through `PUT /v1/peers`.
+changes (`--watch-interval`, default 5s). `node_id`, tunnels, entries, auth, TLS, management,
+`health_addr` and `peers` require a restart (the watcher logs a warning; `--node-id` /
+`--health-addr` overrides are re-applied before comparing, so they do not trigger it); peer
+address changes at runtime go through `PUT /v1/peers`.
 
 | Flag | Default | Description |
 |------|---------|-------------|

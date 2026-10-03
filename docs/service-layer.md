@@ -110,7 +110,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 ## 7. 已知限制
 
 - 动态路径沿用对等目录的角色规则：`node_id` 字典序小的一方拨号，且只有拨号方能打开服务流，因此消费方节点的 `node_id` 必须小于提供方；反向访问需要静态路径或后续改造。
-- `peers` 仅在启动时注入；运行期地址变化只通过 `PUT /v1/peers`（整表替换）。配置文件中 tunnels/imports/auth/tls/peers 的变化需重启，watcher 只会记录告警。
+- `peers` 仅在启动时注入；运行期地址变化只通过 `PUT /v1/peers`（整表替换）。配置文件中 node_id/tunnels/imports/auth/tls/management/health_addr/peers 的变化需重启，watcher 只应用 exports 并对其余变化记录一条告警（`Host.sameRestartScope`）。比较对象是“重新套用同样命令行覆盖（`--node-id`、`--health-addr`）后的文件配置”与运行中配置，因此命令行覆盖本身不会导致每次 reload 误告警。
 - 端点切换期间（重连退避初始 1s）新连接会被入口立即关闭，不排队等待；应用需自行重试。
 - 不承诺在途连接无损迁移（见第 4 节）。
 - 本票只在单机多进程/同进程多监听上验证；多台物理机/真实网络下未验证。

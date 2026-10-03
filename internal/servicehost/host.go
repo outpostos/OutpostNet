@@ -214,31 +214,49 @@ func (h *Host) ApplyExports(next []agentconfig.ExportConfig) service.ExportChang
 
 // WatchConfig polls path with the existing agent ConfigWatcher (using the
 // stricter Service loader) until ctx is cancelled. Export changes apply in
-// place; tunnels, entries, peers, auth and TLS require a restart, and peer
-// address changes at runtime go through PUT /v1/peers.
-func (h *Host) WatchConfig(ctx context.Context, path string, interval time.Duration) error {
+// place; tunnels, entries, peers, auth, TLS, management and health require a
+// restart and are only reported, and peer address changes at runtime go
+// through PUT /v1/peers.
+//
+// override must be the same adjustment the command applied to the file
+// config before New (for example --node-id / --health-addr); it is applied
+// to every reloaded file so the restart-scope comparison is against what is
+// actually running, not against the raw file. nil means no overrides.
+func (h *Host) WatchConfig(ctx context.Context, path string, interval time.Duration, override func(*service.Config)) error {
+	// The watcher hands OnChange only the agentconfig part; keep the full
+	// Service config (peers) from the loader for the restart-scope check.
+	// Loader and OnChange run sequentially on the watcher goroutine.
+	var loaded *service.Config
 	w := agent.NewConfigWatcher(path, interval, h.logger)
 	w.SetLoader(func(p string) (*agentconfig.Config, error) {
 		cfg, err := service.LoadConfig(p)
 		if err != nil {
 			return nil, err
 		}
+		if override != nil {
+			override(cfg)
+			if err := service.ValidateConfig(cfg); err != nil {
+				return nil, fmt.Errorf("validate config with overrides: %w", err)
+			}
+		}
+		loaded = cfg
 		return &cfg.Config, nil
 	})
-	w.OnChange(h.reload)
+	w.OnChange(func(*agentconfig.Config) { h.reload(loaded) })
 	return w.Watch(ctx)
 }
 
-func (h *Host) reload(next *agentconfig.Config) {
+func (h *Host) reload(next *service.Config) {
 	h.ApplyExports(next.Exports)
-	if !sameRestartScope(&h.cfg.Config, next) {
+	if !sameRestartScope(h.cfg, next) {
 		h.logger.Warn("config change outside exports ignored until restart (use PUT /v1/peers for peer address changes)")
 	}
 }
 
-func sameRestartScope(a, b *agentconfig.Config) bool {
-	return fmt.Sprint(a.NodeID, a.Tunnels, a.Imports, a.TLS, a.Auth, a.Management, a.HealthAddr) ==
-		fmt.Sprint(b.NodeID, b.Tunnels, b.Imports, b.TLS, b.Auth, b.Management, b.HealthAddr)
+// sameRestartScope compares everything Run reads at startup except exports.
+func sameRestartScope(a, b *service.Config) bool {
+	return fmt.Sprint(a.NodeID, a.Tunnels, a.Imports, a.TLS, a.Auth, a.Management, a.HealthAddr, a.Peers) ==
+		fmt.Sprint(b.NodeID, b.Tunnels, b.Imports, b.TLS, b.Auth, b.Management, b.HealthAddr, b.Peers)
 }
 
 // TunnelAddrs returns the bound addresses of this node's tunnel listeners.

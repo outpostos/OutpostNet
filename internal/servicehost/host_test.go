@@ -484,7 +484,7 @@ func TestConfigFileExportMoveAppliesWithoutRestart(t *testing.T) {
 	nodeB := startHost(t, cfgB)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go nodeB.h.WatchConfig(ctx, path, 50*time.Millisecond)
+	go nodeB.h.WatchConfig(ctx, path, 50*time.Millisecond, nil)
 
 	entry := freeAddr(t)
 	startHost(t, consumingNode(t, "node-a", entry, tunnelAddr(t, nodeB), token))
@@ -611,4 +611,81 @@ func TestRunReportsEntryBindError(t *testing.T) {
 		t.Errorf("bind error reported after %v; want it immediately", d)
 	}
 	assertEntriesReleased(t, okEntry)
+}
+
+// writeServiceFile writes a node-b Service config with the given export
+// address and peers section.
+func writeServiceFile(t *testing.T, path, sock, healthAddr, appAddr, peers string) {
+	t.Helper()
+	y := "node_id: node-b\nhealth_addr: " + healthAddr + "\n" +
+		"management:\n  socket_path: " + sock + "\n" +
+		"auth:\n  token: " + token + "\n" +
+		"tls:\n  insecure: true\n" +
+		"tunnels:\n  - role: server\n    listen_addr: 127.0.0.1:0\n" +
+		"exports:\n  - name: echo\n    local_addr: " + appAddr + "\n    protocol: tcp\n" + peers
+	if err := os.WriteFile(path, []byte(y), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const restartWarning = "config change outside exports ignored until restart"
+
+// TestReloadWarnsOnPeersChange: peers are seeded only at startup, so a
+// peers edit in the file must be reported as needing a restart
+// (docs/service-layer.md §7).
+func TestReloadWarnsOnPeersChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node-b.yaml")
+	sock := filepath.Join(sockDir(t), "b.sock")
+	writeServiceFile(t, path, sock, "127.0.0.1:0", "127.0.0.1:1", "")
+	cfg, err := service.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs logBuffer
+	r := startHostWithLogger(t, cfg, logs.logger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.h.WatchConfig(ctx, path, 20*time.Millisecond, nil)
+	time.Sleep(100 * time.Millisecond) // let the watcher record the initial stat
+
+	writeServiceFile(t, path, sock, "127.0.0.1:0", "127.0.0.1:2",
+		"peers:\n  - node_id: node-c\n    addr: 127.0.0.1:7443\n")
+	waitFor(t, 5*time.Second, "export change applied", func() bool {
+		return strings.Contains(logs.String(), "exports applied")
+	})
+	if !strings.Contains(logs.String(), restartWarning) {
+		t.Fatalf("peers change was not reported as needing a restart; log:\n%s", logs.String())
+	}
+}
+
+// TestReloadIgnoresCommandLineOverrides: the command overrides node_id and
+// health_addr after loading the file. An export-only edit must not be
+// reported as a restart-scope change just because the file differs from
+// those overrides.
+func TestReloadIgnoresCommandLineOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node-b.yaml")
+	sock := filepath.Join(sockDir(t), "b.sock")
+	writeServiceFile(t, path, sock, "127.0.0.1:1", "127.0.0.1:1", "")
+	cfg, err := service.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := func(c *service.Config) { c.HealthAddr = "127.0.0.1:0" } // as --health-addr does
+	override(cfg)
+	var logs logBuffer
+	r := startHostWithLogger(t, cfg, logs.logger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.h.WatchConfig(ctx, path, 20*time.Millisecond, override)
+	time.Sleep(100 * time.Millisecond)
+
+	writeServiceFile(t, path, sock, "127.0.0.1:1", "127.0.0.1:2", "")
+	waitFor(t, 5*time.Second, "export change applied", func() bool {
+		return strings.Contains(logs.String(), "exports applied")
+	})
+	if strings.Contains(logs.String(), restartWarning) {
+		t.Fatalf("export-only change reported as restart scope; log:\n%s", logs.String())
+	}
 }

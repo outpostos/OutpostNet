@@ -41,16 +41,21 @@ func NewServiceCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
-			if nodeID != "" {
-				cfg.NodeID = nodeID
+			// Flag overrides; the config watcher re-applies them to every
+			// reloaded file so reloads compare against the running config.
+			override := func(c *service.Config) {
+				if nodeID != "" {
+					c.NodeID = nodeID
+				}
+				if healthAddr != "" {
+					c.HealthAddr = healthAddr
+				}
 			}
-			if healthAddr != "" {
-				cfg.HealthAddr = healthAddr
-			}
+			override(cfg)
 			if err := service.ValidateConfig(cfg); err != nil {
 				return fmt.Errorf("validate config: %w", err)
 			}
-			return run(cfg, configFile, watchInterval)
+			return run(cfg, configFile, watchInterval, override)
 		},
 	}
 	cmd.Version = version.Get().String()
@@ -61,7 +66,7 @@ func NewServiceCommand() *cobra.Command {
 	return cmd
 }
 
-func run(cfg *service.Config, configFile string, watchInterval time.Duration) error {
+func run(cfg *service.Config, configFile string, watchInterval time.Duration, override func(*service.Config)) error {
 	logger := slog.Default()
 	logger.Info("outpostnet-service starting", "version", version.Get().GitVersion, "node_id", cfg.NodeID,
 		"health", cfg.HealthAddr, "management", cfg.Management.SocketPath)
@@ -81,7 +86,7 @@ func run(cfg *service.Config, configFile string, watchInterval time.Duration) er
 				case <-time.After(50 * time.Millisecond):
 				}
 			}
-			if err := h.WatchConfig(ctx, configFile, watchInterval); err != nil {
+			if err := h.WatchConfig(ctx, configFile, watchInterval, override); err != nil {
 				logger.Error("config watcher stopped", "error", err)
 			}
 		}()
