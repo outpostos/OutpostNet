@@ -3,6 +3,7 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -403,4 +404,99 @@ func TestManagedClientOpenRelayStreamNilConn(t *testing.T) {
 	if err != net.ErrClosed {
 		t.Fatalf("expected net.ErrClosed, got %v", err)
 	}
+}
+
+// TestManagedClientGracefulShutdownRejectsNewStreams covers streams opened
+// concurrently with GracefulShutdown: once draining starts new streams are
+// rejected rather than counted, and the accounting stays race-free (run with
+// -race; the former sync.WaitGroup raced Add against Wait here).
+func TestManagedClientGracefulShutdownRejectsNewStreams(t *testing.T) {
+	srv, srvAddr := newTestServer(t)
+	echoLn := startEchoServer(t)
+	srv.AddRoute("echo", echoLn.Addr().String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mc := NewManagedClient(ManagedClientConfig{
+		ClientConfig: ClientConfig{
+			ServerAddr: srvAddr,
+			TLS:        tlsutil.ClientTLSConfig(true),
+		},
+	}, nil)
+	if err := mc.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	held, err := mc.OpenServiceStream(ctx, "echo")
+	if err != nil {
+		t.Fatalf("OpenServiceStream: %v", err)
+	}
+
+	// Openers racing with shutdown; each successfully opened stream is released.
+	stop := make(chan struct{})
+	var openers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		openers.Add(1)
+		go func() {
+			defer openers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				s, err := mc.OpenServiceStream(ctx, "echo")
+				if err != nil {
+					continue
+				}
+				// Reset both directions so stream credit is returned promptly.
+				s.CancelRead(0)
+				s.CancelWrite(0)
+				mc.StreamDone()
+			}
+		}()
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		_ = mc.GracefulShutdown(5 * time.Second)
+	}()
+
+	// While the held stream keeps shutdown waiting, new opens must be rejected.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		probeCtx, probeCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		s, err := mc.OpenServiceStream(probeCtx, "echo")
+		probeCancel()
+		if errors.Is(err, net.ErrClosed) {
+			break
+		}
+		if err == nil {
+			s.CancelRead(0)
+			s.CancelWrite(0)
+			mc.StreamDone()
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("OpenServiceStream still accepted after GracefulShutdown started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("GracefulShutdown returned while a stream was still in flight")
+	default:
+	}
+
+	held.Close()
+	mc.StreamDone()
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("GracefulShutdown did not return after last stream completed")
+	}
+	close(stop)
+	openers.Wait()
 }

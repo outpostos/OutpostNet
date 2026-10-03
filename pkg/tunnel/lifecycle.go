@@ -62,8 +62,13 @@ type ManagedClient struct {
 	conn  *quic.Conn
 	state ConnState
 
-	// activeStreams tracks in-flight streams for graceful shutdown.
-	streamWg sync.WaitGroup
+	// In-flight stream accounting for graceful shutdown. A sync.WaitGroup is
+	// not usable here: streams may be opened concurrently with
+	// GracefulShutdown, and WaitGroup forbids Add from zero racing with Wait.
+	streamMu sync.Mutex
+	inflight int
+	draining bool          // set by GracefulShutdown; new streams are rejected
+	drained  chan struct{} // closed once draining && inflight == 0
 
 	// cancel for the managed lifecycle goroutine.
 	cancel context.CancelFunc
@@ -258,18 +263,22 @@ func (mc *ManagedClient) OpenServiceStream(ctx context.Context, serviceName stri
 	if conn == nil {
 		return nil, net.ErrClosed
 	}
+	if !mc.acquireStream() {
+		return nil, net.ErrClosed
+	}
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		mc.StreamDone()
 		return nil, err
 	}
 
 	if err := WriteServiceHeader(stream, serviceName); err != nil {
 		stream.Close()
+		mc.StreamDone()
 		return nil, err
 	}
 
-	mc.streamWg.Add(1)
 	return stream, nil
 }
 
@@ -283,36 +292,76 @@ func (mc *ManagedClient) OpenRelayStream(ctx context.Context, serviceName string
 	if conn == nil {
 		return nil, net.ErrClosed
 	}
+	if !mc.acquireStream() {
+		return nil, net.ErrClosed
+	}
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
+		mc.StreamDone()
 		return nil, err
 	}
 
 	if err := WriteRelayHeader(stream, serviceName, hopCount); err != nil {
 		stream.Close()
+		mc.StreamDone()
 		return nil, err
 	}
 
-	mc.streamWg.Add(1)
 	return stream, nil
 }
 
 // StreamDone signals that a stream has completed. Call this after closing
 // a stream obtained from OpenServiceStream or OpenRelayStream.
 func (mc *ManagedClient) StreamDone() {
-	mc.streamWg.Done()
+	mc.streamMu.Lock()
+	defer mc.streamMu.Unlock()
+	if mc.inflight <= 0 {
+		panic("tunnel: ManagedClient.StreamDone called without matching open")
+	}
+	mc.inflight--
+	mc.signalDrainedLocked()
 }
 
-// GracefulShutdown waits for all in-flight streams to complete, then closes.
+// acquireStream registers a new in-flight stream. It returns false once
+// GracefulShutdown has started, so no stream is counted after draining begins.
+func (mc *ManagedClient) acquireStream() bool {
+	mc.streamMu.Lock()
+	defer mc.streamMu.Unlock()
+	if mc.draining {
+		return false
+	}
+	mc.inflight++
+	return true
+}
+
+// signalDrainedLocked closes drained when draining has no streams left.
+// Caller must hold streamMu.
+func (mc *ManagedClient) signalDrainedLocked() {
+	if !mc.draining || mc.inflight != 0 {
+		return
+	}
+	select {
+	case <-mc.drained:
+	default:
+		close(mc.drained)
+	}
+}
+
+// GracefulShutdown stops accepting new streams (OpenServiceStream and
+// OpenRelayStream return net.ErrClosed), waits up to timeout for in-flight
+// streams to complete, then closes.
 func (mc *ManagedClient) GracefulShutdown(timeout time.Duration) error {
 	mc.logger.Info("graceful shutdown initiated", "timeout", timeout)
 
-	done := make(chan struct{})
-	go func() {
-		mc.streamWg.Wait()
-		close(done)
-	}()
+	mc.streamMu.Lock()
+	if mc.drained == nil {
+		mc.drained = make(chan struct{})
+	}
+	mc.draining = true
+	mc.signalDrainedLocked()
+	done := mc.drained
+	mc.streamMu.Unlock()
 
 	select {
 	case <-done:
