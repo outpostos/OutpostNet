@@ -3,14 +3,14 @@
 > 状态：R1 实施说明。契约是 OutpostRange `563b72a` 的
 > `proto/outpostrange/observation/v1alpha1/observation.proto`，生产者规则见 Range
 > `docs/four-layer-producer-guide.md`。本文只写本仓库实际报告什么、从哪里取、哪些不报。
-> 阶段 1 是设计说明；落地位置见第 8 节（阶段 2、3 完成后补全）。
+> 落地位置与测试见第 8 节。
 
 ## 1. 谁暴露观测端点
 
 | 进程 | 观测端点 | component | 报告的层（由 body 决定） |
 | --- | --- | --- | --- |
 | `outpostnet-service`（`internal/servicehost`） | 默认 `127.0.0.1:17961`，`--observation-addr` 覆盖，空串关闭 | `COMPONENT_OUTPOSTSERVICE` | Service：`service_access_changed`(116)；Net：本进程隧道的 `net_peer_changed`(111) |
-| `outpostnet-agent`（`internal/agent`） | 默认 `127.0.0.1:17960`，`--observation-addr` 覆盖，空串关闭 | `COMPONENT_OUTPOSTNET` | Net：`net_peer_changed`(111) |
+| `outpostnet-agent`（`internal/agent`） | 默认 `127.0.0.1:17960`，`--observation-addr` 覆盖，空串关闭 | `COMPONENT_OUTPOSTNET` | Net：`net_peer_changed`(111)。旧组合宿主自带的 `imports` 入口**不报** Service 事实（Service 事实由 `outpostnet-service` 报告） |
 | `outpostnet-server` / `outpostnet-sidecar` | 不暴露 | — | 节点内 Unix socket 路由中枢，不跨节点，不属于四层 Net 连接事实 |
 | `outpostnet-controller` | 不暴露 | — | Kubernetes 控制面，不承载节点间连接 |
 
@@ -59,7 +59,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 
 | 字段 | 取值 |
 | --- | --- |
-| `service_name` | 稳定服务身份：`<service>@<node_id>`（动态）或 `<service>`（静态 region 路径，`Target.String()`） |
+| `service_name` | 稳定服务身份 `service.Target.String()`：动态为 `<service>@<node_id>`，静态 region 路径为 `<service> via region <region>` |
 | `entry_address` | 入口实际绑定地址 |
 | `state` | 见下表；入口从未有连接经过 → 不填（Range 显示 missing），不做主动探测 |
 | `backend_node_id` | 动态目标的 `node_id`；静态 region 目标没有节点身份 → 不填；`NO_BACKEND` 时不填 |
@@ -72,7 +72,8 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 | 观测到的结果 | 报告 |
 | --- | --- |
 | 打开流时目标节点不在对等目录 / 没有该 region 的隧道（`agent.ErrNoTunnel`） | `NO_BACKEND`，清空 backend 字段 |
-| 打开流失败（隧道正在重连、认证失败、QUIC 打开失败等） | `UNREACHABLE` + `last_error` |
+| 打开流失败（隧道正在重连时 `net.ErrClosed`、QUIC 打开失败等） | `UNREACHABLE` + `last_error`（backend 为尝试的那个实例） |
+| 入口正在关闭（ctx 已取消）时打开失败 | 不报（不是测量结果） |
 | 流打开后从对端收到第一个字节 | `REACHABLE` + 当时的 backend |
 | 流打开后对端在发来任何字节前关闭（提供方节点拨本地后端失败时就是这样：`tunnel.Server` 直接关流） | `UNREACHABLE`，`last_error` 写明“对端在返回任何后端数据前关闭了流” |
 | 本地应用先关闭连接、对端一直没回数据 | 不改变状态（没有可证明的结论） |
@@ -121,4 +122,32 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 
 ## 8. 落地位置
 
-（阶段 2、3 完成后补全。）
+| 内容 | 位置 |
+| --- | --- |
+| 公共复制状态接口 | `pkg/state/replication_status.go`（`GossipEngine.ReplicationStatus`、`PeerReplicationStatus`）；`gossip.go` 记录每 peer 结果；`http.go` 错误脱敏 |
+| 隧道只读状态 | `pkg/tunnel/lifecycle.go` `ManagedClient.Status()`（状态、地址、最近失败及时间） |
+| Net 宿主读取面 | `internal/agent/tunnel_manager.go`：`PeerLinks`、`SetLinkObserver`、`RegionClient`、`ErrNoTunnel` |
+| 观测生产者 | `internal/observation/`：`eventlog.go`（有界日志、seq epoch、慢订阅者丢弃）、`reporter.go`（快照）、`netpeers.go`（111/15 与采样）、`serviceaccess.go`（116/20，包装入口开流）、`server.go`（回环 HTTP/SSE） |
+| 宿主接线 | `internal/agent/observation.go`（`StartObservation`，两个宿主共用）、`internal/agent/agent.go`（`EnableObservation`）、`internal/servicehost/observation.go` + `host.go` |
+| 命令 | `cmd/outpostnet-agent`、`cmd/outpostnet-service` 的 `--observation-addr` |
+| Range 契约解析（测试） | `internal/observation/observationtest`：按 range-agent 563b72a 的做法严格解码（拒绝未知字段）、按流校验 seq、生成 117 订阅快照事件。Range 的 `internal/rangeagent`、`internal/observationjson` 受 Go internal 规则限制不能从本模块导入，故按其源码复刻 |
+| 边界测试 | `pkg/service/boundary_test.go` `TestNetLibrariesDoNotDependOnOutpostRange` |
+
+测试：
+
+| 测试 | 证明 |
+| --- | --- |
+| `pkg/state` `TestReplicationStatus*` | 每 peer 交换结果、退避跳过不算拉取、冷启动后确认位置保留且无拉取、凭据不泄露、并发安全（`-race`） |
+| `pkg/tunnel` `TestManagedClientStatusReportsLatestFailure` | 隧道最近失败可读、不含 token |
+| `internal/servicehost` `TestObservationReportsNetAndServiceFactsThroughRangeContract` | 两个真实 Host（真实 QUIC、token、真实 TCP 应用）：订阅快照含已连通的 Net 链路与未测量的入口；REACHABLE、实例替换后 backend 地址切换、后端失效 UNREACHABLE、对端移出目录 DISCONNECTED + NO_BACKEND；全部事件经严格契约解析，晚到订阅者快照 seq 等于最后事件 |
+| `internal/servicehost` `TestObservationPortTakenDoesNotStopHost`、`internal/agent` `TestObservationListenFailureDoesNotStopAgent` | 观测端口被占用时产品照常服务，只记日志 |
+| `internal/agent` `TestAgentObservationReportsTunnelPeer`、`TestObservationWithoutNodeIDIsDisabledNotFatal` | 真实 agent + 真实隧道 server 的 Net 事实；无 node_id 时观测关闭不影响 agent |
+| `internal/observation` 单元测试 | 环形缓冲与 410 gap、慢订阅者不阻塞、变化检测、入口结果判定、回环限制 |
+
+## 9. 已知限制
+
+- `rtt_ms`、被动接受的隧道连接、Net 复制进度（本仓进程不运行复制）不报。
+- range-agent 563b72a 遇到 `410 Gone` 时以同一 `after_seq` 重试，不重新取快照（`RunObservationEndpoint` 只在启动时取快照）；
+  若订阅者落后超过保留窗口（4096 条）会一直拿到 410。属于 Range 侧行为，记录不改。
+- “后端不回数据就关连接”会被判为 `UNREACHABLE`（第 3 节）。
+- 只在单机多进程/同进程多 Host 上验证，未在多台机器上验证。

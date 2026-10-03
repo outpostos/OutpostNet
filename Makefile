@@ -1,5 +1,13 @@
 # Makefile for OutpostNet v2
 
+# github.com/outpostos/OutpostRange (observation contract, used by
+# internal/observation) is a private module: fetch it directly over SSH
+# (git config url.git@github.com:.insteadOf https://github.com/), without the
+# public proxy or checksum database.
+GOPRIVATE ?= github.com/outpostos
+GONOSUMDB ?= github.com/outpostos
+export GOPRIVATE GONOSUMDB
+
 # Go parameters
 GOCMD=go
 GOBUILD=$(GOCMD) build -buildvcs=false

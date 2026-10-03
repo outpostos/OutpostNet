@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
@@ -36,6 +39,83 @@ type TunnelManager struct {
 
 	connectPeerClient      func(context.Context, *tunnel.ManagedClient) error
 	connectPeerClientUntil func(context.Context, *tunnel.ManagedClient)
+
+	// linkObserver is called (never under tm.mu) whenever a client changes
+	// state or is added, re-pointed or removed. See SetLinkObserver.
+	linkObserver atomic.Pointer[func()]
+}
+
+// ErrNoTunnel means there is no tunnel client toward the requested peer or
+// region: the node is not in the peer directory or no client tunnel is
+// configured for the region.
+var ErrNoTunnel = errors.New("no tunnel to target")
+
+// PeerLink is a read-only view of one client tunnel this node dials.
+type PeerLink struct {
+	// NodeID is set for peer-directory clients; static tunnels only know a
+	// region, which is not a node identity.
+	NodeID string
+	// Region is set for static client tunnels.
+	Region string
+	Status tunnel.ClientStatus
+}
+
+// SetLinkObserver registers fn to be called after any client tunnel changes
+// state or is added, re-pointed or removed. fn runs on the tunnel's own
+// goroutine and must not block (for example a coalescing signal); read the
+// links with PeerLinks from elsewhere. Set it before Start.
+func (tm *TunnelManager) SetLinkObserver(fn func()) {
+	if fn == nil {
+		tm.linkObserver.Store(nil)
+		return
+	}
+	tm.linkObserver.Store(&fn)
+}
+
+func (tm *TunnelManager) notifyLinks() {
+	if fn := tm.linkObserver.Load(); fn != nil {
+		(*fn)()
+	}
+}
+
+// PeerLinks returns the current client tunnels: peer-directory clients by
+// node_id, then static clients by region, each sorted.
+func (tm *TunnelManager) PeerLinks() []PeerLink {
+	tm.mu.Lock()
+	byNode := make(map[string]*tunnel.ManagedClient, len(tm.clientsByNode))
+	for k, v := range tm.clientsByNode {
+		byNode[k] = v
+	}
+	byRegion := make(map[string]*tunnel.ManagedClient, len(tm.clientsByRegion))
+	for k, v := range tm.clientsByRegion {
+		byRegion[k] = v
+	}
+	tm.mu.Unlock()
+	links := make([]PeerLink, 0, len(byNode)+len(byRegion))
+	for _, node := range sortedClientKeys(byNode) {
+		links = append(links, PeerLink{NodeID: node, Status: byNode[node].Status()})
+	}
+	for _, region := range sortedClientKeys(byRegion) {
+		links = append(links, PeerLink{Region: region, Status: byRegion[region].Status()})
+	}
+	return links
+}
+
+func sortedClientKeys(m map[string]*tunnel.ManagedClient) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// RegionClient returns the static client tunnel for region.
+func (tm *TunnelManager) RegionClient(region string) (*tunnel.ManagedClient, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	mc, ok := tm.clientsByRegion[region]
+	return mc, ok
 }
 
 // NewTunnelManager creates a new TunnelManager.
@@ -172,6 +252,7 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 	tm.clients = append(tm.clients, mc)
 	tm.clientsByRegion[tc.RemoteRegion] = mc
 	tm.mu.Unlock()
+	tm.notifyLinks()
 
 	// Start legacy import proxies for services from this remote region.
 	for _, imp := range tm.cfg.Imports {
@@ -196,6 +277,7 @@ func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel
 		MaxReconnectDelay:     30 * time.Second,
 		OnStateChange: func(s tunnel.ConnState) {
 			tm.logger.Info("tunnel state changed", "remote", remoteName, "state", s)
+			tm.notifyLinks()
 		},
 	}, tm.logger.With("tunnel", "client", "remote", remoteName))
 }
@@ -236,7 +318,7 @@ func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
 func (tm *TunnelManager) OpenPeerStream(ctx context.Context, nodeID, serviceName string) (io.ReadWriteCloser, error) {
 	mc, ok := tm.DynamicClient(nodeID)
 	if !ok {
-		return nil, fmt.Errorf("peer %q not in directory", nodeID)
+		return nil, fmt.Errorf("peer %q not in directory: %w", nodeID, ErrNoTunnel)
 	}
 	return openTrackedStream(ctx, mc, serviceName)
 }
@@ -249,7 +331,7 @@ func (tm *TunnelManager) OpenRegionStream(ctx context.Context, region, serviceNa
 	mc, ok := tm.clientsByRegion[region]
 	tm.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("no client tunnel for region %q", region)
+		return nil, fmt.Errorf("no client tunnel for region %q: %w", region, ErrNoTunnel)
 	}
 	return openTrackedStream(ctx, mc, serviceName)
 }
@@ -283,13 +365,16 @@ func (tm *TunnelManager) AddOrUpdatePeerClient(ctx context.Context, nodeID, addr
 		if mc.ServerAddr() == addr {
 			return nil
 		}
-		return mc.UpdateServerAddr(ctx, addr)
+		err := mc.UpdateServerAddr(ctx, addr)
+		tm.notifyLinks()
+		return err
 	}
 
 	mc := tm.newManagedClient(addr, nodeID)
 	tm.clients = append(tm.clients, mc)
 	tm.clientsByNode[nodeID] = mc
 	tm.mu.Unlock()
+	tm.notifyLinks()
 
 	if err := tm.connectPeerClient(ctx, mc); err != nil {
 		tm.logger.Warn("dynamic peer tunnel pending", "node_id", nodeID, "addr", addr, "error", err)
@@ -312,6 +397,7 @@ func (tm *TunnelManager) RemovePeerClient(nodeID string) {
 	}
 	tm.mu.Unlock()
 	if ok {
+		tm.notifyLinks()
 		_ = mc.GracefulShutdown(5 * time.Second)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/outpostos/OutpostNet/internal/agent"
+	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 	"github.com/outpostos/OutpostNet/pkg/service"
 )
@@ -33,6 +34,9 @@ type Host struct {
 	tunnels  *agent.TunnelManager
 	entries  []*service.Entry
 	healthLn net.Listener
+
+	observationAddr string
+	observation     *agent.Observation
 }
 
 // New creates a host for a validated Service config.
@@ -63,6 +67,24 @@ func (h *Host) Run(ctx context.Context) error {
 	netCfg.Imports = nil
 	tm := agent.NewTunnelManager(&netCfg, h.logger, nil)
 	defer tm.Stop()
+
+	// Observation is started before the tunnels so their first connection
+	// attempts are reported; it never fails the host (see StartObservation).
+	h.mu.Lock()
+	observationAddr := h.observationAddr
+	h.mu.Unlock()
+	obs := agent.StartObservation(ctx, agent.ObservationConfig{
+		Addr:      observationAddr,
+		NodeID:    h.cfg.NodeID,
+		Component: observation.ComponentService,
+	}, tm, h.logger)
+	// Stops after the deferred tunnel/entry teardown above it has run.
+	defer obs.Wait()
+	defer cancel()
+	h.mu.Lock()
+	h.observation = obs
+	h.mu.Unlock()
+
 	if err := tm.Start(ctx); err != nil {
 		return fmt.Errorf("start tunnels: %w", err)
 	}
@@ -106,12 +128,16 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 	}()
 	for i, tgt := range h.cfg.EntryTargets() {
+		opener, observer := observedOpener(obs, tm, tgt, service.NetOpener(tm))
 		e := service.NewEntry(service.EntryConfig{
 			Target:     tgt,
 			ListenAddr: h.cfg.Imports[i].ListenAddr,
-		}, service.NetOpener(tm), h.logger)
+		}, opener, h.logger)
 		if err := e.Listen(); err != nil {
 			return fmt.Errorf("service entry %s: listen %s: %w", tgt, h.cfg.Imports[i].ListenAddr, err)
+		}
+		if observer != nil {
+			observer.SetEntryAddress(e.Addr().String())
 		}
 		entries = append(entries, e)
 	}

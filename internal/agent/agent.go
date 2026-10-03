@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 )
 
@@ -28,6 +30,9 @@ type Agent struct {
 	mu     sync.Mutex
 	ready  bool
 	cancel context.CancelFunc
+
+	observationAddr string
+	observation     *Observation
 }
 
 // New creates a new Agent.
@@ -77,9 +82,30 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 
-	// Start tunnel manager if static tunnels or dynamic imports are configured.
-	if len(a.cfg.Tunnels) > 0 || hasServiceImports(a.cfg.Imports) {
+	// The tunnel manager exists when static tunnels or dynamic imports are
+	// configured, or when node_id enables the peer directory.
+	startTunnels := len(a.cfg.Tunnels) > 0 || hasServiceImports(a.cfg.Imports)
+	if startTunnels || a.cfg.NodeID != "" {
 		a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
+	}
+
+	// Observation starts before the tunnels so their first connection
+	// attempts are reported; it never fails the agent.
+	a.mu.Lock()
+	observationAddr := a.observationAddr
+	a.mu.Unlock()
+	obs := StartObservation(ctx, ObservationConfig{
+		Addr:      observationAddr,
+		NodeID:    a.cfg.NodeID,
+		Component: observation.ComponentNet,
+	}, a.tunnels, a.logger)
+	defer obs.Wait()
+	defer cancel()
+	a.mu.Lock()
+	a.observation = obs
+	a.mu.Unlock()
+
+	if startTunnels {
 		if err := a.tunnels.Start(ctx); err != nil {
 			return fmt.Errorf("start tunnels: %w", err)
 		}
@@ -88,9 +114,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	if a.cfg.NodeID != "" {
-		if a.tunnels == nil {
-			a.tunnels = NewTunnelManager(a.cfg, a.logger, a.metrics)
-		}
 		directory := NewPeerDirectory(a.cfg.NodeID, a.tunnels, a.logger)
 		a.mgmtServer = NewManagementServer(a.cfg.Management.SocketPath, directory, a.logger)
 		if err := a.mgmtServer.Start(ctx); err != nil {
@@ -221,4 +244,20 @@ func (a *Agent) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("not ready"))
 	}
+}
+
+// EnableObservation makes Run serve the OutpostRange observation API on the
+// loopback addr (stream component OUTPOSTNET, requires node_id). Call before
+// Run. Any observation failure is logged and never stops the agent.
+func (a *Agent) EnableObservation(addr string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.observationAddr = addr
+}
+
+// ObservationAddr is the bound observation endpoint, or nil.
+func (a *Agent) ObservationAddr() net.Addr {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.observation.Addr()
 }

@@ -54,6 +54,13 @@ kubectl apply -f https://github.com/outpostos/OutpostNet/releases/download/v2.0.
 
 Build from source:
 
+Building from source needs the private observation contract module
+`github.com/outpostos/OutpostRange`: set `GOPRIVATE=github.com/outpostos
+GONOSUMDB=github.com/outpostos` (the Makefile exports both) and give git SSH
+access to the `outpostos` organization
+(`git config --global url.git@github.com:.insteadOf https://github.com/`).
+See [docs/observation.md](docs/observation.md).
+
 ```bash
 git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
 make build-agent        # standalone agent only

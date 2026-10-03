@@ -20,12 +20,13 @@ import (
 // NewAgentCommand creates the `outpostnet-agent` command.
 func NewAgentCommand() *cobra.Command {
 	var (
-		configFile     string
-		region         string
-		nodeID         string
-		metricsAddr    string
-		healthAddr     string
-		persistenceDir string
+		configFile      string
+		region          string
+		nodeID          string
+		metricsAddr     string
+		healthAddr      string
+		persistenceDir  string
+		observationAddr string
 	)
 
 	cmd := &cobra.Command{
@@ -37,7 +38,7 @@ func NewAgentCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runAgent(cfg)
+			return runAgent(cfg, observationAddr)
 		},
 	}
 
@@ -48,6 +49,9 @@ func NewAgentCommand() *cobra.Command {
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "Metrics endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&healthAddr, "health-addr", "", "Health check endpoint address (overrides config file)")
 	cmd.Flags().StringVar(&persistenceDir, "persistence-dir", "", "Directory for config persistence (overrides config file)")
+	cmd.Flags().StringVar(&observationAddr, "observation-addr", DefaultObservationAddr,
+		"Loopback address of the OutpostRange observation API (component OUTPOSTNET, requires node_id); empty disables it. "+
+			"Observation failures are logged and never stop the agent")
 	cmd.AddCommand(newVersionCommand())
 
 	return cmd
@@ -104,12 +108,17 @@ func loadAgentConfig(configFile, region, nodeID, metricsAddr, healthAddr, persis
 	return cfg, nil
 }
 
-func runAgent(cfg *agentconfig.Config) error {
+// DefaultObservationAddr is the default OutpostRange observation endpoint of
+// outpostnet-agent (outpostnet-service uses 127.0.0.1:17961).
+const DefaultObservationAddr = "127.0.0.1:17960"
+
+func runAgent(cfg *agentconfig.Config, observationAddr string) error {
 	v := version.Get()
 	log.Printf("outpostnet-agent %s starting...", v.GitVersion)
 	log.Printf("health: %s, metrics: %s", cfg.HealthAddr, cfg.Metrics.Addr)
 
 	a := agent.New(cfg, nil)
+	a.EnableObservation(observationAddr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
