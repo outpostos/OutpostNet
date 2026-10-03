@@ -130,9 +130,14 @@ requester horizon does not mean the requester holds a value those removals
 suppress. Every node collects a tombstone only after all members acknowledged
 it, but each node does so on its own maintenance tick, so in a healthy cluster
 horizons are unequal most of the time and the old rule forced full snapshot
-resyncs back and forth (measured: 152 resyncs in 240 rounds of a two-replica TTL
-load, 342 with three replicas, `TestHealthyStaggeredGCNeverForcesResync` before
-the change).
+resyncs back and forth. `TestHealthyStaggeredGCNeverForcesResync` (TTL load,
+staggered collection, every member acknowledging) measured with the 03b rule:
+392 resyncs in 600 rounds with two in-memory replicas, 882 with three, 72 and
+162 in 120 rounds with two and three `DurableStore` replicas. With the rule
+below: 0 in all four. `TestPartitionBeyondRetentionStillForcesResync` shows a
+node partitioned and dropped from the membership for longer than the retention
+is still resynced when it rejoins, nothing is resurrected, and the healthy load
+afterwards is back to 0.
 
 **Rule.** Responder `R` (horizon `H_R`, GC floor `F_R`, adopted horizon `A_R`)
 answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
@@ -177,6 +182,14 @@ collected tombstone before any node collected it (the GC gate), no node holds a
 value below another node's horizon for a key the other lacks, no push entry is
 refused and no resync adopts anything. Every lower-horizon request comes from a
 vouched member, so no 410 is sent and no resync runs.
+
+**Residual (unchanged class).** Vouching relies on push progress, which is keyed
+by peer address: if a different node takes over an address, the node ID learned
+from its first push response replaces the old one and it inherits that
+address's progress, exactly as the push cursor already does. A requester whose
+state was restored from an older backup or whose directory was wiped is still
+vouched by the address progress; it is cleaned up through the digest check
+rather than by a 410 on its first push. Both are lineage problems tracked by 03a.
 
 **Mixed versions.** No request field changes; the push response gains the
 optional `node_id`. A 03b responder ignores vouching and keeps refusing lower

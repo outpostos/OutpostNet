@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,7 @@ type churnNode struct {
 	id     string
 	store  gcTestStore
 	engine *GossipEngine
+	peers  *atomicPeerList
 }
 
 // gcTestStore is the store surface the churn harness needs from both stores.
@@ -90,6 +92,8 @@ func (c *churnCluster) openNode(t *testing.T, id string, ids []string, dir strin
 			peers = append(peers, other)
 		}
 	}
+	peerList := &atomicPeerList{}
+	peerList.Store(peers)
 	var store gcTestStore
 	if dir != "" {
 		store = mustDurableStore(t, DurableStoreConfig{Dir: dir, NodeID: id, PhysicalClock: c.clock, TombstoneRetention: testRetention})
@@ -100,7 +104,7 @@ func (c *churnCluster) openNode(t *testing.T, id string, ids []string, dir strin
 		NodeID:       id,
 		Store:        store,
 		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, strip: c.stripNodeID[id]},
-		PeerProvider: NewStaticPeerProvider(peers),
+		PeerProvider: PeerProviderFunc(func() []string { return peerList.Load() }),
 	})
 	if err != nil {
 		t.Fatalf("NewGossipEngine: %v", err)
@@ -108,7 +112,7 @@ func (c *churnCluster) openNode(t *testing.T, id string, ids []string, dir strin
 	c.net.mu.Lock()
 	c.net.engines[id] = engine
 	c.net.mu.Unlock()
-	return &churnNode{id: id, store: store, engine: engine}
+	return &churnNode{id: id, store: store, engine: engine, peers: peerList}
 }
 
 func (c *churnCluster) exchange(t *testing.T, node *churnNode) {
@@ -145,6 +149,14 @@ func runTTLChurn(t *testing.T, cluster *churnCluster, rounds int) (collected int
 					if _, err := node.store.Delete(ctx, fmt.Sprintf("%s/r%d/k%d", node.id, round-ttlRounds, k)); err != nil {
 						t.Fatalf("Delete: %v", err)
 					}
+				}
+			}
+			if round >= ttlRounds {
+				// Also expire the neighbour's last key of that round, concurrently
+				// with the neighbour deleting it itself.
+				neighbour := cluster.nodes[(index+1)%len(cluster.nodes)]
+				if _, err := node.store.Delete(ctx, fmt.Sprintf("%s/r%d/k%d", neighbour.id, round-ttlRounds, keysPerRound-1)); err != nil {
+					t.Fatalf("Delete: %v", err)
 				}
 			}
 			// Interleave maintenance with exchanges so that a node with a raised
@@ -185,10 +197,10 @@ func TestHealthyStaggeredGCNeverForcesResync(t *testing.T) {
 		durable bool
 		rounds  int
 	}{
-		{name: "two-replicas-memory", size: 2, rounds: 240},
-		{name: "three-replicas-memory", size: 3, rounds: 240},
-		{name: "two-replicas-durable", size: 2, durable: true, rounds: 60},
-		{name: "three-replicas-durable", size: 3, durable: true, rounds: 60},
+		{name: "two-replicas-memory", size: 2, rounds: 600},
+		{name: "three-replicas-memory", size: 3, rounds: 600},
+		{name: "two-replicas-durable", size: 2, durable: true, rounds: 120},
+		{name: "three-replicas-durable", size: 3, durable: true, rounds: 120},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cluster := newChurnCluster(t, tc.size, tc.durable)
@@ -281,5 +293,95 @@ func TestRequesterWithoutNodeIDIsNotVouched(t *testing.T) {
 	}
 	if follower.store.GCHorizon() != cluster.nodes[0].store.GCHorizon() {
 		t.Fatalf("refused requester did not resync to the responder horizon")
+	}
+}
+
+// exchangeTolerant runs one push and one anti-entropy round and returns the
+// errors instead of failing, for rounds with partitioned peers.
+func (c *churnCluster) exchangeTolerant(node *churnNode) error {
+	for _, peer := range node.engine.peerProvider.Peers() {
+		clearPeerBackoffForTest(node.engine, peer)
+	}
+	ctx := context.Background()
+	return errors.Join(node.engine.SyncOnce(ctx), node.engine.AntiEntropyOnce(ctx))
+}
+
+// A resync is still forced where it is needed: node-2 is partitioned and dropped
+// from the membership for longer than the retention while the others delete and
+// collect. After it rejoins it is not vouched for and resyncs, nothing is
+// resurrected, and once horizons settle the healthy load runs without resyncs
+// again.
+func TestPartitionBeyondRetentionStillForcesResync(t *testing.T) {
+	ctx := context.Background()
+	cluster := newChurnCluster(t, 3, false)
+	runTTLChurn(t, cluster, 24)
+	if got := cluster.resyncs.Load(); got != 0 {
+		t.Fatalf("healthy warm-up resynced %d times", got)
+	}
+	a, b, l := cluster.nodes[0], cluster.nodes[1], cluster.nodes[2]
+	if _, err := a.store.Put(ctx, "shared", []byte("v1")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	for _, node := range cluster.nodes {
+		cluster.exchange(t, node)
+	}
+	assertStoredValue(t, l.store, "shared", "v1")
+
+	cluster.net.setBlocked("node-0", "node-2", true)
+	cluster.net.setBlocked("node-1", "node-2", true)
+	a.peers.Store([]string{"node-1"})
+	b.peers.Store([]string{"node-0"})
+	if _, err := a.store.Delete(ctx, "shared"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for round := 0; round < 24; round++ {
+		cluster.clock.now += retentionMS() / 8
+		for _, node := range []*churnNode{a, b} {
+			key := fmt.Sprintf("%s/partition/%d", node.id, round)
+			if _, err := node.store.Put(ctx, key, []byte("v")); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if _, err := node.store.Delete(ctx, key); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if _, err := node.engine.CollectTombstones(ctx); err != nil {
+				t.Fatalf("%s GC: %v", node.id, err)
+			}
+			cluster.exchange(t, node)
+		}
+		_ = cluster.exchangeTolerant(l)
+	}
+	assertAbsent(t, a.store, "shared")
+	assertStoredValue(t, l.store, "shared", "v1")
+
+	cluster.net.setBlocked("node-0", "node-2", false)
+	cluster.net.setBlocked("node-1", "node-2", false)
+	a.peers.Store([]string{"node-1", "node-2"})
+	b.peers.Store([]string{"node-0", "node-2"})
+	var errs error
+	for round := 0; round < 4; round++ {
+		errs = nil
+		for _, node := range cluster.nodes {
+			errs = errors.Join(errs, cluster.exchangeTolerant(node))
+		}
+	}
+	if errs != nil {
+		t.Fatalf("cluster did not settle after the partition: %v", errs)
+	}
+	if cluster.resyncs.Load() == 0 {
+		t.Fatalf("a node partitioned beyond the retention rejoined without any resync")
+	}
+	for _, node := range cluster.nodes {
+		if entry, ok, err := node.store.Get(ctx, "shared"); err != nil || (ok && !entry.Deleted) {
+			t.Fatalf("RESURRECTED at %s: shared=%s err=%v", node.id, entry.Value, err)
+		}
+	}
+	t.Logf("rejoin after a partition beyond retention: %d resyncs", cluster.resyncs.Load())
+
+	cluster.resyncs.Store(0)
+	runTTLChurn(t, cluster, 48)
+	assertChurnClusterConverged(t, cluster)
+	if got := cluster.resyncs.Load(); got != 0 {
+		t.Fatalf("healthy load after the partition healed still resynced %d times", got)
 	}
 }

@@ -121,7 +121,9 @@ type batchCrash struct {
 	image string
 }
 
-func (c *batchCrash) wrap(handle durableLog) durableLog { return &batchCrashLog{durableLog: handle, crash: c} }
+func (c *batchCrash) wrap(handle durableLog) durableLog {
+	return &batchCrashLog{durableLog: handle, crash: c}
+}
 
 type batchCrashLog struct {
 	durableLog
