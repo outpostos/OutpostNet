@@ -401,9 +401,13 @@ func TestStableEntryRejectedWithoutValidToken(t *testing.T) {
 	}()
 	waitFor(t, 15*time.Second, "tunnel server to reject the wrong token", func() bool {
 		// Server side: the tunnel auth handshake rejected the token.
-		// Client side: node-a2's peer tunnel saw the auth failure.
+		// Client side: node-a2's peer tunnel saw the auth failure, either
+		// as the server's authFail reply or as the server's "authentication
+		// failed" connection close, whichever reaches the client first.
+		client := badLog.String()
 		return strings.Contains(bLog.String(), `error="token mismatch"`) &&
-			strings.Contains(badLog.String(), "authentication failed")
+			(strings.Contains(client, "tunnel auth: server rejected authentication") ||
+				strings.Contains(client, "(remote): authentication failed"))
 	})
 	if st := peerStatus(t, badCfg.Management.SocketPath, "node-b"); st == "connected" || st == "" {
 		t.Fatalf("wrong-token peer status = %q, want a non-connected directory entry", st)
