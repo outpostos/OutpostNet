@@ -20,6 +20,22 @@ type PeerReplicationStatus struct {
 	// OutboundCaughtUp holds when AcknowledgedPosition covers the local
 	// position read at the start of ReplicationStatus.
 	OutboundCaughtUp bool
+	// OutboundRoundCaughtUp is the push-round view of outbound progress, which
+	// tolerates writes that keep arriving. It holds when OutboundCaughtUp holds,
+	// or when the latest push round to the peer ended with the peer
+	// acknowledging every change up to the local position read when that round
+	// started (a round with nothing to push counts), and no exchange with the
+	// peer failed after that round started. The local position also grows with
+	// every applied peer entry, so under sustained writes OutboundCaughtUp is
+	// structurally false while this stays true; a peer that cannot be reached
+	// fails its rounds and clears it. GC gating never uses it.
+	OutboundRoundCaughtUp bool
+	// OutboundRoundTime is when the latest push round that ended caught up
+	// started, kept after later rounds fail; zero when no round has been caught
+	// up in this process. Its age tells consumers how fresh the claim is (rounds
+	// stop when the engine is not running) and, while OutboundRoundCaughtUp is
+	// false, since when the peer has been behind.
+	OutboundRoundTime time.Time
 	// LastPullTime is when the latest fully applied pull from the peer
 	// started. Rounds skipped because the peer is in backoff are not pulls.
 	LastPullTime time.Time
@@ -84,7 +100,10 @@ func (g *GossipEngine) ReplicationStatus(ctx context.Context) (ReplicationStatus
 			LastErrorOperation:   state.lastErrorOp,
 			ConsecutiveFailures:  state.failures,
 			NextAttemptTime:      state.nextAttempt,
+			OutboundRoundTime:    state.lastCaughtUpRound,
 		}
+		roundCaughtUp := state.lastRoundCaughtUp && (state.lastErrorTime.IsZero() || state.lastErrorTime.Before(state.lastRound))
+		peer.OutboundRoundCaughtUp = peer.OutboundCaughtUp || roundCaughtUp
 		peer.CaughtUp = peer.OutboundCaughtUp && peer.InboundCaughtUp
 		status.Peers = append(status.Peers, peer)
 	}
