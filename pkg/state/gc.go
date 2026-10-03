@@ -275,3 +275,14 @@ func (s *storeCore) resyncFromSnapshot(ctx context.Context, snapshot []Entry, pe
 func (s *storeCore) beyondHorizonLocked(entry Entry) bool {
 	return !s.horizon.isZero() && entry.Version.HLC.Compare(s.horizon) <= 0
 }
+
+// Both stores must keep the GC surface; a regression would silently disable
+// gated collection and resync in GossipEngine.
+var (
+	_ gcStore = (*MemoryStore)(nil)
+	_ gcStore = (*DurableStore)(nil)
+	_ interface {
+		CompactIfNeeded(context.Context) (bool, error)
+	} = (*DurableStore)(nil)
+	_ SnapshotSyncer = (*HTTPSyncer)(nil)
+)

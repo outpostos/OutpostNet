@@ -23,7 +23,7 @@ Three pieces of per-store state are added. They are persisted by
 | State | Meaning |
 |---|---|
 | GC horizon (`Timestamp`) | Highest HLC of any entry this store removed (collected tombstone or resync purge), or adopted from a peer during resync. Only grows. |
-| GC floor (`uint64`) | Highest local position of any removed entry. A consumer position below it may have missed a removed tombstone. Only grows. |
+| GC floor (`uint64`) | Highest local position of any collected tombstone, or a fresh local position allocated by a resync purge that removed values. A consumer position below it may have missed a removed tombstone or still hold a purged value. Only grows. |
 | Replicated flag | Set when a `GossipEngine` is built on the store. Direct local GC is refused afterwards; GC must go through the engine's peer gate. |
 
 ### Collection condition
@@ -69,7 +69,12 @@ exact identities removed) is committed before the entries leave memory.
   adopts the peer horizon. Those entries are exactly the ones the peer would
   refuse: either values of keys deleted and collected cluster-side, or writes
   that failed to reach the peer within the retention window. Both are dropped
-  explicitly (counted and logged), never silently merged back.
+  explicitly (logged per key), never silently merged back. Snapshot pages hold
+  256 entries and are cursored by the peer's `next_since_position`. When the
+  purge removes entries, it allocates a fresh local position that becomes the
+  GC floor, and observers receive a tombstone-shaped notice (`Deleted: true`,
+  the removed entry's version and ChangeID, the new position) for each purged
+  key, so consumers that held the value re-read or re-snapshot.
 * **Consumers.** `CheckConsumerPosition(p)` returns `NeedsSnapshot` when
   `0 < p < floor`, because the position may precede a removed tombstone.
 
@@ -98,7 +103,8 @@ covers them, and the first such exchange forces its resync.
 `Compact(ctx)` rewrites `state.log` as the current snapshot:
 
 1. Hold the commit lock (no entry mutation) and the log lock (no append or
-   peer-progress save).
+   peer-progress save) for the whole rewrite; the entry map read lock is held
+   only while entries are copied.
 2. Write `state.log.compact` (through the same `durableLog` wrapper used by
    appends): a `snapshot` header record (change/position counter, HLC, horizon,
    floor), then one `entry` record per current entry (tombstones not yet
@@ -113,6 +119,7 @@ covers them, and the first such exchange forces its resync.
 |---|---|---|
 | During temp write or before temp fsync | old `state.log` + partial `state.log.compact` | Open deletes the temp file; old log is authoritative. Runtime failure: temp removed, store stays writable. |
 | After temp fsync, before rename | old log + complete temp | Same: temp is never trusted, it is deleted. |
+| Temp write / short write / temp fsync fails | old log | Temp removed, error returned, store stays writable. |
 | Rename fails | old log (+ temp) | Temp removed, store stays writable on old log. |
 | After rename, before directory fsync | new log (or, after power loss, possibly the old one) | Either file is a complete, consistent state; counters restored from the header or the entries. |
 | Directory fsync fails | as above | Store becomes fail-closed (`ErrDurableStoreUnwritable`): a later append could land in a file whose directory entry is not durable. Reopen recovers. |

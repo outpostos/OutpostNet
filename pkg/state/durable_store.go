@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,11 +23,27 @@ const (
 	durableManifestFile = "manifest.json"
 	durableLogFile      = "state.log"
 	durableLockFile     = "store.lock"
+	// durableCompactTmpFile is the compaction output before it is renamed over
+	// durableLogFile. It is never trusted on open.
+	durableCompactTmpFile = "state.log.compact"
 
 	durableRecordEntry        = "entry"
 	durableRecordPeerProgress = "peer_progress"
 	// durableRecordPurge commits a tombstone GC pass or a resync purge.
 	durableRecordPurge = "purge"
+	// durableRecordSnapshot is the first record of a compacted log. It restores
+	// counters, HLC, horizon and floor that collected entries no longer carry.
+	durableRecordSnapshot = "snapshot"
+)
+
+// Compaction steps, in order. compactionHook runs before each step; an error
+// returned for a step is treated as that step failing.
+const (
+	compactStepWriteTmp = "write-temp"
+	compactStepSyncTmp  = "sync-temp"
+	compactStepRename   = "rename"
+	compactStepSyncDir  = "sync-dir"
+	compactStepReopen   = "reopen"
 )
 
 var (
@@ -66,6 +83,11 @@ type DurableStoreConfig struct {
 	// TombstoneRetention enables tombstone GC; see MemoryStoreConfig. Zero (the
 	// default) keeps every tombstone.
 	TombstoneRetention time.Duration
+	// CompactionMinRecords enables CompactIfNeeded (and compaction from
+	// GossipEngine.Run): the log is compacted once it holds at least this many
+	// records and at least twice as many as a fresh snapshot would. Zero (the
+	// default) never compacts automatically; Compact is always available.
+	CompactionMinRecords int
 
 	// preAppendHook runs before a record is marshalled or written. It models a
 	// refusal to persist, not a disk failure: no byte reaches the log and the
@@ -76,6 +98,10 @@ type DurableStoreConfig struct {
 	// wrapLog decorates the opened log file. Tests use it to fail real
 	// Write/Sync/Truncate calls.
 	wrapLog func(durableLog) durableLog
+
+	// compactionHook runs before each compaction step (compactStep*). Tests use it
+	// to inject step failures and to capture crash images of the directory.
+	compactionHook func(step string) error
 }
 
 // DurableStore is a file-backed Store. Each accepted local or remote state
@@ -90,12 +116,17 @@ type DurableStore struct {
 	preAppendHook func(durableRecord) error
 	wrapLog       func(durableLog) durableLog
 
+	compactionHook       func(step string) error
+	compactionMinRecords int
+
 	mu      sync.Mutex
 	nextSeq uint64
 	// logOffset is the end of the last confirmed record. It is authoritative for
 	// appends and rollback because the log is opened with O_APPEND.
 	logOffset uint64
-	closed    bool
+	// logRecords counts the confirmed records in the log, for CompactIfNeeded.
+	logRecords int
+	closed     bool
 	// permanentErr is sticky. It is set when an append failed and could not be
 	// rolled back, which means the log may contain ambiguous bytes.
 	permanentErr error
@@ -125,6 +156,17 @@ type durableRecord struct {
 	Horizon *Timestamp     `json:"horizon,omitempty"`
 	Floor   uint64         `json:"floor,omitempty"`
 	Removed []removedEntry `json:"removed,omitempty"`
+	// Snapshot header fields: the change/position counter and HLC at compaction.
+	Counter uint64     `json:"counter,omitempty"`
+	HLC     *Timestamp `json:"hlc,omitempty"`
+}
+
+// CompactionResult reports one compaction.
+type CompactionResult struct {
+	RecordsBefore int
+	RecordsAfter  int
+	BytesBefore   uint64
+	BytesAfter    uint64
 }
 
 // NewDurableStore opens or creates a durable state replica.
@@ -158,10 +200,17 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		peerProgress:  make(map[string]uint64),
 		preAppendHook: cfg.preAppendHook,
 		wrapLog:       cfg.wrapLog,
+
+		compactionHook:       cfg.compactionHook,
+		compactionMinRecords: cfg.CompactionMinRecords,
 	}
 	core.entryHook = store.appendEntry
 	core.purgeHook = store.appendPurge
 	if err := store.openManifest(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.discardCompactionTemp(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -353,10 +402,14 @@ func (s *DurableStore) recoverLog() error {
 		if err := json.Unmarshal(line, &record); err != nil {
 			return fmt.Errorf("decode durable state log line %d: %w", lineNo, err)
 		}
+		if record.Type == durableRecordSnapshot && lineNo != 1 {
+			return fmt.Errorf("replay durable state log line %d: snapshot header is only valid as the first record", lineNo)
+		}
 		if err := s.replayRecord(record); err != nil {
 			return fmt.Errorf("replay durable state log line %d: %w", lineNo, err)
 		}
 		offset += int64(len(line))
+		s.logRecords++
 	}
 	s.logOffset = uint64(offset)
 	return nil
@@ -404,6 +457,13 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		if record.Position > s.peerProgress[record.Peer] {
 			s.peerProgress[record.Peer] = record.Position
 		}
+		return nil
+	case durableRecordSnapshot:
+		s.clock.SetAtLeast(record.Counter)
+		s.hlc.Restore(timestampValue(record.HLC))
+		s.storeCore.mu.Lock()
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor})
+		s.storeCore.mu.Unlock()
 		return nil
 	case durableRecordPurge:
 		s.storeCore.mu.Lock()
@@ -488,6 +548,7 @@ func (s *DurableStore) appendRecord(record durableRecord, apply func()) error {
 		return s.failAppend(startOffset, fmt.Errorf("sync durable state log: %w", err))
 	}
 	s.logOffset = startOffset + uint64(len(data))
+	s.logRecords++
 	s.nextSeq = record.Sequence
 	apply()
 	return nil
@@ -530,4 +591,227 @@ func (s *DurableStore) rollbackAppend(offset uint64) error {
 		slog.Warn("state: durable append rollback sync failed", "dir", s.dir, "offset", offset, "err", err)
 	}
 	return nil
+}
+
+// discardCompactionTemp removes a compaction output that was never installed.
+// The rename is the commit point of a compaction, so a temp file that still
+// exists on open is incomplete or uninstalled, and state.log is authoritative.
+func (s *DurableStore) discardCompactionTemp() error {
+	path := filepath.Join(s.dir, durableCompactTmpFile)
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("remove uninstalled durable compaction temp: %w", err)
+	}
+	slog.Warn("state: discarded uninstalled durable log compaction", "dir", s.dir)
+	return nil
+}
+
+// CompactIfNeeded compacts when CompactionMinRecords is set, the log holds at
+// least that many records and at least twice as many as a fresh snapshot.
+func (s *DurableStore) CompactIfNeeded(ctx context.Context) (bool, error) {
+	if s.compactionMinRecords <= 0 {
+		return false, nil
+	}
+	s.storeCore.mu.RLock()
+	snapshotRecords := 1 + len(s.storeCore.entries)
+	s.storeCore.mu.RUnlock()
+	s.mu.Lock()
+	records := s.logRecords
+	snapshotRecords += len(s.peerProgress)
+	s.mu.Unlock()
+	if records < s.compactionMinRecords || records < 2*snapshotRecords {
+		return false, nil
+	}
+	if _, err := s.Compact(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Compact rewrites the log as the current snapshot: a header with counters,
+// HLC, GC horizon and floor, one record per current entry (uncollected
+// tombstones included) and one per peer progress. It is installed through a
+// synced temp file, rename and directory sync. Failures before the rename leave
+// the old log in place and the store writable; failures after it make the store
+// fail-closed, because later appends could otherwise land in a file whose
+// directory entry is not durable.
+func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CompactionResult{}, err
+	}
+	// commitMu excludes every entry mutation; s.mu excludes appends and progress.
+	s.storeCore.commitMu.Lock()
+	defer s.storeCore.commitMu.Unlock()
+	s.storeCore.mu.RLock()
+	entries := filterAndSortEntries(s.storeCore.entries, 0, 0)
+	horizon := s.storeCore.horizon
+	floor := s.storeCore.floor
+	s.storeCore.mu.RUnlock()
+	counter := s.clock.Current()
+	hlc := s.hlc.Current()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.permanentErr != nil {
+		return CompactionResult{}, s.permanentErr
+	}
+	if s.closed || s.logFile == nil {
+		return CompactionResult{}, fmt.Errorf("durable state store is closed")
+	}
+	result := CompactionResult{RecordsBefore: s.logRecords, BytesBefore: s.logOffset}
+
+	records := make([]durableRecord, 0, 1+len(entries)+len(s.peerProgress))
+	records = append(records, durableRecord{
+		Type:    durableRecordSnapshot,
+		Counter: counter,
+		HLC:     timestampPtr(hlc),
+		Horizon: timestampPtr(horizon),
+		Floor:   floor,
+	})
+	for index := range entries {
+		entry := entries[index]
+		records = append(records, durableRecord{Type: durableRecordEntry, Entry: &entry, Position: entry.Position})
+	}
+	peers := make([]string, 0, len(s.peerProgress))
+	for peer := range s.peerProgress {
+		peers = append(peers, peer)
+	}
+	sort.Strings(peers)
+	for _, peer := range peers {
+		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer]})
+	}
+	sequence := s.nextSeq
+	for index := range records {
+		sequence++
+		records[index].FormatVersion = durableFormatVersion
+		records[index].Sequence = sequence
+	}
+
+	tmpPath := filepath.Join(s.dir, durableCompactTmpFile)
+	logPath := filepath.Join(s.dir, durableLogFile)
+	written, err := s.writeCompactionTemp(tmpPath, records)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return result, err
+	}
+	// Each step's injected failure and its real failure share one branch.
+	err = s.compactionStep(compactStepRename)
+	if err == nil {
+		err = os.Rename(tmpPath, logPath)
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return result, fmt.Errorf("install durable log compaction: %w", err)
+	}
+
+	// The compacted log is installed. From here on a failure must not let the
+	// store keep appending, so it becomes fail-closed; a restart recovers from
+	// whichever complete log the directory holds.
+	err = s.compactionStep(compactStepSyncDir)
+	if err == nil {
+		err = syncDir(s.dir)
+	}
+	if err != nil {
+		return result, s.failCompaction(fmt.Errorf("sync durable state dir after compaction: %w", err))
+	}
+	var opened *os.File
+	err = s.compactionStep(compactStepReopen)
+	if err == nil {
+		opened, err = os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	}
+	if err != nil {
+		return result, s.failCompaction(fmt.Errorf("reopen compacted durable log: %w", err))
+	}
+	var handle durableLog = opened
+	if s.wrapLog != nil {
+		handle = s.wrapLog(handle)
+	}
+	if err := s.logFile.Close(); err != nil {
+		slog.Warn("state: closing pre-compaction durable log failed", "dir", s.dir, "err", err)
+	}
+	s.logFile = handle
+	s.logOffset = written
+	s.logRecords = len(records)
+	s.nextSeq = sequence
+	result.RecordsAfter = len(records)
+	result.BytesAfter = written
+	return result, nil
+}
+
+// writeCompactionTemp writes and syncs the compaction output. Writes go through
+// the same durableLog wrapper as appends so tests can fail them for real.
+func (s *DurableStore) writeCompactionTemp(path string, records []durableRecord) (uint64, error) {
+	opened, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("create durable compaction temp: %w", err)
+	}
+	var handle durableLog = opened
+	if s.wrapLog != nil {
+		handle = s.wrapLog(handle)
+	}
+	fail := func(err error) (uint64, error) {
+		_ = handle.Close()
+		return 0, err
+	}
+	var written uint64
+	for _, record := range records {
+		data, err := json.Marshal(record)
+		if err != nil {
+			return fail(err)
+		}
+		data = append(data, '\n')
+		n, err := handle.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fail(fmt.Errorf("write durable compaction temp (%d of %d bytes): %w", n, len(data), err))
+		}
+		written += uint64(len(data))
+	}
+	if err := s.compactionStep(compactStepWriteTmp); err != nil {
+		return fail(fmt.Errorf("write durable compaction temp: %w", err))
+	}
+	err = s.compactionStep(compactStepSyncTmp)
+	if err == nil {
+		err = handle.Sync()
+	}
+	if err != nil {
+		return fail(fmt.Errorf("sync durable compaction temp: %w", err))
+	}
+	if err := handle.Close(); err != nil {
+		return 0, fmt.Errorf("close durable compaction temp: %w", err)
+	}
+	return written, nil
+}
+
+func (s *DurableStore) compactionStep(step string) error {
+	if s.compactionHook == nil {
+		return nil
+	}
+	return s.compactionHook(step)
+}
+
+// failCompaction makes the store permanently unwritable after the compacted log
+// was installed but could not be made durable or reopened.
+func (s *DurableStore) failCompaction(failure error) error {
+	s.permanentErr = errors.Join(ErrDurableStoreUnwritable, failure)
+	slog.Error("state: durable log compaction could not be completed after install; store is now permanently unwritable",
+		"dir", s.dir,
+		"err", s.permanentErr,
+	)
+	return s.permanentErr
+}
+
+func syncDir(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := handle.Sync()
+	closeErr := handle.Close()
+	return errors.Join(syncErr, closeErr)
 }

@@ -157,8 +157,8 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 	if persist != nil {
 		// The durable append, including its fsync and any rollback, runs while mu is
 		// held here, so a slow disk delays concurrent readers of this store.
-		// Put/Delete/Apply append outside mu. This lock scope is pre-existing and
-		// narrowing it is tracked with durable-log compaction, not claimed here.
+		// Put/Delete append outside mu; Apply also appends under mu. This lock scope
+		// is pre-existing; 03b evaluated it and left narrowing it open.
 		if err := persist(entry); err != nil {
 			s.mu.Unlock()
 			return Entry{}, false, err

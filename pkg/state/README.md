@@ -117,9 +117,11 @@ Boundaries:
   are outside what this store can detect; epoch and lineage guards for a
   directory that was deleted or replaced underneath the node are tracked
   separately.
-- `CompareAndSet` appends while holding the store's entry lock, so a slow `fsync`
-  can delay concurrent readers of that store; `Put`, `Delete`, and `Apply` append
-  outside it. This lock scope is a known bound, not a correctness claim, and
-  narrowing it is tracked with durable-log compaction rather than claimed here.
+- `CompareAndSet` and `Apply` append while holding the store's entry lock, so a
+  slow `fsync` can delay concurrent readers of that store; `Put` and `Delete`
+  append outside it. This lock scope is a known bound, not a correctness claim;
+  ticket 03b evaluated it and left it unchanged (still open). `Compact` holds the
+  commit lock and the log lock for the whole rewrite, so writers wait for it,
+  while readers are blocked only while the entry map is copied.
 - It does not import or adapt OutpostLet legacy wire formats; that remains ticket
   04.
