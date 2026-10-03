@@ -1,0 +1,16 @@
+# node-b: serves the "echo" instance (v1) on a QUIC tunnel listener.
+node_id: node-b
+health_addr: 127.0.0.1:39383
+management:
+  socket_path: /tmp/outpostnet-service-example/node-b.sock
+auth:
+  token: example-token        # must match on every node
+tls:
+  insecure: true              # self-signed dev certs; use cert_file/key_file in production
+tunnels:
+  - role: server
+    listen_addr: 127.0.0.1:39443
+exports:
+  - name: echo
+    local_addr: 127.0.0.1:39091   # instance v1
+    protocol: tcp                 # cross-node traffic is TCP only

@@ -112,7 +112,7 @@ Same host:
 
 **outpostnet-sidecar**
 - Connects to the local server, registers local services (export) or listens on local ports for remote services (import)
-- Supports both TCP and UDP
+- Supports both TCP and UDP (node-local only; the cross-node QUIC tunnel carries TCP only)
 - Each application has its own config and process, fully isolated
 
 ### Internal Protocol (server ↔ sidecar)

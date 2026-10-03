@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
+	"github.com/outpostos/OutpostNet/pkg/service"
 )
 
 // ConfigWatcher watches a config file for changes and triggers hot reload.
@@ -22,6 +23,7 @@ type ConfigWatcher struct {
 	lastModTime time.Time
 	lastSize    int64
 	onChange    func(*agentconfig.Config)
+	load        func(string) (*agentconfig.Config, error)
 }
 
 // NewConfigWatcher creates a new config file watcher.
@@ -36,7 +38,17 @@ func NewConfigWatcher(path string, interval time.Duration, logger *slog.Logger) 
 		path:     path,
 		interval: interval,
 		logger:   logger,
+		load:     agentconfig.LoadConfig,
 	}
+}
+
+// SetLoader replaces the config loader (default agentconfig.LoadConfig), so a
+// host with stricter validation (e.g. outpostnet-service) can reuse the
+// watcher without a second polling implementation.
+func (w *ConfigWatcher) SetLoader(load func(string) (*agentconfig.Config, error)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.load = load
 }
 
 // OnChange sets the callback for config changes.
@@ -83,6 +95,7 @@ func (w *ConfigWatcher) check() {
 	w.mu.Lock()
 	changed := info.ModTime() != w.lastModTime || info.Size() != w.lastSize
 	onChange := w.onChange
+	load := w.load
 	if changed {
 		w.lastModTime = info.ModTime()
 		w.lastSize = info.Size()
@@ -95,7 +108,7 @@ func (w *ConfigWatcher) check() {
 
 	w.logger.Info("config file changed, reloading", "path", w.path)
 
-	cfg, err := agentconfig.LoadConfig(w.path)
+	cfg, err := load(w.path)
 	if err != nil {
 		w.logger.Error("reload config", "path", w.path, "error", err)
 		return
@@ -117,27 +130,12 @@ func ReloadAgent(a *Agent, newCfg *agentconfig.Config) error {
 		return nil
 	}
 
-	// Detect export changes on existing tunnel servers.
+	// Apply export changes (add / re-point / remove) on existing tunnel
+	// servers through the Service export table.
 	for _, srv := range tm.Servers() {
-		// Remove routes no longer in config.
-		oldExports := make(map[string]bool)
-		for _, exp := range oldCfg.Exports {
-			oldExports[exp.Name] = true
-		}
-		newExports := make(map[string]bool)
-		for _, exp := range newCfg.Exports {
-			newExports[exp.Name] = true
-		}
-
-		for name := range oldExports {
-			if !newExports[name] {
-				srv.RemoveRoute(name)
-			}
-		}
-		for _, exp := range newCfg.Exports {
-			if !oldExports[exp.Name] {
-				srv.AddRoute(exp.Name, exp.LocalAddr)
-			}
+		ch := service.ApplyExports(srv, oldCfg.Exports, newCfg.Exports)
+		if len(ch.Added)+len(ch.Updated)+len(ch.Removed) > 0 {
+			a.logger.Info("exports reloaded", "added", ch.Added, "updated", ch.Updated, "removed", ch.Removed)
 		}
 	}
 

@@ -20,9 +20,13 @@ type StreamFallback func(ctx context.Context, stream *quic.Stream, hdr StreamHea
 // Server is a QUIC tunnel server that accepts connections and routes
 // incoming streams to local TCP services based on the ServiceHeader.
 type Server struct {
-	cfg      ServerConfig
+	cfg    ServerConfig
+	logger *slog.Logger
+
+	// lnMu guards listener: ListenAndServe sets it on its own goroutine while
+	// callers poll Addr() or call Close() concurrently.
+	lnMu     sync.Mutex
 	listener *quic.Listener
-	logger   *slog.Logger
 
 	mu       sync.RWMutex
 	routes   map[string]string // serviceName → localAddr
@@ -87,7 +91,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.lnMu.Lock()
 	s.listener = listener
+	s.lnMu.Unlock()
 	s.logger.Info("tunnel server listening", "addr", listener.Addr())
 
 	var wg sync.WaitGroup
@@ -113,6 +119,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 // Addr returns the listener's address. Only valid after ListenAndServe starts.
 func (s *Server) Addr() net.Addr {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
 	if s.listener == nil {
 		return nil
 	}
@@ -121,8 +129,11 @@ func (s *Server) Addr() net.Addr {
 
 // Close stops the server.
 func (s *Server) Close() error {
-	if s.listener != nil {
-		return s.listener.Close()
+	s.lnMu.Lock()
+	listener := s.listener
+	s.lnMu.Unlock()
+	if listener != nil {
+		return listener.Close()
 	}
 	return nil
 }

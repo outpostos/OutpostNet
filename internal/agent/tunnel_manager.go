@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
+	"github.com/outpostos/OutpostNet/pkg/service"
 	"github.com/outpostos/OutpostNet/pkg/tunnel"
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 	"github.com/quic-go/quic-go"
@@ -135,10 +135,8 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 		Token:      tm.cfg.Auth.Token,
 	}, srvLogger)
 
-	// Register all exports as routes on this server.
-	for _, exp := range tm.cfg.Exports {
-		srv.AddRoute(exp.Name, exp.LocalAddr)
-	}
+	// Register all exports as routes on this server (Service export table).
+	service.RegisterExports(srv, tm.cfg.Exports)
 
 	tm.mu.Lock()
 	tm.servers = append(tm.servers, srv)
@@ -202,142 +200,80 @@ func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel
 	}, tm.logger.With("tunnel", "client", "remote", remoteName))
 }
 
+// serveImport serves a legacy static import (name + remote_region) through
+// a Service entry bound to the client tunnel it was configured on.
 func (tm *TunnelManager) serveImport(ctx context.Context, mc *tunnel.ManagedClient, imp agentconfig.ImportConfig) {
-	tm.logger.Info("serving import", "service", imp.Name, "listen", imp.ListenAddr, "remote_region", imp.RemoteRegion)
-
-	for {
-		err := tm.listenAndProxy(ctx, mc, imp.Name, imp.ListenAddr)
-		if ctx.Err() != nil {
-			return
-		}
-		tm.logger.Error("import proxy stopped, restarting...", "service", imp.Name, "error", err)
-		time.Sleep(1 * time.Second)
-	}
+	opener := service.StreamOpenerFunc(func(ctx context.Context, t service.Target) (io.ReadWriteCloser, error) {
+		return openTrackedStream(ctx, mc, t.Service)
+	})
+	service.NewEntry(service.EntryConfig{
+		Target:     service.Target{Service: imp.Name, Region: imp.RemoteRegion},
+		ListenAddr: imp.ListenAddr,
+	}, opener, tm.logger).Run(ctx)
 }
 
+// StartDynamicImports serves every "<service>@<node_id>" import as a Service
+// entry whose streams are resolved through the peer directory per connection.
 func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
 	for _, imp := range tm.cfg.Imports {
 		if !isServiceImport(imp) {
 			continue
 		}
-		go tm.serveDynamicImport(ctx, imp)
-	}
-}
-
-func (tm *TunnelManager) serveDynamicImport(ctx context.Context, imp agentconfig.ImportConfig) {
-	serviceName, nodeID, err := agentconfig.ParseServiceRef(imp.Service)
-	if err != nil {
-		tm.logger.Error("invalid service import", "service", imp.Service, "error", err)
-		return
-	}
-	tm.logger.Info("serving dynamic import", "service", serviceName, "node_id", nodeID, "listen", imp.ListenAddr)
-
-	for {
-		err := tm.listenAndProxyDynamic(ctx, nodeID, serviceName, imp.ListenAddr)
-		if ctx.Err() != nil {
-			return
-		}
-		tm.logger.Error("dynamic import proxy stopped, restarting...", "service", serviceName, "node_id", nodeID, "error", err)
-		time.Sleep(1 * time.Second)
-	}
-}
-
-// listenAndProxy listens on listenAddr and for each incoming TCP connection,
-// opens a QUIC stream via the ManagedClient for the given service.
-func (tm *TunnelManager) listenAndProxy(ctx context.Context, mc *tunnel.ManagedClient, serviceName, listenAddr string) error {
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	for {
-		conn, err := ln.Accept()
+		ref, err := service.ParseRef(imp.Service)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			tm.logger.Error("invalid service import", "service", imp.Service, "error", err)
+			continue
 		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer conn.Close()
-
-			stream, err := mc.OpenServiceStream(ctx, serviceName)
-			if err != nil {
-				tm.logger.Error("open service stream", "service", serviceName, "error", err)
-				return
-			}
-			defer stream.Close()
-			defer mc.StreamDone()
-
-			biRelay(stream, conn)
-		}()
+		entry := service.NewEntry(service.EntryConfig{Target: ref.Target(), ListenAddr: imp.ListenAddr}, service.NetOpener(tm), tm.logger)
+		go entry.Run(ctx)
 	}
 }
 
-func (tm *TunnelManager) listenAndProxyDynamic(ctx context.Context, nodeID, serviceName, listenAddr string) error {
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer conn.Close()
-
-			stream, mc, err := tm.openDynamicServiceStream(ctx, nodeID, serviceName)
-			if err != nil {
-				tm.logger.Warn("dynamic import pending or unavailable", "service", serviceName, "node_id", nodeID, "error", err)
-				return
-			}
-			defer stream.Close()
-			defer mc.StreamDone()
-
-			biRelay(stream, conn)
-		}()
-	}
-}
-
-func (tm *TunnelManager) openDynamicServiceStream(ctx context.Context, nodeID, serviceName string) (*quic.Stream, *tunnel.ManagedClient, error) {
+// OpenPeerStream opens a stream named serviceName on the dynamic
+// peer-directory tunnel client for nodeID. It is a transport operation: the
+// name is only the stream-header label; Service targets are mapped onto it by
+// service.NetOpener.
+func (tm *TunnelManager) OpenPeerStream(ctx context.Context, nodeID, serviceName string) (io.ReadWriteCloser, error) {
 	mc, ok := tm.DynamicClient(nodeID)
 	if !ok {
-		return nil, nil, fmt.Errorf("peer %q not in directory", nodeID)
+		return nil, fmt.Errorf("peer %q not in directory", nodeID)
 	}
+	return openTrackedStream(ctx, mc, serviceName)
+}
+
+// OpenRegionStream opens a stream named serviceName on the configured client
+// tunnel whose remote_region is region (empty region is the unnamed
+// FRP-style tunnel).
+func (tm *TunnelManager) OpenRegionStream(ctx context.Context, region, serviceName string) (io.ReadWriteCloser, error) {
+	tm.mu.Lock()
+	mc, ok := tm.clientsByRegion[region]
+	tm.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no client tunnel for region %q", region)
+	}
+	return openTrackedStream(ctx, mc, serviceName)
+}
+
+// trackedStream releases the ManagedClient in-flight stream count on Close,
+// preserving graceful-shutdown accounting.
+type trackedStream struct {
+	*quic.Stream
+	mc   *tunnel.ManagedClient
+	once sync.Once
+}
+
+func (s *trackedStream) Close() error {
+	err := s.Stream.Close()
+	s.once.Do(s.mc.StreamDone)
+	return err
+}
+
+func openTrackedStream(ctx context.Context, mc *tunnel.ManagedClient, serviceName string) (io.ReadWriteCloser, error) {
 	stream, err := mc.OpenServiceStream(ctx, serviceName)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return stream, mc, nil
+	return &trackedStream{Stream: stream, mc: mc}, nil
 }
 
 func (tm *TunnelManager) AddOrUpdatePeerClient(ctx context.Context, nodeID, addr string) error {
@@ -431,18 +367,4 @@ func (tm *TunnelManager) Clients() []*tunnel.ManagedClient {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.clients
-}
-
-// biRelay copies data bidirectionally between two ReadWriteClosers.
-func biRelay(a, b io.ReadWriteCloser) {
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(b, a)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(a, b)
-		done <- struct{}{}
-	}()
-	<-done
 }

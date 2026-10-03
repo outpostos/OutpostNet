@@ -42,7 +42,7 @@ hack/e2e-relay.sh
 hack/e2e-cross-region.sh
 ```
 
-Verify TCP and UDP tunnel connectivity across supported scenarios.
+Verify TCP tunnel connectivity across supported cross-node scenarios. UDP is verified only node-local (outpostnet-server + outpostnet-sidecar, `TestUDPEndToEnd`); cross-node UDP over the QUIC tunnel is not implemented.
 
 ### 1.3 Documentation Audit
 

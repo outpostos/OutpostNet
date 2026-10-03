@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 ## Overview
 
-OutpostNet 是 OutpostOS 项目的核心网络代理组件，提供轻量级的 TCP/UDP 隧道功能，专为边缘计算环境设计。
+OutpostNet 是 OutpostOS 项目的核心网络代理组件，提供轻量级的 QUIC 隧道功能（跨节点仅 TCP；UDP 仅节点内 server+sidecar），专为边缘计算环境设计。
 
 
 ## 排除目录

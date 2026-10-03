@@ -81,7 +81,7 @@ tls:
 |-------|------|----------|-------------|
 | `name` | string | Yes | Service name |
 | `local_addr` | string | Yes | Local service address, format `host:port` |
-| `protocol` | string | Yes | `tcp` or `udp` |
+| `protocol` | string | Yes | `tcp` or `udp` (accepted for compatibility; the agent's cross-node QUIC tunnel forwards TCP only — `udp` is not implemented there and is served as TCP) |
 
 #### `imports[]`
 
@@ -90,9 +90,9 @@ tls:
 | `name` | string | Yes, unless `service` is set | Remote service name to import |
 | `service` | string | No | Peer-directory service reference, format `<name>@<node_id>` |
 | `listen_addr` | string | Yes | Local listen address, format `host:port` |
-| `protocol` | string | Yes | `tcp` or `udp` |
+| `protocol` | string | Yes | `tcp` or `udp` (accepted for compatibility; the agent's cross-node QUIC tunnel forwards TCP only — `udp` is not implemented there and is served as TCP) |
 
-`service` is additive to the static `name` form. With `service: <name>@<node_id>`, the agent keeps `listen_addr` stable and resolves the peer tunnel through the local peer directory. Missing peers stay pending and retry without exiting the process.
+`service` is additive to the static `name` form. With `service: <name>@<node_id>`, the agent keeps `listen_addr` stable and resolves the peer tunnel through the local peer directory. Missing peers stay pending and retry without exiting the process. Export `local_addr` changes for an existing name are re-pointed in place by `ReloadAgent` (new streams only).
 
 #### `management`
 
@@ -149,6 +149,43 @@ When `node_id` is set, the agent listens on `management.socket_path` using HTTP 
 | `GET /healthz` | Liveness check |
 | `GET /readyz` | Readiness check |
 | `GET /metrics` | Prometheus metrics |
+
+---
+
+## outpostnet-service
+
+`outpostnet-service` is the OutpostService entry point: applications dial a stable local entry
+for a service identity `<service>@<node_id>`; the command reuses the agent's QUIC tunnels, peer
+directory and management API underneath. Design and protocol support: [service-layer.md](service-layer.md).
+Runnable two-node example: [`examples/service/`](../examples/service/README.md).
+
+The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports`, `tls`, `auth`,
+`management`, `health_addr`) plus `peers`, with these differences:
+
+| Item | outpostnet-service |
+|------|--------------------|
+| `node_id` | Required |
+| `imports[]` | Stable entries. `service: <name>@<node_id>` = dynamic path (peer directory); `name` + `remote_region` = static path (configured client tunnel — a `tunnels` entry with `role: client` and the same `remote_region` is required, otherwise startup fails). `listen_addr` must be unique across entries (port `0` excepted); an address already in use fails startup with the bind error |
+| `protocol` | `tcp` only for imports and exports; `udp` is rejected (UDP over the QUIC tunnel is not implemented) |
+| `relays` | Rejected (relay forwarding stays on `outpostnet-agent`) |
+| `peers[]` | `{node_id, addr}` seed for the peer directory at startup; later changes via `PUT /v1/peers`. `node_id` must be unique and differ from this node's `node_id`; `addr` must be `host:port` (port 1-65535) |
+| `management.socket_path` | Default `/run/outpostnet/service.sock` |
+| `health_addr` | Default `:8083` (`/healthz`, `/readyz`) |
+| `persistence`, `metrics` | Accepted for schema compatibility, not used |
+| Unknown fields | Rejected |
+
+Runtime changes: export `local_addr` add/change/remove applies in place when the config file
+changes (`--watch-interval`, default 5s). `node_id`, tunnels, entries, auth, TLS, management,
+`health_addr` and `peers` require a restart (the watcher logs a warning; `--node-id` /
+`--health-addr` overrides are re-applied before comparing, so they do not trigger it); peer
+address changes at runtime go through `PUT /v1/peers`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config <path>` | — | Service YAML config (required) |
+| `--node-id <id>` | — | Node ID override |
+| `--health-addr <addr>` | `:8083` | Health address override |
+| `--watch-interval <dur>` | `5s` | Config poll interval for in-place export changes; `0` disables |
 
 ---
 

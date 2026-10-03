@@ -13,6 +13,7 @@ SERVER_BINARY=outpostnet-server
 SIDECAR_BINARY=outpostnet-sidecar
 CONTROLLER_BINARY=outpostnet-controller
 AGENT_BINARY=outpostnet-agent
+SERVICE_BINARY=outpostnet-service
 
 # Build directory
 BUILD_DIR=build
@@ -39,7 +40,7 @@ RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(V
 all: clean fmt vet test build
 
 # Build targets
-build: build-server build-sidecar build-controller build-agent
+build: build-server build-sidecar build-controller build-agent build-service
 
 build-server:
 	@echo "Building $(SERVER_BINARY)..."
@@ -60,6 +61,11 @@ build-agent:
 	@echo "Building $(AGENT_BINARY)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(AGENT_BINARY) ./cmd/outpostnet-agent
+
+build-service:
+	@echo "Building $(SERVICE_BINARY)..."
+	@mkdir -p $(BUILD_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(SERVICE_BINARY) ./cmd/outpostnet-service
 
 # Install builds binaries to project root for easy testing
 install: build

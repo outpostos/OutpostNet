@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OutpostNet — Lightweight Tunneling for Edge Computing</title>
-  <meta name="description" content="OutpostNet is a lightweight TCP/UDP tunneling proxy for edge computing environments. Expose local services across regions without public IPs.">
+  <meta name="description" content="OutpostNet is a lightweight QUIC tunneling proxy for edge computing environments. Expose local TCP services across regions without public IPs (cross-node TCP only; UDP is node-local via server + sidecar).">
   <style>
     :root {
       --bg: #0a0e17;
@@ -280,8 +280,8 @@
 </div>
 <section class="features">
   <div class="feature">
-    <h3>TCP & UDP Proxy</h3>
-    <p>Full Layer 4 protocol support. HTTP, gRPC, DNS, gaming protocols — anything that speaks TCP or UDP works out of the box.</p>
+    <h3>TCP Proxy Across Nodes</h3>
+    <p>Cross-node traffic over the QUIC tunnel is TCP only — HTTP, gRPC and anything else that speaks TCP. UDP is supported only node-local, between outpostnet-server and outpostnet-sidecar; cross-node UDP is not implemented.</p>
   </div>
   <div class="feature">
     <h3>QUIC Encrypted Tunnels</h3>
@@ -335,8 +335,8 @@ Host A (server role)                    Host B (client role)
       <td>2 (frps + frpc)</td>
     </tr>
     <tr>
-      <td>TCP & UDP Proxy</td>
-      <td class="check">Yes</td>
+      <td>TCP &amp; UDP Proxy</td>
+      <td>TCP across nodes; UDP node-local only (server + sidecar)</td>
       <td class="check">Yes</td>
     </tr>
     <tr>
@@ -426,7 +426,7 @@ Host A (server role)                    Host B (client role)
     <tr><th>Scenario</th><th>Result</th><th>Duration</th></tr>
     <tr><td>TCP end-to-end (single connection)</td><td class="check">PASS</td><td>0.36s</td></tr>
     <tr><td>TCP multiple concurrent connections</td><td class="check">PASS</td><td>0.36s</td></tr>
-    <tr><td>UDP end-to-end forwarding</td><td class="check">PASS</td><td>0.35s</td></tr>
+    <tr><td>UDP end-to-end forwarding (node-local server + sidecar, not cross-node)</td><td class="check">PASS</td><td>0.35s</td></tr>
     <tr><td>FRP-style tunnel, no region</td><td class="check">PASS</td><td>0.81s</td></tr>
     <tr><td>Multi-service stream multiplexing</td><td class="check">PASS</td><td>1.05s</td></tr>
     <tr><td>Three-node relay chain</td><td class="check">PASS</td><td>1.17s</td></tr>
