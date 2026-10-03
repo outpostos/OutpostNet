@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -122,5 +123,70 @@ func TestServiceDomainDoesNotDependOnTransportOrHosts(t *testing.T) {
 		if strings.HasPrefix(dep, modulePath+"/internal/") || strings.HasPrefix(dep, modulePath+"/pkg/tunnel") {
 			t.Errorf("pkg/service must not depend on %s (chain: %s)", dep, strings.Join(chain, " -> "))
 		}
+	}
+}
+
+// TestNetHostStreamAPIIsServiceAgnostic keeps the Net host's stream API in
+// transport terms: exported TunnelManager methods in internal/agent must not
+// take or return pkg/service types. Service targets are mapped onto the
+// transport by service.NetOpener. (internal/agent as the legacy composition
+// host may still import pkg/service to assemble entries and exports.)
+func TestNetHostStreamAPIIsServiceAgnostic(t *testing.T) {
+	root := repoRoot(t)
+	dir := filepath.Join(root, "internal", "agent")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// Local name of the pkg/service import in this file, if any.
+		svcName := ""
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, `"`) == modulePath+"/pkg/service" {
+				svcName = "service"
+				if imp.Name != nil {
+					svcName = imp.Name.Name
+				}
+			}
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || !fn.Name.IsExported() || len(fn.Recv.List) != 1 {
+				continue
+			}
+			recv := fn.Recv.List[0].Type
+			if star, ok := recv.(*ast.StarExpr); ok {
+				recv = star.X
+			}
+			if id, ok := recv.(*ast.Ident); !ok || id.Name != "TunnelManager" {
+				continue
+			}
+			checked++
+			if svcName == "" {
+				continue
+			}
+			ast.Inspect(fn.Type, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok && x.Name == svcName {
+						t.Errorf("%s: TunnelManager.%s signature uses %s.%s; keep the Net host API in transport terms",
+							fset.Position(fn.Pos()), fn.Name.Name, svcName, sel.Sel.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no exported TunnelManager methods found; test is not checking anything")
 	}
 }

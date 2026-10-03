@@ -224,36 +224,34 @@ func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
 			tm.logger.Error("invalid service import", "service", imp.Service, "error", err)
 			continue
 		}
-		entry := service.NewEntry(service.EntryConfig{Target: ref.Target(), ListenAddr: imp.ListenAddr}, tm, tm.logger)
+		entry := service.NewEntry(service.EntryConfig{Target: ref.Target(), ListenAddr: imp.ListenAddr}, service.NetOpener(tm), tm.logger)
 		go entry.Run(ctx)
 	}
 }
 
-// OpenStream implements service.StreamOpener on top of the tunnel clients
-// this manager owns: dynamic targets use the peer-directory client for
-// NodeID, static targets use the configured client for Region.
-func (tm *TunnelManager) OpenStream(ctx context.Context, t service.Target) (io.ReadWriteCloser, error) {
-	if err := t.Validate(); err != nil {
-		return nil, err
+// OpenPeerStream opens a stream named serviceName on the dynamic
+// peer-directory tunnel client for nodeID. It is a transport operation: the
+// name is only the stream-header label; Service targets are mapped onto it by
+// service.NetOpener.
+func (tm *TunnelManager) OpenPeerStream(ctx context.Context, nodeID, serviceName string) (io.ReadWriteCloser, error) {
+	mc, ok := tm.DynamicClient(nodeID)
+	if !ok {
+		return nil, fmt.Errorf("peer %q not in directory", nodeID)
 	}
-	var (
-		mc *tunnel.ManagedClient
-		ok bool
-	)
-	if t.Dynamic() {
-		mc, ok = tm.DynamicClient(t.NodeID)
-		if !ok {
-			return nil, fmt.Errorf("peer %q not in directory", t.NodeID)
-		}
-	} else {
-		tm.mu.Lock()
-		mc, ok = tm.clientsByRegion[t.Region]
-		tm.mu.Unlock()
-		if !ok {
-			return nil, fmt.Errorf("no client tunnel for region %q", t.Region)
-		}
+	return openTrackedStream(ctx, mc, serviceName)
+}
+
+// OpenRegionStream opens a stream named serviceName on the configured client
+// tunnel whose remote_region is region (empty region is the unnamed
+// FRP-style tunnel).
+func (tm *TunnelManager) OpenRegionStream(ctx context.Context, region, serviceName string) (io.ReadWriteCloser, error) {
+	tm.mu.Lock()
+	mc, ok := tm.clientsByRegion[region]
+	tm.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no client tunnel for region %q", region)
 	}
-	return openTrackedStream(ctx, mc, t.Service)
+	return openTrackedStream(ctx, mc, serviceName)
 }
 
 // trackedStream releases the ManagedClient in-flight stream count on Close,

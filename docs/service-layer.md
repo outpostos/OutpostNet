@@ -48,14 +48,25 @@ cmd/outpostnet-service ──► internal/servicehost ──► pkg/service (Ser
                                    ▼
                            pkg/tunnel, pkg/tunnel/tlsutil (Net 通用连接/流/重连)
 
-cmd/outpostnet-agent ──► internal/agent（旧入口，内部导入/导出改为调用 pkg/service）
+cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net 宿主 + 旧配置导入/导出组装，后者调用 pkg/service）
 ```
 
-规则（由 `pkg/service/boundary_test.go` 用源码 import 图强制）：
+规则（1–3 由 `pkg/service/boundary_test.go` 解析源码强制，覆盖范围见下表；4 为约定）：
 
 1. Net 通用包 `pkg/tunnel`、`pkg/tunnel/tlsutil`、`pkg/protocol`、`pkg/state`、`pkg/agentconfig` 的传递依赖中不得出现 `pkg/service`、`internal/servicehost`、`internal/agent`。
 2. `pkg/service` 不依赖 `pkg/tunnel` 与任何 `internal/*`：它通过 `StreamOpener`（打开到某服务目标的双向流）和 `RouteTable`（`AddRoute/RemoveRoute`）两个小接口使用 Net，具体传输由宿主注入。
-3. `internal/agent` 是旧的组合宿主（`outpostnet-agent`），可以依赖 `pkg/service`；`internal/servicehost` 复用 `internal/agent` 的隧道管理、对等目录与管理 API，不复制它们。
+3. `internal/agent` 的流接口以传输术语表达：`TunnelManager.OpenPeerStream(ctx, nodeID, serviceName)` / `OpenRegionStream(ctx, region, serviceName)` 不携带任何 `pkg/service` 类型；Service 的 `Target` 由 `pkg/service` 侧适配器 `service.NetOpener` 映射到这两条传输路径（含流头约束校验）。由 `pkg/service/boundary_test.go` 的 `TestNetHostStreamAPIIsServiceAgnostic` 检查 `TunnelManager` 导出方法签名。
+4. `internal/servicehost` 复用 `internal/agent` 的隧道管理、对等目录与管理 API，不复制它们。
+
+**未完全拆开的部分（如实说明）**：`internal/agent` 同时是 Net 宿主和旧命令 `outpostnet-agent` 的**组合宿主**。为兼容旧配置（`imports`/`exports` 写在同一份 agent 配置里），它仍 import `pkg/service`，在包内组装旧配置的导入（`service.NewEntry`）与导出（`service.RegisterExports`、`ReloadAgent` 中的 `service.ApplyExports`）。也就是说 Net 宿主代码与旧入口的 Service 组装仍同在 `internal/agent` 一个包里，本票没有重写 `TunnelManager`。真正的通用层是 `pkg/tunnel`、`pkg/tunnel/tlsutil`（以及共享配置 `pkg/agentconfig`），它们不依赖 Service。
+
+边界测试覆盖范围（`pkg/service/boundary_test.go`）：
+
+| 测试 | 覆盖包 | 检查内容 |
+|------|--------|----------|
+| `TestNetCommonLayerDoesNotImportService` | `pkg/tunnel`、`pkg/tunnel/tlsutil`、`pkg/protocol`、`pkg/state`、`pkg/agentconfig` | 传递依赖中无 `pkg/service`、`internal/servicehost`、`internal/agent` |
+| `TestServiceDomainDoesNotDependOnTransportOrHosts` | `pkg/service` | 传递依赖中无 `pkg/tunnel*` 与任何 `internal/*` |
+| `TestNetHostStreamAPIIsServiceAgnostic` | `internal/agent`（仅 `TunnelManager` 导出方法签名） | 签名不使用 `pkg/service` 类型；**不**检查 `internal/agent` 的 import（组合宿主允许 import `pkg/service`） |
 
 职责：
 
@@ -91,7 +102,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口，内部导入/导出�
 | 边界测试 | `pkg/service/boundary_test.go`（源码 import 图，非 `_test.go` 文件） |
 | Service 宿主 | `internal/servicehost/host.go`（复用 `agent.TunnelManager`/`PeerDirectory`/`ManagementServer`/`ConfigWatcher`） |
 | 命令 | `cmd/outpostnet-service`（`make build-service`） |
-| 旧入口改造 | `internal/agent/tunnel_manager.go`：静态/动态导入改为 `service.Entry`，`TunnelManager.OpenStream` 实现 `service.StreamOpener`；导出走 `service.RegisterExports`；`config_watcher.go`：`ReloadAgent` 走 `service.ApplyExports`，`ConfigWatcher.SetLoader` |
+| 旧入口改造 | `internal/agent/tunnel_manager.go`：静态/动态导入改为 `service.Entry`，`TunnelManager.OpenPeerStream`/`OpenRegionStream` 以传输术语开流，经 `service.NetOpener` 适配为 `service.StreamOpener`；导出走 `service.RegisterExports`；`config_watcher.go`：`ReloadAgent` 走 `service.ApplyExports`，`ConfigWatcher.SetLoader` |
 | 双节点测试 | `internal/servicehost/host_test.go`：两套独立 Host（各自真实 QUIC 监听）+ 真实 TCP 应用 + token 认证；覆盖实例替换（换隧道端口，经 `PUT /v1/peers`）、同节点换端口（`ApplyExports` 与配置文件两种入口）、在途连接行为、错误 token |
 | 可运行样例 | `examples/service/`（三个独立进程：node-a、node-b、node-b 替换实例） |
 

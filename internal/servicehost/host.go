@@ -89,7 +89,7 @@ func (h *Host) Run(ctx context.Context) error {
 		entries = append(entries, service.NewEntry(service.EntryConfig{
 			Target:     tgt,
 			ListenAddr: h.cfg.Imports[i].ListenAddr,
-		}, tm, h.logger))
+		}, service.NetOpener(tm), h.logger))
 	}
 	var entryWG sync.WaitGroup
 	for _, e := range entries {

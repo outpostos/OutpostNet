@@ -15,7 +15,9 @@
 //
 // The package reaches Net only through two small ports injected by a host:
 // StreamOpener (open a bidirectional stream to a Target) and RouteTable
-// (AddRoute/RemoveRoute, satisfied by *tunnel.Server). It must not import
+// (AddRoute/RemoveRoute, satisfied by *tunnel.Server). NetOpener adapts a Net
+// host that opens streams in transport terms (NetStreams: peer node_id or
+// tunnel region + stream name) to StreamOpener. It must not import
 // pkg/tunnel or any internal/* host; boundary_test.go enforces this and also
 // enforces that the generic Net packages never import this package.
 //

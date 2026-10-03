@@ -90,3 +90,27 @@ type StreamOpenerFunc func(ctx context.Context, t Target) (io.ReadWriteCloser, e
 func (f StreamOpenerFunc) OpenStream(ctx context.Context, t Target) (io.ReadWriteCloser, error) {
 	return f(ctx, t)
 }
+
+// NetStreams is what a Net host offers for opening streams, expressed in
+// transport terms only: a peer node_id or a configured tunnel region, plus
+// the stream-header name. Net hosts implement it without importing this
+// package's types.
+type NetStreams interface {
+	OpenPeerStream(ctx context.Context, nodeID, serviceName string) (io.ReadWriteCloser, error)
+	OpenRegionStream(ctx context.Context, region, serviceName string) (io.ReadWriteCloser, error)
+}
+
+// NetOpener adapts a Net host to StreamOpener: dynamic targets go to
+// OpenPeerStream, static targets to OpenRegionStream. Targets are validated
+// against the stream-header constraints before reaching the transport.
+func NetOpener(n NetStreams) StreamOpener {
+	return StreamOpenerFunc(func(ctx context.Context, t Target) (io.ReadWriteCloser, error) {
+		if err := t.Validate(); err != nil {
+			return nil, err
+		}
+		if t.Dynamic() {
+			return n.OpenPeerStream(ctx, t.NodeID, t.Service)
+		}
+		return n.OpenRegionStream(ctx, t.Region, t.Service)
+	})
+}
