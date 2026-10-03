@@ -364,12 +364,60 @@ anti-entropy tick when they are enabled. Stores without an engine call
   `MaxClockOffsetMS`; otherwise partitioned peers are forced into resync and
   lose their unreplicated writes older than the horizon.
 * Durable directories written by this version may contain `purge`, `snapshot`
-  and (03d) `batch` records; older binaries refuse them as unknown record types
-  rather than misreading them, so a node that ran a resync under 03d cannot be
-  downgraded to 03b without compacting first (`Compact` rewrites batches as
-  ordinary `entry` records). Optional record fields added by 03d
-  (`peer_node_id` on `peer_progress`, `adopted` on `purge` and `snapshot`) are
-  ignored by 03b binaries; a 03b binary that reopens such a directory just stops
-  vouching.
+  and (03d) `batch` records; older binaries refuse them rather than misreading
+  them. Optional record fields added by 03d (`peer_node_id` on `peer_progress`,
+  `adopted` on `purge` and `snapshot`) are ignored by 03b binaries. See
+  "Downgrading a durable directory from 03d to 03b" below.
 * Out of scope: epoch/lineage guards (03a) and narrowing `CompareAndSet`'s
   append-under-lock scope (still a known bound).
+
+### Downgrading a durable directory from 03d to 03b
+
+**What 03b reports.** A 03b binary opening a directory whose log holds a `batch`
+record (written by any snapshot resync under 03d) refuses to start with exactly:
+
+```
+replay durable state log line <N>: unknown durable record type "batch"
+```
+
+(measured: the 03b `NewDurableStore` at `59aa33d` opening a 03d directory after
+one resync, `<N>` = 2). Nothing is replayed partially; the directory is left
+untouched. The remedy is to start the 03d binary on that directory again, have
+it run `Compact` (which rewrites every `batch` as ordinary `entry` records), and
+retry the downgrade; the same directory after `Compact` opens under 03b without
+error and with the same horizon (measured).
+
+**Why the format version is not raised.** The 03b binary is fixed, so only its
+existing error paths can be chosen from. Raising the version of `batch` records
+makes 03b report `replay durable state log line 2: unsupported durable record
+format version 2`, which no longer names the record type; raising the manifest
+version makes 03b refuse every 03d directory with `unsupported durable state
+format version 2`, including compacted ones that it can read correctly, i.e. it
+removes the downgrade path instead of explaining it. Both were measured against
+`59aa33d`; neither is clearer than the current error, so the format stays at
+version 1 and this section is the explanation.
+
+**Round trip 03d → 03b → 03d.** 03b ignores `adopted` and `peer_node_id`, never
+writes them, and its own resyncs record no adopted horizon. If 03b compacts the
+directory (`Compact`, or `CompactIfNeeded` with `CompactionMinRecords > 0`), the
+snapshot header loses `adopted` and the `peer_progress` records lose
+`peer_node_id`. After upgrading back to 03d:
+
+* Node mappings: every `peer_progress` record written by 03b has no
+  `peer_node_id` and clears the address's mapping on replay, so the node vouches
+  for nobody until a 03d push response names the node at that address again.
+  Nothing is vouched on stale mappings.
+* Adopted horizon: `A_R` is whatever the remaining 03d records carry, possibly
+  zero, and removals adopted through resyncs under 03b are not reflected. Until
+  the node's next resync raises it again, the node may vouch a requester for
+  removals it adopted from another node. The safety mechanisms above are
+  unaffected; the consequence is that such a requester, if it holds a stale
+  value, is cleaned up by the digest check or a per-entry rejection rather than
+  by a 410 on its first exchange.
+* Handling: no action is needed for safety. To restore the strict rule right
+  away, wait until the node has caught up with every peer
+  (`ReplicationStatus.CaughtUp`, so it holds no unreplicated writes), stop it,
+  clear its data directory and restart it: with horizon zero it is refused on
+  its first exchange (rule "Not a zero horizon"), resyncs and records the peer
+  horizon as adopted, which makes it apply the 03b comparison to every lower
+  horizon until it collects on its own.
