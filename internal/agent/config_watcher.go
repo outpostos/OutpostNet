@@ -23,6 +23,7 @@ type ConfigWatcher struct {
 	lastModTime time.Time
 	lastSize    int64
 	onChange    func(*agentconfig.Config)
+	load        func(string) (*agentconfig.Config, error)
 }
 
 // NewConfigWatcher creates a new config file watcher.
@@ -37,7 +38,17 @@ func NewConfigWatcher(path string, interval time.Duration, logger *slog.Logger) 
 		path:     path,
 		interval: interval,
 		logger:   logger,
+		load:     agentconfig.LoadConfig,
 	}
+}
+
+// SetLoader replaces the config loader (default agentconfig.LoadConfig), so a
+// host with stricter validation (e.g. outpostnet-service) can reuse the
+// watcher without a second polling implementation.
+func (w *ConfigWatcher) SetLoader(load func(string) (*agentconfig.Config, error)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.load = load
 }
 
 // OnChange sets the callback for config changes.
@@ -84,6 +95,7 @@ func (w *ConfigWatcher) check() {
 	w.mu.Lock()
 	changed := info.ModTime() != w.lastModTime || info.Size() != w.lastSize
 	onChange := w.onChange
+	load := w.load
 	if changed {
 		w.lastModTime = info.ModTime()
 		w.lastSize = info.Size()
@@ -96,7 +108,7 @@ func (w *ConfigWatcher) check() {
 
 	w.logger.Info("config file changed, reloading", "path", w.path)
 
-	cfg, err := agentconfig.LoadConfig(w.path)
+	cfg, err := load(w.path)
 	if err != nil {
 		w.logger.Error("reload config", "path", w.path, "error", err)
 		return
