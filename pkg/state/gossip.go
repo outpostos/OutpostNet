@@ -84,6 +84,11 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	if backoffMax < backoffBase {
 		backoffMax = backoffBase
 	}
+	if gs, ok := cfg.Store.(gcStore); ok {
+		// From now on tombstones may only be collected through the engine, which
+		// knows the peers that must acknowledge them first.
+		gs.markReplicated()
+	}
 	return &GossipEngine{
 		nodeID:              cfg.NodeID,
 		store:               cfg.Store,
@@ -113,6 +118,7 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 			_ = g.SyncOnce(ctx)
 		case <-antiEntropyTicker.C:
 			_ = g.AntiEntropyOnce(ctx)
+			g.maintain(ctx)
 		}
 	}
 }
@@ -142,9 +148,23 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 			ProtocolVersion: StateProtocolVersion,
 			PolicyID:        g.policy.ID(),
 			SourceNodeID:    g.nodeID,
+			GCHorizon:       g.localHorizon(),
 			Entries:         changes,
 		})
 		if err != nil {
+			var resync *ResyncRequiredError
+			if errors.As(err, &resync) {
+				// The peer refused our increments because we lag behind its GC
+				// horizon. Resync from it; the cursor stays put and the next round
+				// pushes whatever survived the resync.
+				if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
+					g.recordPeerFailure(addr, "push-resync", err, now)
+					errs = append(errs, err)
+					continue
+				}
+				g.recordPeerSuccess(addr)
+				continue
+			}
 			g.recordPeerFailure(addr, "push", err, now)
 			errs = append(errs, err)
 			continue
@@ -154,6 +174,15 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 			g.recordPeerFailure(addr, "push-progress", err, now)
 			errs = append(errs, err)
 			continue
+		}
+		if hasBeyondHorizonRejection(resp) {
+			// The peer refused entries for keys it collected. We hold stale state for
+			// them, so we resync from the peer, which purges those entries locally.
+			if err := g.resyncFrom(ctx, addr, timestampValue(resp.GCHorizon)); err != nil {
+				g.recordPeerFailure(addr, "push-resync", err, now)
+				errs = append(errs, err)
+				continue
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -176,18 +205,44 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			ProtocolVersion: StateProtocolVersion,
 			PolicyID:        g.policy.ID(),
 			SourceNodeID:    g.nodeID,
+			GCHorizon:       g.localHorizon(),
 			Digest:          digest,
 		})
 		if err != nil {
+			var resync *ResyncRequiredError
+			if errors.As(err, &resync) {
+				if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
+					g.recordPeerFailure(addr, "pull-resync", err, now)
+					errs = append(errs, err)
+					continue
+				}
+				g.recordPeerSuccess(addr)
+				continue
+			}
 			g.recordPeerFailure(addr, "pull", err, now)
 			errs = append(errs, err)
 			continue
 		}
 		var applyErrs []error
+		var beyondHorizon int
 		for _, entry := range entries {
 			if _, err := g.store.Apply(ctx, entry); err != nil {
+				var beyond *BeyondGCHorizonError
+				if errors.As(err, &beyond) {
+					// The peer lags behind our GC horizon. Refusing its stale entry is
+					// the intended outcome, not a local failure; the peer resyncs on
+					// its own next exchange with us.
+					beyondHorizon++
+					continue
+				}
 				applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", addr, entry.Key, err))
 			}
+		}
+		if beyondHorizon > 0 {
+			slog.Warn("state gossip: refused pulled entries below the local GC horizon; peer must resync",
+				"peer", addr,
+				"refused", beyondHorizon,
+			)
 		}
 		if err := errors.Join(applyErrs...); err != nil {
 			g.recordPeerFailure(addr, "pull-apply", err, now)
@@ -204,12 +259,21 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
 		return nil, err
 	}
+	horizon := g.storeHorizon()
+	if err := g.checkRequesterHorizon(horizon, req.GCHorizon); err != nil {
+		return nil, err
+	}
 	var accepted, rejected int
 	var rejections []PushRejection
 	for _, entry := range req.Entries {
 		applied, err := g.store.Apply(ctx, entry)
 		if err != nil {
 			rejected++
+			var beyond *BeyondGCHorizonError
+			if errors.As(err, &beyond) {
+				rejections = append(rejections, PushRejection{Key: entry.Key, Reason: RejectionReasonBeyondGCHorizon})
+				continue
+			}
 			if rejection, ok := rejectionFromApplyError(entry, err); ok {
 				rejections = append(rejections, rejection)
 				continue
@@ -228,18 +292,56 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 		Accepted:        accepted,
 		Rejected:        rejected,
 		Rejections:      rejections,
+		GCHorizon:       timestampPtr(g.storeHorizon()),
 	}, nil
 }
 
 // HandlePull returns entries newer than the caller's cursor or digest.
 func (g *GossipEngine) HandlePull(ctx context.Context, req PullRequest) ([]Entry, error) {
+	resp, err := g.HandlePullResponse(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
+}
+
+// HandlePullResponse answers a pull with paging and GC horizon metadata. A
+// digest pull from a requester whose GC horizon is lower than ours is refused
+// with ResyncRequiredError. Position pulls (no digest) are always served: they
+// are how a lagging requester pages through our snapshot during resync.
+func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) (*PullResponse, error) {
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
 		return nil, err
 	}
-	if len(req.Digest) > 0 {
-		return g.diffAgainstDigest(ctx, req.Digest, req.Limit)
+	// The horizon is read before the entries, so it never claims more than the
+	// returned state reflects.
+	horizon := g.storeHorizon()
+	resp := &PullResponse{
+		ProtocolVersion: StateProtocolVersion,
+		PolicyID:        g.policy.ID(),
+		GCHorizon:       timestampPtr(horizon),
 	}
-	return g.store.ChangesSince(ctx, req.SincePosition, req.Limit)
+	if len(req.Digest) > 0 {
+		if err := g.checkRequesterHorizon(horizon, req.GCHorizon); err != nil {
+			return nil, err
+		}
+		entries, err := g.diffAgainstDigest(ctx, req.Digest, req.Limit)
+		if err != nil {
+			return nil, err
+		}
+		resp.Entries = entries
+		return resp, nil
+	}
+	entries, err := g.store.ChangesSince(ctx, req.SincePosition, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	resp.Entries = entries
+	if req.Limit > 0 && len(entries) == req.Limit {
+		resp.More = true
+		resp.NextSincePosition = entries[len(entries)-1].Position
+	}
+	return resp, nil
 }
 
 // LocalDigest returns the local summary using the engine policy.
@@ -427,4 +529,144 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// SnapshotSyncer is implemented by syncers that can page through a peer's full
+// state with GC horizon metadata. Snapshot resync requires it.
+type SnapshotSyncer interface {
+	PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error)
+}
+
+// resyncPageSize bounds one snapshot page so it fits the default response size.
+const resyncPageSize = 256
+
+// CollectTombstones removes tombstones that are older than the store retention
+// and acknowledged by every peer the PeerProvider currently returns. With no
+// peers, retention alone decides.
+func (g *GossipEngine) CollectTombstones(ctx context.Context) (TombstoneGCResult, error) {
+	gs, ok := g.store.(gcStore)
+	if !ok {
+		return TombstoneGCResult{}, ErrTombstoneGCUnsupported
+	}
+	peers := g.peerProvider.Peers()
+	if len(peers) == 0 {
+		return gs.collectTombstones(ctx, 0, false)
+	}
+	var safe uint64
+	for index, addr := range peers {
+		position, err := g.peerLastPushPosition(ctx, addr)
+		if err != nil {
+			return TombstoneGCResult{}, err
+		}
+		if index == 0 || position < safe {
+			safe = position
+		}
+	}
+	return gs.collectTombstones(ctx, safe, true)
+}
+
+// maintain runs opt-in GC and compaction from Run.
+func (g *GossipEngine) maintain(ctx context.Context) {
+	if gs, ok := g.store.(gcStore); ok && gs.tombstoneGCEnabled() {
+		if _, err := g.CollectTombstones(ctx); err != nil {
+			slog.Warn("state gossip: tombstone collection failed", "err", err)
+		}
+	}
+	if compactor, ok := g.store.(interface {
+		CompactIfNeeded(context.Context) (bool, error)
+	}); ok {
+		if _, err := compactor.CompactIfNeeded(ctx); err != nil {
+			slog.Warn("state gossip: durable log compaction failed", "err", err)
+		}
+	}
+}
+
+// resyncFrom pages through the peer's full state and lets the store merge it,
+// purge what the peer refuses and adopt the peer horizon.
+func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon Timestamp) error {
+	gs, ok := g.store.(gcStore)
+	if !ok {
+		return fmt.Errorf("peer %s requires snapshot resync: %w", addr, ErrTombstoneGCUnsupported)
+	}
+	snapshotter, ok := g.syncer.(SnapshotSyncer)
+	if !ok {
+		return fmt.Errorf("peer %s requires snapshot resync, syncer cannot pull snapshots: %w", addr, ErrTombstoneGCUnsupported)
+	}
+	var (
+		snapshot []Entry
+		since    uint64
+		horizon  Timestamp
+	)
+	for page := 0; ; page++ {
+		resp, err := snapshotter.PullSnapshot(ctx, addr, PullRequest{
+			ProtocolVersion: StateProtocolVersion,
+			PolicyID:        g.policy.ID(),
+			SourceNodeID:    g.nodeID,
+			GCHorizon:       g.localHorizon(),
+			SincePosition:   since,
+			Limit:           resyncPageSize,
+		})
+		if err != nil {
+			return fmt.Errorf("pull resync snapshot page %d from %s: %w", page, addr, err)
+		}
+		if page == 0 {
+			// The first page's horizon was read before any snapshot entry, so it is
+			// covered by everything the peer returns afterwards.
+			horizon = timestampValue(resp.GCHorizon)
+		}
+		snapshot = append(snapshot, resp.Entries...)
+		if !resp.More {
+			break
+		}
+		if resp.NextSincePosition <= since {
+			return fmt.Errorf("resync snapshot from %s did not advance past position %d", addr, since)
+		}
+		since = resp.NextSincePosition
+	}
+	if horizon.Compare(knownHorizon) < 0 {
+		return fmt.Errorf("resync snapshot from %s reports horizon %+v below the refused horizon %+v", addr, horizon, knownHorizon)
+	}
+	result, err := gs.resyncFromSnapshot(ctx, snapshot, horizon)
+	if err != nil {
+		return fmt.Errorf("resync from %s: %w", addr, err)
+	}
+	slog.Warn("state gossip: resynced from peer snapshot",
+		"peer", addr,
+		"applied", result.Applied,
+		"purged", result.Purged,
+		"horizonWallMS", result.Horizon.WallMS,
+	)
+	return nil
+}
+
+func (g *GossipEngine) storeHorizon() Timestamp {
+	if gs, ok := g.store.(gcStore); ok {
+		return gs.GCHorizon()
+	}
+	return Timestamp{}
+}
+
+func (g *GossipEngine) localHorizon() *Timestamp {
+	return timestampPtr(g.storeHorizon())
+}
+
+// checkRequesterHorizon refuses an incremental exchange from a requester whose
+// GC horizon is lower than ours: it may hold or miss state we collected.
+func (g *GossipEngine) checkRequesterHorizon(local Timestamp, requester *Timestamp) error {
+	if local.isZero() || timestampValue(requester).Compare(local) >= 0 {
+		return nil
+	}
+	return &ResyncRequiredError{Peer: g.nodeID, Horizon: local}
+}
+
+func hasBeyondHorizonRejection(resp *PushResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for _, rejection := range resp.Rejections {
+		if rejection.Reason == RejectionReasonBeyondGCHorizon {
+			return true
+		}
+	}
+	return false
 }

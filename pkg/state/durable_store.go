@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const durableFormatVersion = 1
@@ -24,6 +25,8 @@ const (
 
 	durableRecordEntry        = "entry"
 	durableRecordPeerProgress = "peer_progress"
+	// durableRecordPurge commits a tombstone GC pass or a resync purge.
+	durableRecordPurge = "purge"
 )
 
 var (
@@ -60,6 +63,9 @@ type DurableStoreConfig struct {
 	NodeID        string
 	Policy        MergePolicy
 	PhysicalClock PhysicalClock
+	// TombstoneRetention enables tombstone GC; see MemoryStoreConfig. Zero (the
+	// default) keeps every tombstone.
+	TombstoneRetention time.Duration
 
 	// preAppendHook runs before a record is marshalled or written. It models a
 	// refusal to persist, not a disk failure: no byte reaches the log and the
@@ -114,6 +120,11 @@ type durableRecord struct {
 	Entry         *Entry `json:"entry,omitempty"`
 	Peer          string `json:"peer,omitempty"`
 	Position      uint64 `json:"position,omitempty"`
+	// Purge fields: the horizon and floor after the purge and the exact entry
+	// identities it removed.
+	Horizon *Timestamp     `json:"horizon,omitempty"`
+	Floor   uint64         `json:"floor,omitempty"`
+	Removed []removedEntry `json:"removed,omitempty"`
 }
 
 // NewDurableStore opens or creates a durable state replica.
@@ -121,7 +132,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock)
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +159,8 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		preAppendHook: cfg.preAppendHook,
 		wrapLog:       cfg.wrapLog,
 	}
+	core.entryHook = store.appendEntry
+	core.purgeHook = store.appendPurge
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -207,7 +220,7 @@ func (s *DurableStore) CompareAndSet(ctx context.Context, key string, expected E
 
 // Apply durably merges a remote entry before making it visible.
 func (s *DurableStore) Apply(ctx context.Context, incoming Entry) (bool, error) {
-	return s.apply(ctx, incoming, s.appendEntry)
+	return s.apply(ctx, incoming, s.appendEntry, false)
 }
 
 // PeerProgress returns the last durably saved push position for peer.
@@ -392,6 +405,12 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 			s.peerProgress[record.Peer] = record.Position
 		}
 		return nil
+	case durableRecordPurge:
+		s.storeCore.mu.Lock()
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed})
+		s.storeCore.mu.Unlock()
+		s.hlc.Restore(timestampValue(record.Horizon))
+		return nil
 	default:
 		return fmt.Errorf("unknown durable record type %q", record.Type)
 	}
@@ -405,6 +424,15 @@ func (s *DurableStore) appendEntry(entry Entry) error {
 		Position: entry.Position,
 	}, func() {
 	})
+}
+
+func (s *DurableStore) appendPurge(set purgeSet) error {
+	return s.appendRecord(durableRecord{
+		Type:    durableRecordPurge,
+		Horizon: timestampPtr(set.Horizon),
+		Floor:   set.Floor,
+		Removed: append([]removedEntry(nil), set.Removed...),
+	}, func() {})
 }
 
 func (s *DurableStore) appendPeerProgress(peer string, position uint64) error {

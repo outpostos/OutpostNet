@@ -106,7 +106,9 @@ type PushRequest struct {
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	SourceNodeID    string          `json:"source"`
-	Entries         []Entry         `json:"entries"`
+	// GCHorizon is the sender's GC horizon; omitted when zero.
+	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
+	Entries   []Entry    `json:"entries"`
 }
 
 // PushResponse reports how many pushed entries changed receiver state.
@@ -116,6 +118,8 @@ type PushResponse struct {
 	Accepted        int             `json:"accepted"`
 	Rejected        int             `json:"rejected"`
 	Rejections      []PushRejection `json:"rejections,omitempty"`
+	// GCHorizon is the receiver's GC horizon; omitted when zero.
+	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
 }
 
 // PushRejection explains an entry rejection.
@@ -135,6 +139,8 @@ type PullRequest struct {
 	SincePosition   uint64                  `json:"since_position,omitempty"`
 	Limit           int                     `json:"limit,omitempty"`
 	Digest          map[string]DigestRecord `json:"digest,omitempty"`
+	// GCHorizon is the requester's GC horizon; omitted when zero.
+	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
 }
 
 // PullResponse is returned by the HTTP pull endpoint.
@@ -142,6 +148,12 @@ type PullResponse struct {
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	Entries         []Entry         `json:"entries"`
+	// GCHorizon is the responder's GC horizon, read before Entries; omitted when
+	// zero.
+	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
+	// More and NextSincePosition page a position pull with a Limit.
+	More              bool   `json:"more,omitempty"`
+	NextSincePosition uint64 `json:"next_since_position,omitempty"`
 }
 
 // DigestRecord captures latest known state for a key plus policy metadata.
