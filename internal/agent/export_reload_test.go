@@ -101,7 +101,11 @@ func TestReloadAgentUpdatesChangedExportAddress(t *testing.T) {
 
 	next := *cfg
 	next.Exports = []agentconfig.ExportConfig{{Name: "echo", LocalAddr: v2.Addr().String(), Protocol: "tcp"}}
-	_ = ReloadAgent(a, &next) // tunnel changes still require restart; exports apply in place
+	// Exports apply in place. ReloadAgent always reports that tunnel changes
+	// need a restart (no tunnel hot-reload); any other error is a failure.
+	if err := ReloadAgent(a, &next); err == nil || !strings.Contains(err.Error(), "restart required for tunnel changes") {
+		t.Fatalf("ReloadAgent error = %v, want only the restart-required notice", err)
+	}
 
 	if got := askOverStream(t, ctx, client, "echo", "ping"); got != "v2:ping" {
 		t.Fatalf("after reload got %q, want v2:ping", got)
