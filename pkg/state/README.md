@@ -98,10 +98,28 @@ Replication status (`GossipEngine.ReplicationStatus`):
   `AcknowledgedPosition` (persisted `PeerProgressStore` value when available),
   `OutboundCaughtUp` (`AcknowledgedPosition >= Local.CurrentPosition`, with the
   local position read first so the claim can only be conservative),
+  `OutboundRoundCaughtUp` and `OutboundRoundTime` (see below),
   `LastPullTime` (start of the latest fully applied pull), `InboundCaughtUp`
   (a pull was applied and no exchange failed after it started), `CaughtUp`,
   `LastSuccessTime`, `LastError`/`LastErrorTime`/`LastErrorOperation` (kept
   after recovery), `ConsecutiveFailures` and `NextAttemptTime` (backoff).
+- `OutboundCaughtUp` is an instantaneous "nothing left to push" fact. The
+  local position also grows with every applied peer entry (Lamport merge), and
+  the acknowledged position only moves on this node's push rounds, so under
+  sustained writes anywhere in the connected set it is structurally false on a
+  healthy cluster. `OutboundRoundCaughtUp` judges push rounds instead: each
+  round reads the local position before collecting its changes and is caught
+  up when the peer acknowledged every change up to that position. A round with
+  nothing past the acknowledged position counts too (the peer holds everything
+  this store can push, even when a resync purge left the local position on a
+  floor no entry carries). It holds when `OutboundCaughtUp` holds, or when the
+  latest push round was caught up and no exchange with the peer failed after
+  that round started; a round skipped by backoff is not a round.
+  `OutboundRoundTime` is the start of the latest caught-up round, kept after
+  later failures: its age shows how fresh the claim is and, while the flag is
+  false, since when the peer has been behind. Neither field gates tombstone GC
+  (that still uses the acknowledged position only), and `CaughtUp` remains
+  `OutboundCaughtUp && InboundCaughtUp`.
 - A round that skips a peer in backoff is not a pull. A snapshot resync clears
   backoff but does not move `LastPullTime`; the next pull does.
 - These are local facts of this process: times are not persisted, so a fresh

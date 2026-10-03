@@ -88,10 +88,22 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 
 `GossipEngine.ReplicationStatus(ctx)` 返回只读快照：本地 `LocalStatus` + 每个当前 `PeerProvider` 对端的交换结果：
 确认位置（`PeerProgressStore` 或引擎内存游标）、出向是否追平（确认位置 ≥ 本地位置，本地位置先读，结论只会更保守）、
+按推送轮次的出向追平（`OutboundRoundCaughtUp`）及最近一次追平轮次的开始时间（`OutboundRoundTime`）、
 最近一次完整应用的拉取的开始时间、入向是否追平（有成功拉取且其后没有失败交换）、最近成功时间、最近错误/时间/操作、
 连续失败次数、退避截止时间。语义与票06 Mesh `GetReplicationStatus` 一致，Let/Mesh 据此映射到 Range
 `ReplicationProgress`，不再各自包一层 recording syncer 复制实现。
 
+- 出向两个口径（票 10-D1）：`OutboundCaughtUp` 是“此刻零积压”的瞬时事实。本地位置是 Lamport 式时钟，
+  随连通域内所有节点的写入（应用对端条目时 max+1 合并）增长，而确认位置只在本节点推送轮次推进，
+  所以持续写入下健康集群里它结构性为 false（10-C 中 `outpostlet.metadata` 稳态 lagging 的根因）。
+  `OutboundRoundCaughtUp` 按推送轮次判定：每轮在收集变更前读本地位置，对端确认覆盖该位置即为追平；
+  没有可推送变更的轮次（`SyncOnce` 跳过推送）也算追平，不会因无推送而永远落后；之后与该对端的交换
+  失败即清除，退避跳过的轮次不算轮次。它在 `OutboundCaughtUp` 为 true 时必为 true。`OutboundRoundTime`
+  是最近一次追平轮次的开始时间，失败后保留，可据此判断结论新鲜度与“落后起始时间”。两者都不参与墓碑 GC
+  确认门（仍只看确认位置），`CaughtUp` 定义不变。
+- Net 自身观测生产者（111/15 `net_peers`）不投影 `ReplicationStatus`，映射由 Let/Mesh 宿主完成。Range 契约
+  （563b72a `ReplicationProgress`）目前只有 `outbound_caught_up`，没有新口径字段；新字段的契约与投影待 10-D2（Range）
+  与 10-D3（生产者映射），在那之前不要把新口径塞进 `outbound_caught_up`（会改变现有契约语义）。
 - 并发安全：只在引擎锁内复制每 peer 状态，不持锁调用 Store。
 - 不泄露凭据：`pkg/state` 的全部日志与导出 API 返回的错误只以“密码已遮蔽”的 peer 地址出现；任何 `Syncer` 的每 peer 错误在返回、记日志、进状态前去掉地址里的密码；`HTTPSyncer` 把 bearer token 与对端回显的 URL 密码替换为 `[REDACTED]`。脱敏收敛在 `pkg/state/redact.go`。
 - `pkg/state` 不依赖 OutpostRange；映射到 proto 由宿主完成。
@@ -140,6 +152,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 | 测试 | 证明 |
 | --- | --- |
 | `pkg/state` `TestReplicationStatus*` | 每 peer 交换结果、退避跳过不算拉取、冷启动后确认位置保留且无拉取、凭据不泄露、并发安全（`-race`） |
+| `pkg/state` `TestOutboundRoundCaughtUp*` | 持续写入的健康双/三副本：`OutboundRoundCaughtUp` 稳态为 true 而 `OutboundCaughtUp` 为 false；分区时对断开 peer 为 false（`OutboundRoundTime` 停在分区前）、对连通 peer 为 true，恢复后全部为 true；无写入时两者都为 true；resync 清除产生无条目的 floor 位置后，跳过推送的轮次仍算追平 |
 | `pkg/state` `TestGossipLogsAndErrorsNeverCarryPeerURLPassword`、`TestHTTPErrorBodyEchoingPeerURLPasswordIsRedacted`、`TestPeerAddressRedactionHelpers` | 带 `user:password@` 的 peer 经 GC horizon 拒收、resync（成功与失败）、退避、普通交换失败、HTTP 错误体回显密码各路径，捕获的 slog 输出与 `SyncOnce`/`AntiEntropyOnce`/`HTTPSyncer` 返回错误都不含密码 |
 | `pkg/tunnel` `TestManagedClientStatusReportsLatestFailure` | 隧道最近失败可读、不含 token |
 | `internal/servicehost` `TestObservationReportsNetAndServiceFactsThroughRangeContract` | 两个真实 Host（真实 QUIC、token、真实 TCP 应用）：订阅快照含已连通的 Net 链路与未测量的入口；REACHABLE、实例替换后 backend 地址切换、后端失效 UNREACHABLE、对端移出目录 DISCONNECTED + NO_BACKEND；全部事件经严格契约解析，晚到订阅者快照 seq 等于最后事件 |
