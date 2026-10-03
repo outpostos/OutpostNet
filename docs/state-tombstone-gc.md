@@ -35,9 +35,12 @@ A tombstone `t` is collected only when all of the following hold:
 2. **Peer acknowledgement** (replicated stores only, via
    `GossipEngine.CollectTombstones`): `t.Position <= min(push progress of every
    peer currently returned by the PeerProvider)`. Push progress only advances
-   after the peer acknowledged the push (durably for `DurableStore`), and a
-   non-transient acknowledgement means the peer now holds `t` or something
-   newer for that key.
+   after the peer answered the push (durably for `DurableStore`). This gate is
+   an efficiency guard, not a proof that the peer holds `t`: every entry that is
+   not rejected as *transient* advances the cursor, including non-transient
+   rejections (for example a `ValidateApply` failure or `beyond_gc_horizon`).
+   Safety does not depend on it; it comes from retention plus the GC horizon
+   below.
 3. **Local-only stores** (no engine): `Store.CollectTombstones` uses the
    retention condition alone.
 
@@ -55,34 +58,50 @@ exact identities removed) is committed before the entries leave memory.
 
 ### Why tombstone removal cannot resurrect a key
 
-* **Horizon rejection (hard guarantee at the collecting node).** `Apply` of an
-  incoming entry whose key is *absent* locally and whose HLC is `<= horizon` is
-  refused: values with `BeyondGCHorizonError`, tombstones as a no-op (absent
-  already means deleted). Any older value of a collected key has an HLC lower
-  than the collected tombstone, hence `<= horizon`, so it can never be
-  re-applied. Keys that are present are ordered by normal LWW; a present entry
-  is always newer than any tombstone that was collected for that key.
-* **Horizon handshake (lagging peers are forced to resync).** Push and digest
+* **Horizon rejection (hard guarantee at the collecting node).** Every merge
+  of a remote entry (push, digest pull and snapshot resync alike) whose key is
+  *absent* locally and whose HLC is `<= horizon` is refused: values with
+  `BeyondGCHorizonError`, tombstones as a no-op (absent already means deleted).
+  Any older value of a collected key has an HLC lower than the collected
+  tombstone, hence `<= horizon`, so it can never be re-applied at a node that
+  collected it or adopted a horizon covering it. Keys that are present are
+  ordered by normal LWW; a present entry is always newer than any tombstone that
+  was collected for that key. There is no bypass for resync: a peer's horizon
+  is a single maximum timestamp and says nothing about which deletes that peer
+  saw, so a peer with a higher horizon can still hold a value this node deleted
+  and collected.
+* **Horizon handshake (stale peers are forced to resync).** Push and digest
   pull requests carry the requester's horizon (`gc_horizon`, omitted when zero).
-  A responder whose horizon is higher refuses the incremental exchange with
-  `ResyncRequiredError` (HTTP `410 Gone` + `gc_horizon`). The requester then
-  performs a snapshot resync from that peer instead of exchanging increments.
-  A pushed entry that the receiver refuses individually (`beyond_gc_horizon`
-  rejection, receiver horizon in `PushResponse.gc_horizon`) also triggers a
-  resync.
-* **Snapshot resync.** The lagging node pages through the peer's full state
-  (`PullRequest{SincePosition, Limit}` without digest, never refused), applies it
-  with normal LWW, and then atomically (one `purge` record) removes every local
-  entry whose HLC is `<= peer horizon` and whose key the peer does not have, and
-  adopts the peer horizon. Those entries are exactly the ones the peer would
-  refuse: either values of keys deleted and collected cluster-side, or writes
-  that failed to reach the peer within the retention window. Both are dropped
-  explicitly (logged per key), never silently merged back. Snapshot pages hold
-  256 entries and are cursored by the peer's `next_since_position`. When the
-  purge removes entries, it allocates a fresh local position that becomes the
-  GC floor, and observers receive a tombstone-shaped notice (`Deleted: true`,
-  the removed entry's version and ChangeID, the new position) for each purged
-  key, so consumers that held the value re-read or re-snapshot.
+  A responder refuses the incremental exchange with `ResyncRequiredError`
+  (HTTP `410 Gone` + `gc_horizon`) when its horizon is higher, or when a digest
+  pull's digest holds a live value for a key the responder no longer has at or
+  below its horizon (the requester still holds something deleted and collected
+  here, even if the horizons are equal and its push cursor already passed that
+  value). The requester then performs a snapshot resync from that peer instead
+  of exchanging increments. A pushed entry that the receiver refuses
+  individually (`beyond_gc_horizon` rejection, receiver horizon in
+  `PushResponse.gc_horizon`) also triggers a resync of the pusher.
+* **Snapshot resync.** The resyncing node pages through the peer's full state
+  (`PullRequest{SincePosition, Limit, MaxBytes}` without digest, never refused)
+  and applies each page as it arrives through normal `Apply` (LWW plus the local
+  horizon rejection above; only the set of snapshot keys is kept across pages).
+  Then it atomically (one `purge` record) removes every local entry whose HLC is
+  `<= peer horizon` and whose key the peer does not have, and adopts the peer
+  horizon, raising its HLC to at least that horizon (the same as replaying the
+  purge record after a restart). Those entries are exactly the ones the peer
+  would refuse: either values of keys deleted and collected cluster-side, or
+  writes that failed to reach the peer within the retention window. Both are
+  dropped explicitly (logged per key), never silently merged back. A failed page
+  aborts the resync before the purge; the pages already applied are ordinary
+  merges. Snapshot pages hold at most 256 entries and at most `max_bytes` of
+  encoded response (`HTTPSyncer` sends its `MaxResponseBytes`); a single entry
+  that cannot fit fails the resync with `PullEntryTooLargeError` naming the key,
+  its size and the limit. Pages are cursored by the peer's
+  `next_since_position`. When the purge removes entries, it allocates a fresh
+  local position that becomes the GC floor, and observers receive a
+  tombstone-shaped notice (`Deleted: true`, the removed entry's version and
+  ChangeID, the new position) for each purged key, so consumers that held the
+  value re-read or re-snapshot.
 * **Consumers.** `CheckConsumerPosition(p)` returns `NeedsSnapshot` when
   `0 < p < floor`, because the position may precede a removed tombstone.
 
@@ -91,7 +110,7 @@ exact identities removed) is committed before the entries leave memory.
 | Option | Safety | Bounded growth | Cost |
 |---|---|---|---|
 | Ack gate only | Only against peers in the current PeerProvider list; unknown, removed or restored-from-backup nodes can still resurrect | No: one dead peer blocks GC forever | none |
-| Retention + horizon + forced resync | Against every peer, including unknown ones, at every node that has the horizon | Yes | a peer lagging longer than retention loses its own unreplicated writes older than the horizon, explicitly |
+| Retention + horizon + forced resync | At every node whose horizon covers the deleted value: refused from every peer, listed or not, on push, pull and resync. A node still holding the value is forced to resync once it pushes it or offers it in a digest to such a node | Yes | a peer lagging longer than retention loses its own unreplicated writes older than the horizon, explicitly |
 
 Chosen: **both, with retention + horizon as the safety mechanism and the ack
 gate as an efficiency guard.** The horizon is what makes resurrection impossible
@@ -100,11 +119,30 @@ into full resyncs. A peer that is permanently gone blocks GC until it is removed
 from the PeerProvider (an explicit membership decision); when it returns, the
 handshake forces it to resync.
 
-Residual risk (documented, not hidden): a node whose horizon is still lower than
-the cluster's (for example a brand new node that has only talked to another
-lagging node) may serve stale values locally until it exchanges with any peer
-that has a higher horizon. It cannot reintroduce them into any node whose horizon
-covers them, and the first such exchange forces its resync.
+Residual risks (documented, not hidden):
+
+* A node whose horizon does not cover a deleted value and that does not hold the
+  value's tombstone (for example a brand new node that has only resynced from a
+  stale holder) may serve and pass on that stale value among nodes whose horizon
+  does not cover it either, until it exchanges with a node whose horizon does.
+  It cannot reintroduce the value into any node whose horizon covers it, and its
+  first such exchange (a refused push, or a digest pull answered with 410) forces
+  its resync.
+* A stale holder is only cleaned up when it initiates an exchange with a
+  covering node. A node that never pushes or pulls keeps serving the stale value
+  locally.
+* The node that resyncs is the one whose horizon is lower or whose push was
+  refused, not necessarily the one that is behind. Its purge drops every local
+  entry at or below the peer horizon that the peer lacks, including its own
+  writes that did not reach that peer within the retention window. This only
+  happens when a partition outlasted `TombstoneRetention`, which the
+  configuration rule below excludes.
+* Resync reads the peer's snapshot in pages without a consistent cut. If the
+  peer collects or purges a key while the requester is paging, the requester can
+  keep its older value of that key after this resync (the key was not on any
+  page, and that value's HLC is above the horizon read with the first page). It
+  is removed at the next refused exchange with that peer (the next `410` or
+  `beyond_gc_horizon`), not immediately.
 
 ## Compaction (`DurableStore`)
 
@@ -157,9 +195,15 @@ anti-entropy tick when they are enabled. Stores without an engine call
 ## Impact on consumers and wire
 
 * Default behavior is unchanged: with both settings zero no entry is removed,
-  no new record type is written, and no new wire field is sent.
+  no new record type is written, and the GC fields (`gc_horizon`) are never sent
+  because the horizon stays zero. One wire difference is independent of GC: a
+  position pull with `Limit > 0` whose page comes back full now carries
+  `more: true` and `next_since_position`. Both are optional fields that older
+  receivers ignore.
 * Wire additions are optional JSON fields (`gc_horizon` in push/pull requests and
-  in push responses; `gc_horizon` in the 410 error body) and a new rejection
+  in push and pull responses; `gc_horizon` in the 410 error body; `max_bytes` in
+  pull requests, sent only by `HTTPSyncer.PullSnapshot` for paged position
+  pulls; `more` / `next_since_position` in pull responses) and a new rejection
   reason `beyond_gc_horizon`. Peers that do not send `gc_horizon` are treated as
   horizon zero: once a node has a non-zero horizon it refuses their incremental
   exchange with 410. Enabling GC therefore requires every peer of the keyspace to
