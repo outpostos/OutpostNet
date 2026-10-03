@@ -655,12 +655,15 @@ func TestReloadWarnsOnPeersChange(t *testing.T) {
 
 	writeServiceFile(t, path, sock, "127.0.0.1:0", "127.0.0.1:2",
 		"peers:\n  - node_id: node-c\n    addr: 127.0.0.1:7443\n")
-	waitFor(t, 5*time.Second, "export change applied", func() bool {
-		return strings.Contains(logs.String(), "exports applied")
+	defer func() {
+		if t.Failed() {
+			t.Logf("log:\n%s", logs.String())
+		}
+	}()
+	waitFor(t, 5*time.Second, "export change applied and peers change reported", func() bool {
+		l := logs.String()
+		return strings.Contains(l, "exports applied") && strings.Contains(l, restartWarning)
 	})
-	if !strings.Contains(logs.String(), restartWarning) {
-		t.Fatalf("peers change was not reported as needing a restart; log:\n%s", logs.String())
-	}
 }
 
 // TestReloadIgnoresCommandLineOverrides: the command overrides node_id and
@@ -687,7 +690,14 @@ func TestReloadIgnoresCommandLineOverrides(t *testing.T) {
 
 	writeServiceFile(t, path, sock, "127.0.0.1:1", "127.0.0.1:2", "")
 	waitFor(t, 5*time.Second, "export change applied", func() bool {
-		return strings.Contains(logs.String(), "exports applied")
+		return strings.Count(logs.String(), "exports applied") == 1
+	})
+	// A second export-only edit: once it is applied, the watcher goroutine
+	// has finished the first reload, including any restart-scope warning.
+	time.Sleep(50 * time.Millisecond) // distinct mtime/size for the poller
+	writeServiceFile(t, path, sock, "127.0.0.1:1", "127.0.0.1:33", "")
+	waitFor(t, 5*time.Second, "second export change applied", func() bool {
+		return strings.Count(logs.String(), "exports applied") == 2
 	})
 	if strings.Contains(logs.String(), restartWarning) {
 		t.Fatalf("export-only change reported as restart scope; log:\n%s", logs.String())
