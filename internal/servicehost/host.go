@@ -97,21 +97,32 @@ func (h *Host) Run(ctx context.Context) error {
 	defer stopHealth()
 
 	// Service: stable entries, resolved through the Net host per connection.
-	// They run under their own context so teardown can stop and wait for
-	// them before the tunnels go away.
+	// Bind every entry before serving any, so a taken address fails startup
+	// with the real bind error.
+	var entries []*service.Entry
+	defer func() {
+		for _, e := range entries {
+			e.Close() // no-op once Run has taken the listener over
+		}
+	}()
+	for i, tgt := range h.cfg.EntryTargets() {
+		e := service.NewEntry(service.EntryConfig{
+			Target:     tgt,
+			ListenAddr: h.cfg.Imports[i].ListenAddr,
+		}, service.NetOpener(tm), h.logger)
+		if err := e.Listen(); err != nil {
+			return fmt.Errorf("service entry %s: listen %s: %w", tgt, h.cfg.Imports[i].ListenAddr, err)
+		}
+		entries = append(entries, e)
+	}
+	// Entries run under their own context so teardown can stop and wait for
+	// them before health, management and the tunnels go away.
 	entryCtx, cancelEntries := context.WithCancel(ctx)
 	var entryWG sync.WaitGroup
 	defer func() {
 		cancelEntries()
 		entryWG.Wait()
 	}()
-	var entries []*service.Entry
-	for i, tgt := range h.cfg.EntryTargets() {
-		entries = append(entries, service.NewEntry(service.EntryConfig{
-			Target:     tgt,
-			ListenAddr: h.cfg.Imports[i].ListenAddr,
-		}, service.NetOpener(tm), h.logger))
-	}
 	for _, e := range entries {
 		entryWG.Add(1)
 		go func(e *service.Entry) {
@@ -124,13 +135,6 @@ func (h *Host) Run(ctx context.Context) error {
 	h.tunnels = tm
 	h.exports = exports
 	h.entries = entries
-	h.mu.Unlock()
-
-	if err := h.waitEntriesListening(ctx, entries); err != nil {
-		return err
-	}
-
-	h.mu.Lock()
 	h.ready = true
 	h.mu.Unlock()
 	h.logger.Info("service host ready", "exports", len(exports), "entries", len(entries), "peers", len(h.cfg.Peers))
@@ -141,22 +145,6 @@ func (h *Host) Run(ctx context.Context) error {
 	h.ready = false
 	h.mu.Unlock()
 	h.logger.Info("service host shutting down")
-	return nil
-}
-
-func (h *Host) waitEntriesListening(ctx context.Context, entries []*service.Entry) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for _, e := range entries {
-		for e.Addr() == nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("service entries did not start listening within 5s")
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
 	return nil
 }
 

@@ -577,3 +577,38 @@ func TestRunReleasesEntriesOnStartupError(t *testing.T) {
 	}
 	assertEntriesReleased(t, entry)
 }
+
+// TestRunReportsEntryBindError: an entry whose listen address is taken
+// fails startup with the real bind error, promptly, and nothing started
+// for the other entries is left behind.
+func TestRunReportsEntryBindError(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	app := startApp(t, "v1")
+	nodeB := startHost(t, exportingNode(t, "node-b", app, token))
+	okEntry := freeAddr(t)
+	cfg := consumingNode(t, "node-a", okEntry, tunnelAddr(t, nodeB), token)
+	cfg.Imports = append(cfg.Imports, agentconfig.ImportConfig{
+		Service: "echo@node-b", Name: "echo", RemoteRegion: "node-b", ListenAddr: busy.Addr().String(), Protocol: "tcp",
+	})
+
+	start := time.Now()
+	errc := make(chan error, 1)
+	go func() { errc <- servicehost.New(cfg, nil).Run(context.Background()) }()
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "address already in use") || !strings.Contains(err.Error(), busy.Addr().String()) {
+			t.Fatalf("Run error = %v, want the bind error for %s", err, busy.Addr())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after an entry failed to bind")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("bind error reported after %v; want it immediately", d)
+	}
+	assertEntriesReleased(t, okEntry)
+}

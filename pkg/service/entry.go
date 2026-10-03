@@ -39,8 +39,9 @@ type Entry struct {
 	opener StreamOpener
 	logger *slog.Logger
 
-	mu   sync.Mutex
-	addr net.Addr
+	mu    sync.Mutex
+	addr  net.Addr
+	bound net.Listener // from Listen, consumed by the next Serve
 }
 
 // NewEntry creates an entry.
@@ -66,6 +67,46 @@ func (e *Entry) Addr() net.Addr {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.addr
+}
+
+// Listen binds the entry's listen address now, so a host can fail startup
+// with the real bind error instead of discovering it later from Run's retry
+// loop. The next Serve (or Run) uses this listener. Calling it is optional.
+func (e *Entry) Listen() error {
+	ln, err := net.Listen("tcp", e.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	if e.bound != nil {
+		e.bound.Close()
+	}
+	e.bound = ln
+	e.addr = ln.Addr()
+	e.mu.Unlock()
+	return nil
+}
+
+// Close releases a listener bound by Listen that no Serve has taken over.
+func (e *Entry) Close() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.bound != nil {
+		e.bound.Close()
+		e.bound = nil
+		e.addr = nil
+	}
+}
+
+func (e *Entry) listener() (net.Listener, error) {
+	e.mu.Lock()
+	ln := e.bound
+	e.bound = nil
+	e.mu.Unlock()
+	if ln != nil {
+		return ln, nil
+	}
+	return net.Listen("tcp", e.cfg.ListenAddr)
 }
 
 func (e *Entry) setAddr(a net.Addr) {
@@ -97,7 +138,7 @@ func (e *Entry) Run(ctx context.Context) {
 // cancelled they get ShutdownGrace to finish and are then closed, so Serve
 // (and Run) always return after cancellation.
 func (e *Entry) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", e.cfg.ListenAddr)
+	ln, err := e.listener()
 	if err != nil {
 		return err
 	}

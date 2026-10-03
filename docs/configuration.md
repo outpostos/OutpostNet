@@ -165,10 +165,10 @@ The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports
 | Item | outpostnet-service |
 |------|--------------------|
 | `node_id` | Required |
-| `imports[]` | Stable entries. `service: <name>@<node_id>` = dynamic path (peer directory); `name` + `remote_region` = static path (configured client tunnel) |
+| `imports[]` | Stable entries. `service: <name>@<node_id>` = dynamic path (peer directory); `name` + `remote_region` = static path (configured client tunnel — a `tunnels` entry with `role: client` and the same `remote_region` is required, otherwise startup fails). `listen_addr` must be unique across entries (port `0` excepted); an address already in use fails startup with the bind error |
 | `protocol` | `tcp` only for imports and exports; `udp` is rejected (UDP over the QUIC tunnel is not implemented) |
 | `relays` | Rejected (relay forwarding stays on `outpostnet-agent`) |
-| `peers[]` | `{node_id, addr}` seed for the peer directory at startup; later changes via `PUT /v1/peers` |
+| `peers[]` | `{node_id, addr}` seed for the peer directory at startup; later changes via `PUT /v1/peers`. `node_id` must be unique and differ from this node's `node_id`; `addr` must be `host:port` (port 1-65535) |
 | `management.socket_path` | Default `/run/outpostnet/service.sock` |
 | `health_addr` | Default `:8083` (`/healthz`, `/readyz`) |
 | `persistence`, `metrics` | Accepted for schema compatibility, not used |

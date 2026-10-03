@@ -110,3 +110,106 @@ entriez: []
 		}
 	}
 }
+
+// TestParseConfigRejectsInconsistentEntriesAndPeers covers the Service rules
+// beyond the shared agentconfig schema; each case must fail for its own
+// reason (checked by error substring).
+func TestParseConfigRejectsInconsistentEntriesAndPeers(t *testing.T) {
+	cases := []struct {
+		name, yaml, want string
+	}{
+		{"duplicate entry listen_addr", `
+node_id: a
+imports:
+  - service: echo@b
+    listen_addr: 127.0.0.1:18080
+    protocol: tcp
+  - service: db@b
+    listen_addr: 127.0.0.1:18080
+    protocol: tcp
+`, "listen_addr"},
+		{"duplicate peer node_id", `
+node_id: a
+peers:
+  - node_id: b
+    addr: 10.0.0.2:7443
+  - node_id: b
+    addr: 10.0.0.3:7443
+`, "duplicate"},
+		{"peer addr without port", `
+node_id: a
+peers:
+  - node_id: b
+    addr: 10.0.0.2
+`, "host:port"},
+		{"peer addr without host", `
+node_id: a
+peers:
+  - node_id: b
+    addr: ":7443"
+`, "host:port"},
+		{"peer addr bad port", `
+node_id: a
+peers:
+  - node_id: b
+    addr: 10.0.0.2:http
+`, "host:port"},
+		{"peer is self", `
+node_id: a
+peers:
+  - node_id: a
+    addr: 10.0.0.1:7443
+`, "own node_id"},
+		{"static entry without client tunnel", `
+node_id: a
+imports:
+  - name: legacy
+    remote_region: cloud
+    listen_addr: 127.0.0.1:18081
+    protocol: tcp
+tunnels:
+  - role: client
+    remote_region: edge
+    remote_addr: 10.0.0.1:4242
+`, "no client tunnel"},
+		{"static entry with only a server tunnel", `
+node_id: a
+imports:
+  - name: legacy
+    remote_region: cloud
+    listen_addr: 127.0.0.1:18081
+    protocol: tcp
+tunnels:
+  - role: server
+    remote_region: cloud
+    listen_addr: 127.0.0.1:4242
+`, "no client tunnel"},
+	}
+	for _, c := range cases {
+		_, err := service.ParseConfig([]byte(c.yaml))
+		if err == nil {
+			t.Errorf("%s: expected error", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error %q should mention %q", c.name, err, c.want)
+		}
+	}
+}
+
+// TestParseConfigAcceptsEphemeralEntryPorts: port 0 entries never collide.
+func TestParseConfigAcceptsEphemeralEntryPorts(t *testing.T) {
+	_, err := service.ParseConfig([]byte(`
+node_id: a
+imports:
+  - service: echo@b
+    listen_addr: 127.0.0.1:0
+    protocol: tcp
+  - service: db@b
+    listen_addr: 127.0.0.1:0
+    protocol: tcp
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+}

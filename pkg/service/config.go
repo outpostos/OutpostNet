@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -97,18 +99,61 @@ func ValidateConfig(cfg *Config) error {
 			return fmt.Errorf("exports[%d].protocol %q: only tcp is supported across nodes (udp over the QUIC tunnel is not implemented)", i, e.Protocol)
 		}
 	}
+	clientRegions := make(map[string]bool)
+	for _, t := range cfg.Tunnels {
+		if strings.EqualFold(t.Role, "client") {
+			clientRegions[t.RemoteRegion] = true
+		}
+	}
+	listenAt := make(map[string]int)
 	for i, imp := range cfg.Imports {
 		if !strings.EqualFold(imp.Protocol, "tcp") {
 			return fmt.Errorf("imports[%d].protocol %q: only tcp is supported across nodes (udp over the QUIC tunnel is not implemented)", i, imp.Protocol)
 		}
-		if err := entryTarget(imp).Validate(); err != nil {
+		tgt := entryTarget(imp)
+		if err := tgt.Validate(); err != nil {
 			return fmt.Errorf("imports[%d]: %w", i, err)
 		}
+		// Static entries are bound to a configured client tunnel; without
+		// one every connection would fail at runtime.
+		if !tgt.Dynamic() && !clientRegions[tgt.Region] {
+			return fmt.Errorf("imports[%d] %q: remote_region %q has no client tunnel (add a tunnels entry with role: client and that remote_region, or use service: <name>@<node_id>)", i, imp.Name, tgt.Region)
+		}
+		// Port 0 asks the OS for a free port, so those never collide.
+		if _, port, err := net.SplitHostPort(imp.ListenAddr); err == nil && port != "0" {
+			if j, dup := listenAt[imp.ListenAddr]; dup {
+				return fmt.Errorf("imports[%d].listen_addr %q is already used by imports[%d]", i, imp.ListenAddr, j)
+			}
+			listenAt[imp.ListenAddr] = i
+		}
 	}
+	peerAt := make(map[string]int)
 	for i, p := range cfg.Peers {
 		if p.NodeID == "" || p.Addr == "" {
 			return fmt.Errorf("peers[%d]: node_id and addr are required", i)
 		}
+		if p.NodeID == cfg.NodeID {
+			return fmt.Errorf("peers[%d]: node_id %q is this node's own node_id", i, p.NodeID)
+		}
+		if j, dup := peerAt[p.NodeID]; dup {
+			return fmt.Errorf("peers[%d]: duplicate node_id %q (also peers[%d])", i, p.NodeID, j)
+		}
+		peerAt[p.NodeID] = i
+		if err := validatePeerAddr(p.Addr); err != nil {
+			return fmt.Errorf("peers[%d] %q: %w", i, p.NodeID, err)
+		}
+	}
+	return nil
+}
+
+// validatePeerAddr requires a dialable host:port tunnel address.
+func validatePeerAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return fmt.Errorf("addr %q must be host:port", addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("addr %q must be host:port with a port in 1-65535", addr)
 	}
 	return nil
 }
