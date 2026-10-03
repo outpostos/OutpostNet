@@ -151,3 +151,21 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
   若订阅者落后超过保留窗口（4096 条）会一直拿到 410。属于 Range 侧行为，记录不改。
 - “后端不回数据就关连接”会被判为 `UNREACHABLE`（第 3 节）。
 - 只在单机多进程/同进程多 Host 上验证，未在多台机器上验证。
+
+## 10. 验证记录（322b90c，2026-10-03，单机）
+
+- `go build ./...`、`go vet ./...`、`go test -count=1 ./...` 全部通过；`go test -race -count=1` 覆盖
+  `pkg/state`、`pkg/tunnel`、`pkg/service`、`internal/observation/...`、`internal/agent`、`internal/servicehost` 通过；
+  观测相关测试 `-race -count=5` 通过。
+- `internal/observation` 单元测试在实现之后补写，用 4 个突变（入口自关不标记、去掉变化检测、追加时等待订阅者、
+  移除对端不报断开）各自使对应测试失败，证明测试有效。
+- 真实进程冒烟：两个 `outpostnet-service` 二进制（node-a 消费 `echo@node-b`、node-b 导出）、Range 563b72a 的
+  `outpostrange serve` collector 与 `range-agent`（`ObservationEndpoints` 指向 node-a 的 `127.0.0.1:<port>`，`Component: 5`）。
+  collector `/view` 的 `four_layers`：`net peer:node-b peer_link` 由快照得 `connected`；应用经入口连通后
+  `service:echo@node-b access` 为 `reachable`、backend 轨道 `node-b`；停掉 node-b 的后端应用后再连一次为
+  `unreachable`（`provider closed the stream before any backend data`）；停掉 node-b 进程后 Net 链路为
+  `connecting`（`connection lost: ... server closing`，随后 `quic dial ...: timeout`）；coverage `net`、`service` 为 `reported`。
+  另以占用的观测端口启动 node-b 二进制：`/readyz` 200，日志一条
+  `observation endpoint unavailable; continuing without observation API ... address already in use`。
+- 干净检出：`git clone` 本分支到临时目录，使用全新 `GOMODCACHE`（经 SSH 拉取私有 OutpostRange），
+  `go build ./...` 与核心包测试通过，go.mod 无 `replace`。
