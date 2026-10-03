@@ -200,7 +200,8 @@ or 96 (`DurableStore`) rounds.
 
 **Residual (unchanged class).** Vouching relies on push progress, which is keyed
 by peer address: if a different node takes over an address, the node ID learned
-from its first push response replaces the old one and it inherits that
+from its first push response replaces the old one (or clears it, if the response
+carries no `node_id`) and it inherits that
 address's progress, exactly as the push cursor already does. A requester whose
 directory was wiped has horizon zero and is not vouched (see the rule). A
 requester restored from an older backup that already had a non-zero horizon
@@ -215,7 +216,12 @@ push. Both are lineage problems tracked by 03a.
 optional `node_id`. A 03b responder ignores vouching and keeps refusing lower
 horizons, which a 03d requester handles by resyncing as before. A 03d responder
 never vouches a 03b requester (no `node_id` in its push responses), so it applies
-the 03b rule to it. A mixed cluster is therefore as safe as 03b and only pairs
+the 03b rule to it. That includes a node downgraded from 03d to 03b at the same
+address: the first push response without `node_id` clears the address's node
+mapping in memory and in the durable `peer_progress` record (a record without
+`peer_node_id` clears it on replay too), so the old node ID is not vouched again,
+also after a restart or compaction
+(`TestPushResponseWithoutNodeIDClearsTheAddressMapping`). A mixed cluster is therefore as safe as 03b and only pairs
 with a 03b node keep the resync churn.
 
 ### Trade-off: peer acknowledgement vs. retention

@@ -491,9 +491,10 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	if pushed > state.lastPushPosition {
 		state.lastPushPosition = pushed
 	}
-	if nodeID != "" {
-		state.nodeID = nodeID
-	}
+	// The node that answered this push replaces any earlier one; a response
+	// without node_id (a 03b node, or another node that took over the address)
+	// clears the mapping, so that address no longer vouches for anyone.
+	state.nodeID = nodeID
 	state.failures = 0
 	state.nextAttempt = time.Time{}
 	state.lastSuccess = time.Now()

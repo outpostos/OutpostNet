@@ -171,3 +171,59 @@ func TestWipedRequesterWithSameIdentityIsRefusedOnFirstExchange(t *testing.T) {
 		t.Fatalf("wiped node did not adopt node-0's horizon: %+v vs %+v", wiped.store.GCHorizon(), lead.store.GCHorizon())
 	}
 }
+
+// A push response without node_id means the node now answering at that address
+// does not identify itself (a node downgraded to 03b, or another node that took
+// over the address). The address's old node mapping is cleared, in memory and in
+// the durable record, so the requester is no longer vouched, also after a
+// restart of the responder.
+func TestPushResponseWithoutNodeIDClearsTheAddressMapping(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "memory", true: "durable"}[durable], func(t *testing.T) {
+			ctx := context.Background()
+			cluster := newChurnCluster(t, 2, durable)
+			stageLowerHorizon(t, cluster)
+			lead, follower := cluster.nodes[0], cluster.nodes[1]
+			horizon := follower.store.GCHorizon()
+			if err := pushProbe(lead.engine, follower.id, horizon); err != nil {
+				t.Fatalf("setup: node-0 does not vouch for node-1: %v", err)
+			}
+
+			// node-1 now answers without node_id.
+			cluster.stripNodeID[lead.id] = true
+			if _, err := lead.store.Put(ctx, "node-0/after-downgrade", []byte("x")); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			clearPeerBackoffForTest(lead.engine, follower.id)
+			if err := lead.engine.SyncOnce(ctx); err != nil {
+				t.Fatalf("node-0 push: %v", err)
+			}
+			var resync *ResyncRequiredError
+			if err := pushProbe(lead.engine, follower.id, horizon); !errors.As(err, &resync) {
+				t.Fatalf("node-0 still vouches for node-1 after its address answered without node_id: err=%v", err)
+			}
+			if !durable {
+				return
+			}
+			store := lead.store.(*DurableStore)
+			dir := store.dir
+			if err := store.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			cluster.nodes[0] = cluster.openNode(t, lead.id, []string{"node-0", "node-1"}, dir)
+			if err := pushProbe(cluster.nodes[0].engine, follower.id, horizon); !errors.As(err, &resync) {
+				t.Fatalf("restarted node-0 vouches for node-1 again from its durable record: err=%v", err)
+			}
+			if _, err := cluster.nodes[0].store.(*DurableStore).Compact(ctx); err != nil {
+				t.Fatalf("Compact: %v", err)
+			}
+			if err := cluster.nodes[0].store.(*DurableStore).Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			cluster.nodes[0] = cluster.openNode(t, lead.id, []string{"node-0", "node-1"}, dir)
+			if err := pushProbe(cluster.nodes[0].engine, follower.id, horizon); !errors.As(err, &resync) {
+				t.Fatalf("node-0 vouches for node-1 again after compaction and restart: err=%v", err)
+			}
+		})
+	}
+}

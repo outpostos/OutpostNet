@@ -16,12 +16,12 @@ import (
 type countingSyncer struct {
 	loopSyncer
 	snapshots *atomic.Int64
-	strip     bool
+	strip     func() bool
 }
 
 func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
 	resp, err := s.loopSyncer.Push(ctx, addr, req)
-	if resp != nil && s.strip {
+	if resp != nil && s.strip() {
 		resp.NodeID = ""
 	}
 	return resp, err
@@ -110,7 +110,7 @@ func (c *churnCluster) attachNode(t *testing.T, id string, peers []string, store
 	engine, err := NewGossipEngine(GossipConfig{
 		NodeID:       id,
 		Store:        store,
-		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, strip: c.stripNodeID[id]},
+		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, strip: func() bool { return c.stripNodeID[id] }},
 		PeerProvider: PeerProviderFunc(func() []string { return peerList.Load() }),
 	})
 	if err != nil {

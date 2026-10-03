@@ -304,6 +304,9 @@ func (s *DurableStore) PeerProgress(ctx context.Context, peer string) (uint64, e
 }
 
 // SavePeerProgress durably records a successfully acknowledged push position.
+// It does not know which node answered, so it clears the address's node
+// mapping: GossipEngine vouches for a requester only through pushes whose
+// response named the node.
 func (s *DurableStore) SavePeerProgress(ctx context.Context, peer string, position uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -493,9 +496,7 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		if record.Position > s.peerProgress[record.Peer] {
 			s.peerProgress[record.Peer] = record.Position
 		}
-		if record.PeerNodeID != "" {
-			s.peerNodes[record.Peer] = record.PeerNodeID
-		}
+		s.setPeerNodeLocked(record.Peer, record.PeerNodeID)
 		return nil
 	case durableRecordSnapshot:
 		s.clock.SetAtLeast(record.Counter)
@@ -555,10 +556,21 @@ func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64) 
 		if position > s.peerProgress[peer] {
 			s.peerProgress[peer] = position
 		}
-		if nodeID != "" {
-			s.peerNodes[peer] = nodeID
-		}
+		s.setPeerNodeLocked(peer, nodeID)
 	})
+}
+
+// setPeerNodeLocked records the node that answered the latest acknowledged push
+// at peer. An empty node ID (a 03b node, a record written by 03b, or a
+// SavePeerProgress call that does not know the answering node) clears the
+// mapping: that address then vouches for nobody until a push response names
+// its node again. Callers hold s.mu or run during replay.
+func (s *DurableStore) setPeerNodeLocked(peer, nodeID string) {
+	if nodeID == "" {
+		delete(s.peerNodes, peer)
+		return
+	}
+	s.peerNodes[peer] = nodeID
 }
 
 // savePeerAck durably records an acknowledged push position together with the
