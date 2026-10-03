@@ -204,12 +204,13 @@ func (s *storeCore) ChangesSince(ctx context.Context, since uint64, limit int) (
 // Apply merges a remote entry. It preserves the original ChangeID and assigns a
 // fresh local Position for downstream consumption.
 func (s *storeCore) Apply(ctx context.Context, incoming Entry) (bool, error) {
-	return s.apply(ctx, incoming, nil, false)
+	return s.apply(ctx, incoming, nil)
 }
 
-// apply merges a remote entry. bypassHorizon is only set for snapshot resync
-// entries, which come from a peer whose horizon covers them.
-func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entry) error, bypassHorizon bool) (bool, error) {
+// apply merges a remote entry. Every path, snapshot resync included, refuses an
+// absent key at or below the local GC horizon: a peer's horizon says nothing
+// about whether that peer saw the deletes this store collected.
+func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entry) error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -238,7 +239,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 		s.mu.Unlock()
 		return false, nil
 	}
-	if !found && !bypassHorizon && s.beyondHorizonLocked(incoming) {
+	if !found && s.beyondHorizonLocked(incoming) {
 		horizon := s.horizon
 		s.mu.Unlock()
 		if incoming.Deleted {

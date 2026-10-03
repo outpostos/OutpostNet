@@ -306,8 +306,8 @@ func (g *GossipEngine) HandlePull(ctx context.Context, req PullRequest) ([]Entry
 }
 
 // HandlePullResponse answers a pull with paging and GC horizon metadata. A
-// digest pull from a requester whose GC horizon is lower than ours is refused
-// with ResyncRequiredError. Position pulls (no digest) are always served: they
+// digest pull from a requester whose GC horizon is lower than ours, or whose
+// digest still holds a value we collected, is refused with ResyncRequiredError. Position pulls (no digest) are always served: they
 // are how a lagging requester pages through our snapshot during resync.
 func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) (*PullResponse, error) {
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
@@ -323,6 +323,9 @@ func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) 
 	}
 	if len(req.Digest) > 0 {
 		if err := g.checkRequesterHorizon(horizon, req.GCHorizon); err != nil {
+			return nil, err
+		}
+		if err := g.checkRequesterHoldsCollected(ctx, horizon, req.Digest); err != nil {
 			return nil, err
 		}
 		entries, err := g.diffAgainstDigest(ctx, req.Digest, req.Limit)
@@ -633,6 +636,7 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 	slog.Warn("state gossip: resynced from peer snapshot",
 		"peer", addr,
 		"applied", result.Applied,
+		"refused", result.Refused,
 		"purged", result.Purged,
 		"horizonWallMS", result.Horizon.WallMS,
 	)
@@ -657,6 +661,30 @@ func (g *GossipEngine) checkRequesterHorizon(local Timestamp, requester *Timesta
 		return nil
 	}
 	return &ResyncRequiredError{Peer: g.nodeID, Horizon: local}
+}
+
+// checkRequesterHoldsCollected refuses a digest pull whose digest holds a live
+// value for a key we no longer track at or below our horizon. That is the
+// digest-side counterpart of a beyond_gc_horizon push rejection: horizons can be
+// equal while the requester still holds a value deleted and collected here (its
+// push cursor already passed it), and only its resync from us removes it.
+func (g *GossipEngine) checkRequesterHoldsCollected(ctx context.Context, local Timestamp, digest map[string]DigestRecord) error {
+	if local.isZero() {
+		return nil
+	}
+	for key, record := range digest {
+		if record.Deleted || record.Version.HLC.Compare(local) > 0 {
+			continue
+		}
+		_, found, err := g.store.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return &ResyncRequiredError{Peer: g.nodeID, Horizon: local}
+		}
+	}
+	return nil
 }
 
 func hasBeyondHorizonRejection(resp *PushResponse) bool {

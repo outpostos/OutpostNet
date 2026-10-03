@@ -115,6 +115,8 @@ type gcStore interface {
 
 type resyncResult struct {
 	Applied int
+	// Refused counts snapshot values for keys this store already collected.
+	Refused int
 	Purged  int
 	Horizon Timestamp
 }
@@ -209,15 +211,26 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 
 // resyncFromSnapshot merges a peer's full state and then, in one atomic purge,
 // drops every local entry at or below the peer horizon that the peer does not
-// hold, and adopts that horizon. Snapshot entries are authoritative state from a
-// peer whose horizon covers them, so they bypass the local horizon check.
+// hold, and adopts that horizon.
+//
+// Snapshot entries go through the same local horizon check as any Apply: a
+// snapshot value for a key this store collected (absent, HLC <= local horizon)
+// is refused, because the peer's horizon is a single maximum timestamp and does
+// not prove the peer saw that delete. The peer still holding such a value is
+// cleaned up by its own resync from us (beyond_gc_horizon push rejection or a
+// digest pull answered with 410).
 func (s *storeCore) resyncFromSnapshot(ctx context.Context, snapshot []Entry, peerHorizon Timestamp) (resyncResult, error) {
 	var result resyncResult
 	keys := make(map[string]struct{}, len(snapshot))
 	for _, entry := range snapshot {
 		keys[entry.Key] = struct{}{}
-		applied, err := s.apply(ctx, entry, s.entryHook, true)
+		applied, err := s.apply(ctx, entry, s.entryHook)
 		if err != nil {
+			var beyond *BeyondGCHorizonError
+			if errors.As(err, &beyond) {
+				result.Refused++
+				continue
+			}
 			return result, fmt.Errorf("apply resync snapshot entry %q: %w", entry.Key, err)
 		}
 		if applied {

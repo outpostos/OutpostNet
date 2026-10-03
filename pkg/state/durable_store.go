@@ -269,7 +269,7 @@ func (s *DurableStore) CompareAndSet(ctx context.Context, key string, expected E
 
 // Apply durably merges a remote entry before making it visible.
 func (s *DurableStore) Apply(ctx context.Context, incoming Entry) (bool, error) {
-	return s.apply(ctx, incoming, s.appendEntry, false)
+	return s.apply(ctx, incoming, s.appendEntry)
 }
 
 // PeerProgress returns the last durably saved push position for peer.
