@@ -119,6 +119,14 @@ func (c *hlcClock) Update(remote Timestamp) (Timestamp, error) {
 	return c.last, nil
 }
 
+func (c *hlcClock) Restore(ts Timestamp) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ts.Compare(c.last) > 0 {
+		c.last = ts
+	}
+}
+
 func incrementTimestamp(wall int64, logical uint16) Timestamp {
 	if logical == ^uint16(0) {
 		return Timestamp{WallMS: wall + 1}

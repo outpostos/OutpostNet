@@ -658,7 +658,7 @@ func TestPeerFailureBackoffSaturatesBeforeOverflow(t *testing.T) {
 
 type httpTestNode struct {
 	id      string
-	store   *MemoryStore
+	store   Store
 	engine  *GossipEngine
 	syncer  *HTTPSyncer
 	server  *httptest.Server
@@ -777,7 +777,7 @@ func mustStore(t *testing.T, nodeID string, policy MergePolicy, clock PhysicalCl
 	return store
 }
 
-func mustGet(t *testing.T, store *MemoryStore, key string) Entry {
+func mustGet(t *testing.T, store Store, key string) Entry {
 	t.Helper()
 	entry, ok, err := store.Get(context.Background(), key)
 	if err != nil {
@@ -789,7 +789,7 @@ func mustGet(t *testing.T, store *MemoryStore, key string) Entry {
 	return entry
 }
 
-func assertStoredValue(t *testing.T, store *MemoryStore, key, value string) {
+func assertStoredValue(t *testing.T, store Store, key, value string) {
 	t.Helper()
 	entry := mustGet(t, store, key)
 	if string(entry.Value) != value {

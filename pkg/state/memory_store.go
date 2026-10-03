@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // MemoryStoreConfig configures an in-memory state replica.
@@ -16,14 +17,34 @@ type MemoryStoreConfig struct {
 	PhysicalClock PhysicalClock
 }
 
-// MemoryStore is an in-memory state replica. It keeps tombstones in memory; disk
-// durability is intentionally left to the persistence ticket.
+// MemoryStore is an in-memory state replica. It keeps tombstones in memory.
 type MemoryStore struct {
+	*storeCore
+}
+
+// MemoryStore implements the same replica seam as DurableStore.
+var _ Store = (*MemoryStore)(nil)
+
+// NewMemoryStore creates a state replica.
+func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock)
+	if err != nil {
+		return nil, err
+	}
+	return &MemoryStore{storeCore: core}, nil
+}
+
+type storeCore struct {
 	nodeID  string
 	policy  MergePolicy
 	entries map[string]Entry
 	clock   localClock
 	hlc     *hlcClock
+	// ready reports whether this replica can serve local reads and resume a
+	// consumer position. Recovery runs to completion before a store constructor
+	// returns, so a published store starts ready; a lifecycle owner clears it when
+	// the replica stops serving (DurableStore.Close).
+	ready atomic.Bool
 
 	commitMu    sync.Mutex
 	mu          sync.RWMutex
@@ -32,34 +53,38 @@ type MemoryStore struct {
 	nextObsID   uint64
 }
 
-// NewMemoryStore creates a state replica.
-func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
-	if cfg.NodeID == "" {
+func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock) (*storeCore, error) {
+	if nodeID == "" {
 		return nil, fmt.Errorf("state store node id is required")
 	}
-	return &MemoryStore{
-		nodeID:    cfg.NodeID,
-		policy:    normalizePolicy(cfg.Policy),
+	core := &storeCore{
+		nodeID:    nodeID,
+		policy:    normalizePolicy(policy),
 		entries:   make(map[string]Entry),
-		hlc:       newHLCClock(cfg.PhysicalClock),
+		hlc:       newHLCClock(physical),
 		observers: make(map[uint64]func(Entry)),
-	}, nil
+	}
+	core.ready.Store(true)
+	return core, nil
 }
 
+// markNotReady records that this replica no longer serves local state.
+func (s *storeCore) markNotReady() { s.ready.Store(false) }
+
 // Policy returns the merge policy used by local writes, Apply and digests.
-func (s *MemoryStore) Policy() MergePolicy { return s.policy }
+func (s *storeCore) Policy() MergePolicy { return s.policy }
 
 // Put commits a local opaque value.
-func (s *MemoryStore) Put(ctx context.Context, key string, value []byte) (Entry, error) {
-	return s.put(ctx, key, Mutation{Value: value})
+func (s *storeCore) Put(ctx context.Context, key string, value []byte) (Entry, error) {
+	return s.put(ctx, key, Mutation{Value: value}, nil)
 }
 
 // Delete commits a local tombstone.
-func (s *MemoryStore) Delete(ctx context.Context, key string) (Entry, error) {
-	return s.put(ctx, key, Mutation{Deleted: true})
+func (s *storeCore) Delete(ctx context.Context, key string) (Entry, error) {
+	return s.put(ctx, key, Mutation{Deleted: true}, nil)
 }
 
-func (s *MemoryStore) put(ctx context.Context, key string, mutation Mutation) (Entry, error) {
+func (s *storeCore) put(ctx context.Context, key string, mutation Mutation, persist func(Entry) error) (Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return Entry{}, err
 	}
@@ -70,6 +95,11 @@ func (s *MemoryStore) put(ctx context.Context, key string, mutation Mutation) (E
 	if err := s.policy.ValidateApply(entry); err != nil {
 		return Entry{}, err
 	}
+	if persist != nil {
+		if err := persist(entry); err != nil {
+			return Entry{}, err
+		}
+	}
 	s.mu.Lock()
 	s.entries[key] = entry
 	s.mu.Unlock()
@@ -79,7 +109,11 @@ func (s *MemoryStore) put(ctx context.Context, key string, mutation Mutation) (E
 
 // CompareAndSet atomically applies a local mutation if the current entry still
 // has the expected identity.
-func (s *MemoryStore) CompareAndSet(ctx context.Context, key string, expected EntryIdentity, mutation Mutation) (Entry, bool, error) {
+func (s *storeCore) CompareAndSet(ctx context.Context, key string, expected EntryIdentity, mutation Mutation) (Entry, bool, error) {
+	return s.compareAndSet(ctx, key, expected, mutation, nil)
+}
+
+func (s *storeCore) compareAndSet(ctx context.Context, key string, expected EntryIdentity, mutation Mutation, persist func(Entry) error) (Entry, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return Entry{}, false, err
 	}
@@ -97,6 +131,16 @@ func (s *MemoryStore) CompareAndSet(ctx context.Context, key string, expected En
 		s.mu.Unlock()
 		return Entry{}, false, err
 	}
+	if persist != nil {
+		// The durable append, including its fsync and any rollback, runs while mu is
+		// held here, so a slow disk delays concurrent readers of this store.
+		// Put/Delete/Apply append outside mu. This lock scope is pre-existing and
+		// narrowing it is tracked with durable-log compaction, not claimed here.
+		if err := persist(entry); err != nil {
+			s.mu.Unlock()
+			return Entry{}, false, err
+		}
+	}
 	s.entries[key] = entry
 	s.mu.Unlock()
 	s.notify(entry)
@@ -104,7 +148,7 @@ func (s *MemoryStore) CompareAndSet(ctx context.Context, key string, expected En
 }
 
 // Get reads the current entry for a key, including tombstones.
-func (s *MemoryStore) Get(ctx context.Context, key string) (Entry, bool, error) {
+func (s *storeCore) Get(ctx context.Context, key string) (Entry, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return Entry{}, false, err
 	}
@@ -115,7 +159,7 @@ func (s *MemoryStore) Get(ctx context.Context, key string) (Entry, bool, error) 
 }
 
 // ListEntries returns all latest entries ordered by local position.
-func (s *MemoryStore) ListEntries(ctx context.Context) ([]Entry, error) {
+func (s *storeCore) ListEntries(ctx context.Context) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -125,7 +169,7 @@ func (s *MemoryStore) ListEntries(ctx context.Context) ([]Entry, error) {
 }
 
 // ChangesSince returns entries with local position greater than since.
-func (s *MemoryStore) ChangesSince(ctx context.Context, since uint64, limit int) ([]Entry, error) {
+func (s *storeCore) ChangesSince(ctx context.Context, since uint64, limit int) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -136,7 +180,11 @@ func (s *MemoryStore) ChangesSince(ctx context.Context, since uint64, limit int)
 
 // Apply merges a remote entry. It preserves the original ChangeID and assigns a
 // fresh local Position for downstream consumption.
-func (s *MemoryStore) Apply(ctx context.Context, incoming Entry) (bool, error) {
+func (s *storeCore) Apply(ctx context.Context, incoming Entry) (bool, error) {
+	return s.apply(ctx, incoming, nil)
+}
+
+func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entry) error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -167,6 +215,12 @@ func (s *MemoryStore) Apply(ctx context.Context, incoming Entry) (bool, error) {
 	}
 	entry := copyEntry(incoming)
 	entry.Position = s.clock.Merge(maxUint64(entry.Position, entry.ChangeID.Counter))
+	if persist != nil {
+		if err := persist(entry); err != nil {
+			s.mu.Unlock()
+			return false, err
+		}
+	}
 	s.entries[entry.Key] = entry
 	s.mu.Unlock()
 	s.notify(entry)
@@ -174,11 +228,42 @@ func (s *MemoryStore) Apply(ctx context.Context, incoming Entry) (bool, error) {
 }
 
 // CurrentPosition returns the latest node-local consumption position.
-func (s *MemoryStore) CurrentPosition() uint64 { return s.clock.Current() }
+func (s *storeCore) CurrentPosition() uint64 { return s.clock.Current() }
+
+// LocalStatus reports local recovery readiness and the latest local position.
+// Ready is false once the replica has stopped serving local state.
+func (s *storeCore) LocalStatus() LocalStatus {
+	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.CurrentPosition()}
+}
+
+// CheckConsumerPosition reports whether a stored consumer position can resume.
+func (s *storeCore) CheckConsumerPosition(position uint64) ConsumerPositionStatus {
+	current := s.CurrentPosition()
+	ready := s.ready.Load()
+	status := ConsumerPositionStatus{
+		Ready:           ready,
+		CurrentPosition: current,
+		Requested:       position,
+	}
+	switch {
+	case !ready:
+		status.NeedsSnapshot = true
+		status.Reason = "local store is not ready"
+	case position == 0:
+		status.NeedsSnapshot = true
+		status.Reason = "no prior position; start from snapshot"
+	case position > current:
+		status.NeedsSnapshot = true
+		status.Reason = "consumer position is ahead of local state"
+	default:
+		status.CanResume = true
+	}
+	return status
+}
 
 // Observe registers a non-consuming write observer and returns an unsubscribe
 // function.
-func (s *MemoryStore) Observe(fn func(Entry)) func() {
+func (s *storeCore) Observe(fn func(Entry)) func() {
 	if fn == nil {
 		return func() {}
 	}
@@ -194,7 +279,22 @@ func (s *MemoryStore) Observe(fn func(Entry)) func() {
 	}
 }
 
-func (s *MemoryStore) newLocalEntry(key string, mutation Mutation) Entry {
+func (s *storeCore) restoreEntry(entry Entry) error {
+	if err := s.policy.ValidateApply(entry); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, found := s.entries[entry.Key]
+	if !found || s.policy.CompareEntries(entry, existing) > 0 {
+		s.entries[entry.Key] = copyEntry(entry)
+	}
+	s.clock.SetAtLeast(maxUint64(entry.Position, entry.ChangeID.Counter))
+	s.hlc.Restore(entry.Version.HLC)
+	return nil
+}
+
+func (s *storeCore) newLocalEntry(key string, mutation Mutation) Entry {
 	position := s.clock.Next()
 	ts := s.hlc.Now()
 	entry := Entry{
@@ -211,7 +311,7 @@ func (s *MemoryStore) newLocalEntry(key string, mutation Mutation) Entry {
 	return entry
 }
 
-func (s *MemoryStore) notify(entry Entry) {
+func (s *storeCore) notify(entry Entry) {
 	s.observersMu.RLock()
 	observers := make([]func(Entry), 0, len(s.observers))
 	for _, observer := range s.observers {

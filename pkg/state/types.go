@@ -158,6 +158,47 @@ type Syncer interface {
 	Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error)
 }
 
+// Store is the public state replica seam used by consumers and gossip.
+type Store interface {
+	Policy() MergePolicy
+	Put(ctx context.Context, key string, value []byte) (Entry, error)
+	Delete(ctx context.Context, key string) (Entry, error)
+	CompareAndSet(ctx context.Context, key string, expected EntryIdentity, mutation Mutation) (Entry, bool, error)
+	Get(ctx context.Context, key string) (Entry, bool, error)
+	ListEntries(ctx context.Context) ([]Entry, error)
+	ChangesSince(ctx context.Context, since uint64, limit int) ([]Entry, error)
+	Apply(ctx context.Context, incoming Entry) (bool, error)
+	CurrentPosition() uint64
+	Observe(fn func(Entry)) func()
+	LocalStatus() LocalStatus
+	CheckConsumerPosition(position uint64) ConsumerPositionStatus
+}
+
+// LocalStatus reports whether the store has completed local recovery and the
+// latest node-local state position. It does not claim global convergence.
+type LocalStatus struct {
+	Ready           bool
+	CurrentPosition uint64
+}
+
+// ConsumerPositionStatus explains whether a consumer position can be used for
+// incremental reads or must restart from a snapshot.
+type ConsumerPositionStatus struct {
+	Ready           bool
+	CurrentPosition uint64
+	Requested       uint64
+	CanResume       bool
+	NeedsSnapshot   bool
+	Reason          string
+}
+
+// PeerProgressStore is implemented by durable stores that persist gossip
+// progress after a peer has acknowledged a push.
+type PeerProgressStore interface {
+	PeerProgress(ctx context.Context, peer string) (uint64, error)
+	SavePeerProgress(ctx context.Context, peer string, position uint64) error
+}
+
 // PeerProvider returns current peer addresses.
 type PeerProvider interface {
 	Peers() []string
@@ -190,6 +231,17 @@ type localClock struct {
 
 func (c *localClock) Next() uint64    { return c.value.Add(1) }
 func (c *localClock) Current() uint64 { return c.value.Load() }
+func (c *localClock) SetAtLeast(remote uint64) {
+	for {
+		local := c.value.Load()
+		if local >= remote {
+			return
+		}
+		if c.value.CompareAndSwap(local, remote) {
+			return
+		}
+	}
+}
 func (c *localClock) Merge(remote uint64) uint64 {
 	for {
 		local := c.value.Load()
