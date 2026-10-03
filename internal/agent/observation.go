@@ -41,7 +41,7 @@ func StartObservation(ctx context.Context, cfg ObservationConfig, tm *TunnelMana
 		return nil
 	}
 	if cfg.NodeID == "" {
-		logger.Error("observation disabled: node_id is required to identify the observation stream", "observation_addr", cfg.Addr)
+		logger.Warn("observation disabled: node_id is required to identify the observation stream", "observation_addr", cfg.Addr)
 		return nil
 	}
 	o := &Observation{Reporter: observation.NewReporter(observation.ReporterConfig{

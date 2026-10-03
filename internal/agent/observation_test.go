@@ -198,4 +198,10 @@ func TestObservationWithoutNodeIDIsDisabledNotFatal(t *testing.T) {
 	if !strings.Contains(logs.String(), "node_id is required") {
 		t.Fatalf("disabled observation not explained:\n%s", logs.String())
 	}
+	// The agent runs as configured; a missing observation stream is a warning.
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "node_id is required") && !strings.Contains(line, "level=WARN") {
+			t.Fatalf("observation disabled for lack of node_id must be logged as a warning: %s", line)
+		}
+	}
 }

@@ -16,7 +16,7 @@
 
 - 端点只监听回环地址（`localhost` 或 loopback IP），非回环地址在构造时拒绝。
 - `node_id` 为空（例如只按 region 配置的旧 agent）时不启动观测：Range 的事件必须带稳定节点身份，
-  不能用 region 或主机名冒充；记一条错误日志，产品照常运行。
+  不能用 region 或主机名冒充；记一条警告日志（`slog.Warn`），产品照常运行。
 - 一个进程一条流 `(node_id, component)`；`outpostnet-agent` 与 `outpostnet-service` 同节点并存时是两条流，
   range-agent 需各配一个 `ObservationEndpoints` 项（`"Component": 4` / `"Component": 5`）。
 
