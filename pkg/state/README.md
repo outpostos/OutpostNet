@@ -67,6 +67,21 @@ Durable store:
   record is durably saved. If progress saving fails, the sync returns an error
   and recovery can safely replay the unconfirmed entries.
 
+Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
+
+- `TombstoneRetention` (both stores, default 0 = off) enables tombstone
+  collection. Local stores call `CollectTombstones`; stores attached to a
+  `GossipEngine` must collect through `GossipEngine.CollectTombstones`, which
+  additionally waits until every current peer acknowledged the tombstone.
+- Collected keys raise the store's GC horizon. `Apply` refuses an absent key at or
+  below the horizon, peers with a lower horizon are refused with
+  `ResyncRequiredError` (HTTP 410) and resync from a snapshot. A consumer position
+  below the GC floor reports `NeedsSnapshot`.
+- `DurableStore.Compact` rewrites the log as a snapshot through a synced temp
+  file, rename and directory sync; `CompactionMinRecords` (default 0 = off)
+  enables `CompactIfNeeded`. A directory sync failure after rename makes the
+  store fail-closed.
+
 Policies:
 
 - `MergePolicy` is the single source for Store merge ordering and Gossip digest
