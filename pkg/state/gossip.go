@@ -46,6 +46,14 @@ type peerState struct {
 	lastPushPosition uint64
 	failures         int
 	nextAttempt      time.Time
+
+	// Exchange results reported by ReplicationStatus. Times are the local
+	// clock; zero means "not in this process".
+	lastSuccess   time.Time // latest acknowledged push or fully applied pull
+	lastPull      time.Time // start of the latest fully applied pull
+	lastError     string    // redacted text of the latest failed exchange
+	lastErrorTime time.Time
+	lastErrorOp   string
 }
 
 // NewGossipEngine creates a replication engine. If Policy is provided it must
@@ -203,6 +211,9 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// A pull reports the peer's state as of when it was asked, so its start
+		// time is what "inbound caught up" can claim.
+		started := time.Now()
 		entries, err := g.syncer.Pull(ctx, addr, PullRequest{
 			ProtocolVersion: StateProtocolVersion,
 			PolicyID:        g.policy.ID(),
@@ -251,7 +262,7 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			errs = append(errs, err)
 			continue
 		}
-		g.recordPeerSuccess(addr)
+		g.recordPullSuccess(addr, started)
 	}
 	return errors.Join(errs...)
 }
@@ -476,25 +487,44 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	}
 	state.failures = 0
 	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
 	return nil
 }
 
+// recordPeerSuccess clears backoff after an exchange that is neither an
+// acknowledged push nor a fully applied pull (a snapshot resync). It does not
+// move lastPull: the conservative inbound claim waits for the next pull.
 func (g *GossipEngine) recordPeerSuccess(addr string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures = 0
 	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
+}
+
+func (g *GossipEngine) recordPullSuccess(addr string, started time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.peerStateLocked(addr)
+	state.failures = 0
+	state.nextAttempt = time.Time{}
+	state.lastSuccess = time.Now()
+	state.lastPull = started
 }
 
 func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now time.Time) {
+	message := redactPeerError(addr, err.Error())
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures++
 	backoff := saturatedBackoff(g.backoffBase, g.backoffMax, state.failures)
 	state.nextAttempt = now.Add(backoff)
-	slog.Warn("state gossip: peer sync failed", "peer", addr, "operation", operation, "err", err, "retryAt", state.nextAttempt)
+	state.lastError = message
+	state.lastErrorTime = time.Now()
+	state.lastErrorOp = operation
+	slog.Warn("state gossip: peer sync failed", "peer", redactedPeerURL(addr), "operation", operation, "err", message, "retryAt", state.nextAttempt)
 }
 
 func saturatedBackoff(base, max time.Duration, failures int) time.Duration {

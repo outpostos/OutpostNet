@@ -15,6 +15,8 @@ Public consumer surface:
   "all peers synced" claim.
 - `GossipEngine.SyncOnce`, `AntiEntropyOnce`, and `Run` for peer exchange.
 - `HTTPSyncer` and `NewHTTPHandler` for authenticated JSON/HTTP transport.
+- `GossipEngine.ReplicationStatus` for a read-only, concurrency-safe view of
+  local readiness and per-peer exchange results (see below).
 
 Identity model:
 
@@ -84,6 +86,28 @@ Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
   file, rename and directory sync; `CompactionMinRecords` (default 0 = off)
   enables `CompactIfNeeded`. A directory sync failure after rename makes the
   store fail-closed.
+
+Replication status (`GossipEngine.ReplicationStatus`):
+
+- One `PeerReplicationStatus` per peer the `PeerProvider` currently returns:
+  `AcknowledgedPosition` (persisted `PeerProgressStore` value when available),
+  `OutboundCaughtUp` (`AcknowledgedPosition >= Local.CurrentPosition`, with the
+  local position read first so the claim can only be conservative),
+  `LastPullTime` (start of the latest fully applied pull), `InboundCaughtUp`
+  (a pull was applied and no exchange failed after it started), `CaughtUp`,
+  `LastSuccessTime`, `LastError`/`LastErrorTime`/`LastErrorOperation` (kept
+  after recovery), `ConsecutiveFailures` and `NextAttemptTime` (backoff).
+- A round that skips a peer in backoff is not a pull. A snapshot resync clears
+  backoff but does not move `LastPullTime`; the next pull does.
+- These are local facts of this process: times are not persisted, so a fresh
+  process reports no pull yet (`InboundCaughtUp=false`) while the persisted
+  acknowledged position survives. Same semantics as OutpostMesh
+  `GetReplicationStatus` (ticket 06); hosts map it to their own reporting
+  (for example OutpostRange `ReplicationProgress`) instead of wrapping the
+  Syncer to re-derive it.
+- Credentials never appear: peer addresses have their password redacted, and
+  `HTTPSyncer` errors (returned, logged and reported) show the redacted URL and
+  replace its bearer token with `[REDACTED]` even if a peer echoes it.
 
 Policies:
 
