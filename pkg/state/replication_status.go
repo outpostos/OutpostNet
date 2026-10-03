@@ -3,8 +3,6 @@ package state
 import (
 	"context"
 	"fmt"
-	neturl "net/url"
-	"strings"
 	"time"
 )
 
@@ -91,22 +89,4 @@ func (g *GossipEngine) ReplicationStatus(ctx context.Context) (ReplicationStatus
 		status.Peers = append(status.Peers, peer)
 	}
 	return status, nil
-}
-
-// redactPeerError removes a password embedded in addr from an error text
-// produced by any Syncer. HTTPSyncer additionally never repeats its token.
-func redactPeerError(addr, message string) string {
-	u, err := neturl.Parse(addr)
-	if err != nil || u.User == nil {
-		return message
-	}
-	password, ok := u.User.Password()
-	if !ok || password == "" {
-		return message
-	}
-	message = strings.ReplaceAll(message, password, redactedSecret)
-	if escaped := neturl.QueryEscape(password); escaped != password {
-		message = strings.ReplaceAll(message, escaped, redactedSecret)
-	}
-	return message
 }

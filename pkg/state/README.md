@@ -105,9 +105,15 @@ Replication status (`GossipEngine.ReplicationStatus`):
   `GetReplicationStatus` (ticket 06); hosts map it to their own reporting
   (for example OutpostRange `ReplicationProgress`) instead of wrapping the
   Syncer to re-derive it.
-- Credentials never appear: peer addresses have their password redacted, and
-  `HTTPSyncer` errors (returned, logged and reported) show the redacted URL and
-  replace its bearer token with `[REDACTED]` even if a peer echoes it.
+- Credentials never appear: every pkg/state log line (debug through error) and
+  every error returned by `SyncOnce`, `AntiEntropyOnce`, `ReplicationStatus` or
+  `HTTPSyncer` names a peer by its address with the password masked
+  (`user:password@host` and `scheme://user:password@host` alike). Per-peer
+  errors from any `Syncer` have the password removed even if the Syncer quotes
+  the raw address (the original error stays reachable through `errors.As`), and
+  `HTTPSyncer` replaces its bearer token and the URL password with `[REDACTED]`
+  even if a peer echoes them in an error body. The helpers live in
+  `redact.go`.
 
 Policies:
 

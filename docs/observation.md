@@ -92,7 +92,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 `ReplicationProgress`，不再各自包一层 recording syncer 复制实现。
 
 - 并发安全：只在引擎锁内复制每 peer 状态，不持锁调用 Store。
-- 不泄露 token：错误文本在记录时去掉 peer 地址中的 userinfo，并由 `HTTPSyncer` 把自己的 bearer token 替换为 `[REDACTED]`。
+- 不泄露凭据：`pkg/state` 的全部日志与导出 API 返回的错误只以“密码已遮蔽”的 peer 地址出现；任何 `Syncer` 的每 peer 错误在返回、记日志、进状态前去掉地址里的密码；`HTTPSyncer` 把 bearer token 与对端回显的 URL 密码替换为 `[REDACTED]`。脱敏收敛在 `pkg/state/redact.go`。
 - `pkg/state` 不依赖 OutpostRange；映射到 proto 由宿主完成。
 
 ## 5. 快照与“只发变化”
@@ -124,7 +124,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 
 | 内容 | 位置 |
 | --- | --- |
-| 公共复制状态接口 | `pkg/state/replication_status.go`（`GossipEngine.ReplicationStatus`、`PeerReplicationStatus`）；`gossip.go` 记录每 peer 结果；`http.go` 错误脱敏 |
+| 公共复制状态接口 | `pkg/state/replication_status.go`（`GossipEngine.ReplicationStatus`、`PeerReplicationStatus`）；`gossip.go` 记录每 peer 结果；`redact.go` peer 地址与错误脱敏（日志、返回错误、状态共用） |
 | 隧道只读状态 | `pkg/tunnel/lifecycle.go` `ManagedClient.Status()`（状态、地址、最近失败及时间） |
 | Net 宿主读取面 | `internal/agent/tunnel_manager.go`：`PeerLinks`、`SetLinkObserver`、`RegionClient`、`ErrNoTunnel` |
 | 观测生产者 | `internal/observation/`：`eventlog.go`（有界日志、seq epoch、慢订阅者丢弃）、`reporter.go`（快照）、`netpeers.go`（111/15 与采样）、`serviceaccess.go`（116/20，包装入口开流）、`server.go`（回环 HTTP/SSE） |
@@ -138,6 +138,7 @@ OutpostNet 自己的进程不运行 `pkg/state` 复制（没有 `GossipEngine`�
 | 测试 | 证明 |
 | --- | --- |
 | `pkg/state` `TestReplicationStatus*` | 每 peer 交换结果、退避跳过不算拉取、冷启动后确认位置保留且无拉取、凭据不泄露、并发安全（`-race`） |
+| `pkg/state` `TestGossipLogsAndErrorsNeverCarryPeerURLPassword`、`TestHTTPErrorBodyEchoingPeerURLPasswordIsRedacted`、`TestPeerAddressRedactionHelpers` | 带 `user:password@` 的 peer 经 GC horizon 拒收、resync（成功与失败）、退避、普通交换失败、HTTP 错误体回显密码各路径，捕获的 slog 输出与 `SyncOnce`/`AntiEntropyOnce`/`HTTPSyncer` 返回错误都不含密码 |
 | `pkg/tunnel` `TestManagedClientStatusReportsLatestFailure` | 隧道最近失败可读、不含 token |
 | `internal/servicehost` `TestObservationReportsNetAndServiceFactsThroughRangeContract` | 两个真实 Host（真实 QUIC、token、真实 TCP 应用）：订阅快照含已连通的 Net 链路与未测量的入口；REACHABLE、实例替换后 backend 地址切换、后端失效 UNREACHABLE、对端移出目录 DISCONNECTED + NO_BACKEND；全部事件经严格契约解析，晚到订阅者快照 seq 等于最后事件 |
 | `internal/servicehost` `TestObservationPortTakenDoesNotStopHost`、`internal/agent` `TestObservationListenFailureDoesNotStopAgent` | 观测端口被占用时产品照常服务，只记日志 |

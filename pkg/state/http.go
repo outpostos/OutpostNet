@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -88,10 +87,10 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 	if err := s.doJSON(ctx, http.MethodPost, addr, PushPath, req, &resp); err != nil {
 		return nil, err
 	}
-	if err := validateProtocolResponse(addr, "push", resp.ProtocolVersion); err != nil {
+	if err := validateProtocolResponse(redactedPeerURL(addr), "push", resp.ProtocolVersion); err != nil {
 		return nil, err
 	}
-	if err := validatePolicyResponse(addr, "push", req.PolicyID, resp.PolicyID); err != nil {
+	if err := validatePolicyResponse(redactedPeerURL(addr), "push", req.PolicyID, resp.PolicyID); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -128,10 +127,10 @@ func (s *HTTPSyncer) pull(ctx context.Context, addr string, req PullRequest) (*P
 	if err := s.doJSON(ctx, http.MethodPost, addr, PullPath, req, &resp); err != nil {
 		return nil, err
 	}
-	if err := validateProtocolResponse(addr, "pull", resp.ProtocolVersion); err != nil {
+	if err := validateProtocolResponse(redactedPeerURL(addr), "pull", resp.ProtocolVersion); err != nil {
 		return nil, err
 	}
-	if err := validatePolicyResponse(addr, "pull", req.PolicyID, resp.PolicyID); err != nil {
+	if err := validatePolicyResponse(redactedPeerURL(addr), "pull", req.PolicyID, resp.PolicyID); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -172,7 +171,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 		}
 	}
 	if resp.StatusCode >= 300 {
+		// A peer may echo the request credentials: the bearer token or the
+		// password of the URL it was reached at.
 		text := strings.ReplaceAll(strings.TrimSpace(string(body)), s.authToken, redactedSecret)
+		text = redactPeerError(addr, text)
 		return fmt.Errorf("%s %s: status %d: %s", method, shown, resp.StatusCode, text)
 	}
 	if respBody == nil {
@@ -184,24 +186,8 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	return nil
 }
 
-// redactedSecret replaces credentials in errors and status reports.
-const redactedSecret = "[REDACTED]"
-
-// redactedPeerURL hides a password embedded in a peer address
-// (scheme://user:password@host). Addresses without one are returned as is.
-func redactedPeerURL(raw string) string {
-	u, err := neturl.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
-	}
-	if _, ok := u.User.Password(); !ok {
-		return raw
-	}
-	return u.Redacted()
-}
-
 func buildPeerURL(addr, path string) string {
-	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+	if hasHTTPScheme(addr) {
 		return strings.TrimRight(addr, "/") + path
 	}
 	return "http://" + strings.TrimRight(addr, "/") + path
