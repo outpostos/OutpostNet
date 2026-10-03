@@ -12,8 +12,10 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// Client is a QUIC tunnel client that dials a tunnel server and opens
-// streams for imported services.
+// Client is a single-connection QUIC tunnel client that dials a tunnel server
+// and opens service streams. It does not reconnect (see ManagedClient) and does
+// not listen locally: stable local entries are the Service layer's job
+// (pkg/service Entry).
 type Client struct {
 	cfg    ClientConfig
 	conn   *quic.Conn
@@ -115,59 +117,6 @@ func (c *Client) OpenServiceStream(ctx context.Context, serviceName string) (*qu
 	}
 
 	return stream, nil
-}
-
-// ServeImport listens on listenAddr and for each incoming TCP connection,
-// opens a QUIC stream to the tunnel server for the given service.
-// It blocks until the context is cancelled.
-func (c *Client) ServeImport(ctx context.Context, serviceName, listenAddr string) error {
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	c.logger.Info("serving import", "service", serviceName, "listen", ln.Addr())
-
-	// Close listener when context is done.
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			c.logger.Error("accept", "error", err)
-			return err
-		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.handleImportConn(ctx, serviceName, conn)
-		}()
-	}
-}
-
-func (c *Client) handleImportConn(ctx context.Context, serviceName string, conn net.Conn) {
-	defer conn.Close()
-
-	stream, err := c.OpenServiceStream(ctx, serviceName)
-	if err != nil {
-		c.logger.Error("open service stream", "service", serviceName, "error", err)
-		return
-	}
-	defer stream.Close()
-
-	c.logger.Debug("relaying import", "service", serviceName, "remote", conn.RemoteAddr())
-	relay(stream, conn)
 }
 
 // Close closes the client connection.

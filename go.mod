@@ -3,7 +3,7 @@ module github.com/outpostos/OutpostNet
 go 1.25.0
 
 require (
-	github.com/outpostos/OutpostRange v0.0.0-20261003071022-563b72aa3ddf
+	github.com/outpostos/OutpostRange v0.0.0-20261003180355-25a9bf2f7474
 	github.com/prometheus/client_golang v1.23.2
 	github.com/quic-go/quic-go v0.59.0
 	github.com/spf13/cobra v1.10.2

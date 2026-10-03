@@ -4,16 +4,17 @@ Standard Operating Procedure for releasing OutpostNet versions. This document co
 
 ## Overview
 
-OutpostNet releases produce **16 artifacts** (4 components x 4 platforms) as compressed tarballs, published via GitHub Releases. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
+OutpostNet releases produce **20 artifacts** (5 components x 4 platforms; v1.0.x–v2.0.0 shipped 16, before `outpostnet-service` existed) as compressed tarballs, published via GitHub Releases. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
 
 ### Components
 
 | Component | Binary | Description |
 |-----------|--------|-------------|
-| Agent | `outpostnet-agent` | Unified tunnel agent (server/client roles) — primary 1.0 component |
-| Server | `outpostnet-server` | Standalone QUIC tunnel server |
-| Sidecar | `outpostnet-sidecar` | Kubernetes sidecar injector |
-| Controller | `outpostnet-controller` | Kubernetes controller |
+| Agent | `outpostnet-agent` | Unified tunnel agent (server/client roles), peer directory — primary 1.0 component |
+| Service | `outpostnet-service` | OutpostService stable entries for `<service>@<node_id>` ([service-layer.md](service-layer.md)) |
+| Server | `outpostnet-server` | Node-local routing hub for sidecars (Unix socket) |
+| Sidecar | `outpostnet-sidecar` | Per-application process that registers exports/imports with the local server |
+| Controller | `outpostnet-controller` | Kubernetes controller and mutating webhook (sidecar injection) |
 
 ### Platforms
 
@@ -32,7 +33,8 @@ make vet        # Static analysis
 make test       # Unit tests
 ```
 
-All must pass with zero errors.
+All must pass with zero errors. `make test` fetches the private
+`github.com/outpostos/OutpostRange` module (see README "Build from source").
 
 ### 1.2 E2E Test Suite
 
@@ -41,6 +43,11 @@ All must pass with zero errors.
 hack/e2e-relay.sh
 hack/e2e-cross-region.sh
 ```
+
+These scripts run in a Kubernetes cluster and expect the images named in each
+script header (for example `outpostnet-agent:latest`) to be present already.
+The repository has no Dockerfile or image build target (the Dockerfiles were
+deleted in v1.0.1), so provide the images out of band before running them.
 
 Verify TCP tunnel connectivity across supported cross-node scenarios. UDP is verified only node-local (outpostnet-server + outpostnet-sidecar, `TestUDPEndToEnd`); cross-node UDP over the QUIC tunnel is not implemented.
 
@@ -54,6 +61,7 @@ Verify consistency across all user-facing materials:
 - [ ] `docs/architecture.md` — diagrams reflect current component relationships
 - [ ] `CHANGELOG.md` — new version entry drafted
 - [ ] `deploy/examples/` — example configs validated against current schema
+- [ ] `docs/observation.md` — OutpostRange version matches `go.mod`; release notes state that Range must be upgraded first
 
 **Language rule:** All public-facing docs must be pure English. Zero Chinese characters.
 
@@ -91,7 +99,7 @@ make release
 
 This target:
 1. Runs `fmt` and `vet` checks
-2. Cross-compiles all 4 components for all 4 platforms with `CGO_ENABLED=0` (static linking)
+2. Cross-compiles all 5 components (`RELEASE_COMPONENTS`) for all 4 platforms (`RELEASE_PLATFORMS`) with `CGO_ENABLED=0` (static linking)
 3. Strips debug symbols (`-s -w`) for smaller binaries
 4. Packages each binary as `<component>-<VERSION>-<os>-<arch>.tar.gz`
 5. Outputs to `build/release/`
@@ -99,7 +107,7 @@ This target:
 ### 2.3 Verify Artifacts
 
 ```bash
-# Count: should be 16
+# Count: should be 20
 ls build/release/*.tar.gz | wc -l
 
 # Spot-check: extract and verify version
@@ -130,7 +138,7 @@ Or create via GitHub UI:
 1. Go to Releases > Draft a new release
 2. Select the tag `v1.X.Y`
 3. Paste release notes from CHANGELOG.md
-4. Upload all 16 artifacts from `build/release/`
+4. Upload all 20 artifacts from `build/release/`
 
 ### 3.3 Update Landing Page
 
@@ -148,7 +156,7 @@ After pushing the landing page changes, verify [net.outpostos.com](https://net.o
 ### 4.1 Download Verification
 
 - [ ] GitHub Release page loads correctly
-- [ ] All 16 artifact download links work
+- [ ] All 20 artifact download links work
 - [ ] Binary extracts and runs `--version` on at least one platform
 
 ### 4.2 Documentation Links
@@ -197,7 +205,7 @@ outpostnet-server-v1.0.1-linux-arm64.tar.gz
 
 ## References
 
-- Makefile release targets: `Makefile:174-213`
+- Makefile release target: `release` (`RELEASE_COMPONENTS`, `RELEASE_PLATFORMS`)
 - Version injection: `pkg/version/version.go`
 - Config schema: `pkg/agentconfig/`
 - Example configs: `deploy/examples/`

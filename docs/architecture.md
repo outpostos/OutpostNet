@@ -1,5 +1,24 @@
 # Architecture Overview
 
+## Role in Outpost OS
+
+OutpostNet is the Net layer of the Outpost OS four-layer architecture
+(Net state primitives / Mesh domain services / Let autonomous runtime /
+Service stable access, observed by Range). Responsibilities in this repository:
+
+| Area | Component | Responsibility |
+|------|-----------|----------------|
+| Net: communication | `pkg/tunnel`, `outpostnet-agent` (`internal/agent`) | QUIC connections, token auth, stream headers, reconnect and address change, relay, peer directory (`PUT/GET /v1/peers`) |
+| Net: state primitives | `pkg/state` (library) | Opaque-entry replication: `Store` (memory or durable), `GossipEngine` push/pull and anti-entropy, tombstone GC with GC horizon and resync, compaction, `ReplicationStatus`. Consumers (OutpostMesh, OutpostLet) embed it and own the meaning of their keys; see [pkg/state/README.md](../pkg/state/README.md) and [state-tombstone-gc.md](state-tombstone-gc.md) |
+| Service | `outpostnet-service` (`pkg/service`, `internal/servicehost`) | Stable local entries for `<service>@<node_id>` on top of the Net host; see [service-layer.md](service-layer.md) |
+| Observation | `internal/observation` in `outpostnet-agent` and `outpostnet-service` | Loopback snapshot/SSE endpoints reporting Net peer links (111) and Service access (116) to OutpostRange; see [observation.md](observation.md) |
+| Node-local / Kubernetes | `outpostnet-server`, `outpostnet-sidecar`, `outpostnet-controller` | Same-host multi-application routing over a Unix socket, and annotation-driven sidecar injection; not part of the cross-node four-layer path |
+
+`outpostnet-agent` keeps the combined `imports`/`exports` configuration for
+existing deployments (OutpostLet's e2e environment uses it); new stable-entry
+deployments use `outpostnet-service`. Upgrade OutpostRange before the
+components that report to it ([observation.md](observation.md) section 7).
+
 ## Core Concept
 
 OutpostNet's core is `outpostnet-agent` — one binary that acts as either a server or client role, creating encrypted QUIC tunnels between hosts.

@@ -370,6 +370,41 @@ func TestHTTPAdapterRequiresAuthIdentityProtocolAndSizeLimit(t *testing.T) {
 	}
 }
 
+// TestHTTPAdapterRequiresObjectProtocolVersion pins the /state/v1 wire to the
+// object form {"major":M,"minor":N}. Every state peer has always encoded the
+// version as an object, so a bare integer is malformed input, not a legacy
+// peer: it is refused before the request is applied.
+func TestHTTPAdapterRequiresObjectProtocolVersion(t *testing.T) {
+	ctx := context.Background()
+	token := "test-auth-token"
+	node := newHTTPTestNode(t, "node-a", token, &fixedPhysicalClock{now: 1_000})
+	defer node.server.Close()
+
+	post := func(body string) int {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, node.server.URL+PushPath, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Outpost-Node-ID", "node-b")
+		resp, err := node.server.Client().Do(req)
+		if err != nil {
+			t.Fatalf("push request: %v", err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	policy := NewHLCLWWPolicy().ID()
+	if status := post(`{"protocol_version":{"major":1,"minor":0},"policy_id":"` + policy + `","source":"node-b","entries":[]}`); status != http.StatusOK {
+		t.Fatalf("object protocol version: status %d, want 200", status)
+	}
+	if status := post(`{"protocol_version":1,"policy_id":"` + policy + `","source":"node-b","entries":[]}`); status != http.StatusBadRequest {
+		t.Fatalf("integer protocol version: status %d, want 400", status)
+	}
+}
+
 func TestHTTPSyncerRejectsOversizeSuccessAndErrorResponses(t *testing.T) {
 	ctx := context.Background()
 	oversizeJSON := `{"protocol_version":{"major":1,"minor":0},"policy_id":"outpostnet.state.hlc-lww/v1","accepted":0,"rejected":0,"padding":"` + strings.Repeat("x", 128) + `"}`
