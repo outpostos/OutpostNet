@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,16 +29,10 @@ import (
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-func freePortE2E(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
-}
+// loopbackAny lets the agent pick its own port. Tests read the bound address
+// back through Agent.BoundAddrs instead of pre-picking a port, which another
+// process could take (or hold as UDP) before the agent binds it.
+const loopbackAny = "127.0.0.1:0"
 
 // startEchoSrv starts a TCP echo server and returns its listener.
 func startEchoSrv(t *testing.T) net.Listener {
@@ -61,35 +57,81 @@ func startEchoSrv(t *testing.T) net.Listener {
 	return ln
 }
 
-// startAgent starts an agent and waits until its health endpoint responds.
-func startAgent(t *testing.T, cfg *agentconfig.Config) *agent.Agent {
+// launchAgent runs an agent until test cleanup. done is closed when Run
+// returns; *runErr is its result.
+func launchAgent(t *testing.T, cfg *agentconfig.Config) (a *agent.Agent, done <-chan struct{}, runErr *error) {
 	t.Helper()
-	a := agent.New(cfg, nil)
+	a = agent.New(cfg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan struct{})
+	runErr = new(error)
+	go func() {
+		defer close(ch)
+		*runErr = a.Run(ctx)
+	}()
 	t.Cleanup(func() {
 		cancel()
-		a.Stop()
+		select {
+		case <-ch:
+		case <-time.After(15 * time.Second):
+			t.Error("agent did not stop")
+		}
 	})
-	go a.Run(ctx)
+	return a, ch, runErr
+}
 
-	waitAgentReady(t, cfg.HealthAddr, 5*time.Second)
+// agentReady reports whether /readyz on a's bound health address answers 200.
+func agentReady(a *agent.Agent) bool {
+	health := a.BoundAddrs().Health
+	if health == nil {
+		return false
+	}
+	resp, err := http.Get("http://" + health.String() + "/readyz")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// startAgent starts an agent and waits until it reports ready. Run returning
+// first fails the test.
+func startAgent(t *testing.T, cfg *agentconfig.Config) *agent.Agent {
+	t.Helper()
+	a, done, runErr := launchAgent(t, cfg)
+	deadline := time.Now().Add(10 * time.Second)
+	for !agentReady(a) {
+		select {
+		case <-done:
+			t.Fatalf("agent exited before ready: %v", *runErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent not ready within 10s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	return a
 }
 
-// waitAgentReady polls the health address until it responds.
-func waitAgentReady(t *testing.T, healthAddr string, timeout time.Duration) {
+// tunnelServerAddr is the bound address of a's i-th role=server tunnel.
+func tunnelServerAddr(t *testing.T, a *agent.Agent, i int) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", healthAddr, 300*time.Millisecond)
-		if err == nil {
-			c.Close()
-			time.Sleep(200 * time.Millisecond) // let agent complete startup
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	addrs := a.BoundAddrs().TunnelServers
+	if i >= len(addrs) || addrs[i] == nil {
+		t.Fatalf("tunnel server %d not bound: %v", i, addrs)
 	}
-	t.Fatalf("agent at %s did not become ready within %v", healthAddr, timeout)
+	return addrs[i].String()
+}
+
+// importAddr is the bound address of a's import with the given key.
+func importAddr(t *testing.T, a *agent.Agent, key string) string {
+	t.Helper()
+	addr := a.BoundAddrs().Imports[key]
+	if addr == nil {
+		t.Fatalf("import %q not bound: %v", key, a.BoundAddrs().Imports)
+	}
+	return addr.String()
 }
 
 // echoRoundTrip dials addr, sends msg, reads back the echo and asserts equality.
@@ -119,8 +161,8 @@ func echoRoundTrip(t *testing.T, addr string, msg []byte) {
 func agentCfg(t *testing.T, region string) *agentconfig.Config {
 	return &agentconfig.Config{
 		Region:      region,
-		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", freePortE2E(t)),
-		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", freePortE2E(t))},
+		HealthAddr:  loopbackAny,
+		Metrics:     agentconfig.MetricsConfig{Addr: loopbackAny},
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 		TLS:         agentconfig.TLSConfig{Insecure: true},
 	}
@@ -129,8 +171,8 @@ func agentCfg(t *testing.T, region string) *agentconfig.Config {
 // agentCfgNoRegion builds a minimal agent config with no region set (FRP-style).
 func agentCfgNoRegion(t *testing.T) *agentconfig.Config {
 	return &agentconfig.Config{
-		HealthAddr:  fmt.Sprintf("127.0.0.1:%d", freePortE2E(t)),
-		Metrics:     agentconfig.MetricsConfig{Addr: fmt.Sprintf("127.0.0.1:%d", freePortE2E(t))},
+		HealthAddr:  loopbackAny,
+		Metrics:     agentconfig.MetricsConfig{Addr: loopbackAny},
 		Persistence: agentconfig.PersistenceConfig{Dir: t.TempDir()},
 		TLS:         agentconfig.TLSConfig{Insecure: true},
 	}
@@ -145,30 +187,26 @@ func TestSC1_BasicTunnel_TCP(t *testing.T) {
 	echoLn := startEchoSrv(t)
 
 	// Agent A — cloud (tunnel server + service export).
-	tunnelPort := freePortE2E(t)
 	cfgA := agentCfg(t, "cloud")
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "edge", Role: "server", ListenAddr: loopbackAny},
 	}
 	cfgA.Exports = []agentconfig.ExportConfig{
 		{Name: "echo", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
 	}
-	startAgent(t, cfgA)
+	agentA := startAgent(t, cfgA)
 
 	// Agent B — edge (tunnel client + service import).
-	importPort := freePortE2E(t)
 	cfgB := agentCfg(t, "edge")
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "cloud", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "cloud", Role: "client", RemoteAddr: tunnelServerAddr(t, agentA, 0)},
 	}
 	cfgB.Imports = []agentconfig.ImportConfig{
-		{Name: "echo", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), RemoteRegion: "cloud", Protocol: "tcp"},
+		{Name: "echo", ListenAddr: loopbackAny, RemoteRegion: "cloud", Protocol: "tcp"},
 	}
-	startAgent(t, cfgB)
+	agentB := startAgent(t, cfgB)
 
-	time.Sleep(300 * time.Millisecond)
-
-	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC1: basic tunnel OK"))
+	echoRoundTrip(t, importAddr(t, agentB, "echo"), []byte("SC1: basic tunnel OK"))
 	t.Log("PASS SC1: basic QUIC tunnel TCP forwarding")
 }
 
@@ -180,32 +218,28 @@ func TestSC2b_FRPStyle_NoRegion(t *testing.T) {
 	echoLn := startEchoSrv(t)
 
 	// Server side (frps equivalent) — no region.
-	tunnelPort := freePortE2E(t)
 	cfgS := agentCfgNoRegion(t)
 	cfgS.Auth = agentconfig.AuthConfig{Token: "changeme"}
 	cfgS.Tunnels = []agentconfig.TunnelConfig{
-		{Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{Role: "server", ListenAddr: loopbackAny},
 	}
 	cfgS.Exports = []agentconfig.ExportConfig{
 		{Name: "my-http", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
 	}
-	startAgent(t, cfgS)
+	agentS := startAgent(t, cfgS)
 
 	// Client side (frpc equivalent) — no region.
-	importPort := freePortE2E(t)
 	cfgC := agentCfgNoRegion(t)
 	cfgC.Auth = agentconfig.AuthConfig{Token: "changeme"}
 	cfgC.Tunnels = []agentconfig.TunnelConfig{
-		{Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{Role: "client", RemoteAddr: tunnelServerAddr(t, agentS, 0)},
 	}
 	cfgC.Imports = []agentconfig.ImportConfig{
-		{Name: "my-http", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), Protocol: "tcp"},
+		{Name: "my-http", ListenAddr: loopbackAny, Protocol: "tcp"},
 	}
-	startAgent(t, cfgC)
+	agentC := startAgent(t, cfgC)
 
-	time.Sleep(300 * time.Millisecond)
-
-	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC2b: FRP-style no-region OK"))
+	echoRoundTrip(t, importAddr(t, agentC, "my-http"), []byte("SC2b: FRP-style no-region OK"))
 	t.Log("PASS SC2b: FRP-style no-region tunnel")
 }
 
@@ -224,10 +258,9 @@ func TestSC3_MultiServiceMux(t *testing.T) {
 	}
 
 	// Agent A — server, exports all 10 services.
-	tunnelPort := freePortE2E(t)
 	cfgA := agentCfg(t, "cloud-mux")
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge-mux", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "edge-mux", Role: "server", ListenAddr: loopbackAny},
 	}
 	for i := range numServices {
 		cfgA.Exports = append(cfgA.Exports, agentconfig.ExportConfig{
@@ -236,26 +269,26 @@ func TestSC3_MultiServiceMux(t *testing.T) {
 			Protocol:  "tcp",
 		})
 	}
-	startAgent(t, cfgA)
+	agentA := startAgent(t, cfgA)
 
 	// Agent B — client, imports all 10 services.
-	importPorts := make([]int, numServices)
 	cfgB := agentCfg(t, "edge-mux")
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "cloud-mux", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "cloud-mux", Role: "client", RemoteAddr: tunnelServerAddr(t, agentA, 0)},
 	}
 	for i := range numServices {
-		importPorts[i] = freePortE2E(t)
 		cfgB.Imports = append(cfgB.Imports, agentconfig.ImportConfig{
 			Name:         fmt.Sprintf("svc-%02d", i),
-			ListenAddr:   fmt.Sprintf("127.0.0.1:%d", importPorts[i]),
+			ListenAddr:   loopbackAny,
 			RemoteRegion: "cloud-mux",
 			Protocol:     "tcp",
 		})
 	}
-	startAgent(t, cfgB)
-
-	time.Sleep(500 * time.Millisecond)
+	agentB := startAgent(t, cfgB)
+	importAddrs := make([]string, numServices)
+	for i := range numServices {
+		importAddrs[i] = importAddr(t, agentB, fmt.Sprintf("svc-%02d", i))
+	}
 
 	// Concurrently hit all 10 services.
 	var wg sync.WaitGroup
@@ -264,7 +297,7 @@ func TestSC3_MultiServiceMux(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			addr := fmt.Sprintf("127.0.0.1:%d", importPorts[i])
+			addr := importAddrs[i]
 			msg := []byte(fmt.Sprintf("mux-svc-%02d-ping", i))
 			c, err := net.DialTimeout("tcp", addr, 5*time.Second)
 			if err != nil {
@@ -303,42 +336,37 @@ func TestSC4_Relay(t *testing.T) {
 	echoLn := startEchoSrv(t)
 
 	// Agent B — cloud.
-	agentBTunnelPort := freePortE2E(t)
 	cfgB := agentCfg(t, "cloud-b")
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "relay-c", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", agentBTunnelPort)},
+		{RemoteRegion: "relay-c", Role: "server", ListenAddr: loopbackAny},
 	}
 	cfgB.Exports = []agentconfig.ExportConfig{
 		{Name: "relay-echo", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
 	}
-	startAgent(t, cfgB)
+	agentB := startAgent(t, cfgB)
 
 	// Agent C — relay.
-	agentCTunnelPort := freePortE2E(t)
 	cfgC := agentCfg(t, "relay-c")
 	cfgC.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge-a", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", agentCTunnelPort)},
-		{RemoteRegion: "cloud-b", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", agentBTunnelPort)},
+		{RemoteRegion: "edge-a", Role: "server", ListenAddr: loopbackAny},
+		{RemoteRegion: "cloud-b", Role: "client", RemoteAddr: tunnelServerAddr(t, agentB, 0)},
 	}
 	cfgC.Relays = []agentconfig.RelayConfig{
 		{Service: "relay-echo", FromRegion: "edge-a", ToRegion: "cloud-b", MaxHops: 3},
 	}
-	startAgent(t, cfgC)
+	agentC := startAgent(t, cfgC)
 
 	// Agent A — edge.
-	importPort := freePortE2E(t)
 	cfgA := agentCfg(t, "edge-a")
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "relay-c", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", agentCTunnelPort)},
+		{RemoteRegion: "relay-c", Role: "client", RemoteAddr: tunnelServerAddr(t, agentC, 0)},
 	}
 	cfgA.Imports = []agentconfig.ImportConfig{
-		{Name: "relay-echo", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), RemoteRegion: "relay-c", Protocol: "tcp"},
+		{Name: "relay-echo", ListenAddr: loopbackAny, RemoteRegion: "relay-c", Protocol: "tcp"},
 	}
-	startAgent(t, cfgA)
+	agentA := startAgent(t, cfgA)
 
-	time.Sleep(400 * time.Millisecond)
-
-	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC4: relay A→C→B OK"))
+	echoRoundTrip(t, importAddr(t, agentA, "relay-echo"), []byte("SC4: relay A→C→B OK"))
 	t.Log("PASS SC4: relay A → C → B")
 }
 
@@ -349,60 +377,54 @@ func TestSC4_Relay(t *testing.T) {
 // and traffic flows again.
 func TestSC5_DisconnectRecovery(t *testing.T) {
 	echoLn := startEchoSrv(t)
-	tunnelPort := freePortE2E(t)
 
 	// Agent A — server.
 	cfgA := agentCfg(t, "cloud-recovery")
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge-recovery", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "edge-recovery", Role: "server", ListenAddr: loopbackAny},
 	}
 	cfgA.Exports = []agentconfig.ExportConfig{
 		{Name: "echo-recovery", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
 	}
 	agentA := startAgent(t, cfgA)
+	tunnelAddr := tunnelServerAddr(t, agentA, 0)
 
 	// Agent B — client with fast reconnect.
-	importPort := freePortE2E(t)
 	cfgB := agentCfg(t, "edge-recovery")
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "cloud-recovery", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "cloud-recovery", Role: "client", RemoteAddr: tunnelAddr},
 	}
 	cfgB.Imports = []agentconfig.ImportConfig{
-		{Name: "echo-recovery", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), RemoteRegion: "cloud-recovery", Protocol: "tcp"},
+		{Name: "echo-recovery", ListenAddr: loopbackAny, RemoteRegion: "cloud-recovery", Protocol: "tcp"},
 	}
-	startAgent(t, cfgB)
-
-	time.Sleep(300 * time.Millisecond)
+	agentB := startAgent(t, cfgB)
+	importTarget := importAddr(t, agentB, "echo-recovery")
 
 	// Verify initial connectivity.
-	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("before-disconnect"))
+	echoRoundTrip(t, importTarget, []byte("before-disconnect"))
 	t.Log("pre-disconnect echo OK")
 
 	// Stop server-side agent (simulates disconnect).
 	agentA.Stop()
 	time.Sleep(200 * time.Millisecond)
 
-	// Restart Agent A on the same port.
-	ctxA2, cancelA2 := context.WithCancel(context.Background())
-	t.Cleanup(cancelA2)
+	// Restart Agent A on the tunnel address the client keeps dialing. This
+	// one port is necessarily re-bound by number after its release; every
+	// other listener still picks its own port.
 	cfgA2 := agentCfg(t, "cloud-recovery")
-	cfgA2.HealthAddr = cfgA.HealthAddr // keep same health addr for waitAgentReady
-	cfgA2.Tunnels = cfgA.Tunnels
+	cfgA2.Tunnels = []agentconfig.TunnelConfig{
+		{RemoteRegion: "edge-recovery", Role: "server", ListenAddr: tunnelAddr},
+	}
 	cfgA2.Exports = cfgA.Exports
 	cfgA2.TLS = cfgA.TLS
-
-	agentA2 := agent.New(cfgA2, nil)
-	go agentA2.Run(ctxA2)
-	t.Cleanup(func() { cancelA2(); agentA2.Stop() })
-
-	waitAgentReady(t, cfgA2.HealthAddr, 8*time.Second)
+	startAgent(t, cfgA2)
 	t.Log("Agent A restarted")
 
 	// Client should reconnect automatically — allow up to 10s.
 	deadline := time.Now().Add(10 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", importPort), 500*time.Millisecond)
+		c, err := net.DialTimeout("tcp", importTarget, 500*time.Millisecond)
 		if err == nil {
 			c.SetDeadline(time.Now().Add(3 * time.Second))
 			msg := []byte("after-reconnect")
@@ -430,89 +452,72 @@ func TestSC5_DisconnectRecovery(t *testing.T) {
 func TestSC6_TokenAuth_Success(t *testing.T) {
 	const token = "super-secret-token"
 	echoLn := startEchoSrv(t)
-	tunnelPort := freePortE2E(t)
 
 	// Agent A — server with token.
 	cfgA := agentCfg(t, "cloud-auth")
 	cfgA.Auth = agentconfig.AuthConfig{Token: token}
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge-auth", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "edge-auth", Role: "server", ListenAddr: loopbackAny},
 	}
 	cfgA.Exports = []agentconfig.ExportConfig{
 		{Name: "auth-echo", LocalAddr: echoLn.Addr().String(), Protocol: "tcp"},
 	}
-	startAgent(t, cfgA)
+	agentA := startAgent(t, cfgA)
 
 	// Agent B — client with matching token.
-	importPort := freePortE2E(t)
 	cfgB := agentCfg(t, "edge-auth")
 	cfgB.Auth = agentconfig.AuthConfig{Token: token}
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "cloud-auth", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "cloud-auth", Role: "client", RemoteAddr: tunnelServerAddr(t, agentA, 0)},
 	}
 	cfgB.Imports = []agentconfig.ImportConfig{
-		{Name: "auth-echo", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), RemoteRegion: "cloud-auth", Protocol: "tcp"},
+		{Name: "auth-echo", ListenAddr: loopbackAny, RemoteRegion: "cloud-auth", Protocol: "tcp"},
 	}
-	startAgent(t, cfgB)
+	agentB := startAgent(t, cfgB)
 
-	time.Sleep(300 * time.Millisecond)
-
-	echoRoundTrip(t, fmt.Sprintf("127.0.0.1:%d", importPort), []byte("SC6: auth success"))
+	echoRoundTrip(t, importAddr(t, agentB, "auth-echo"), []byte("SC6: auth success"))
 	t.Log("PASS SC6a: correct token → connection allowed")
 }
 
-// TestSC6_TokenAuth_Failure verifies that a wrong token is rejected and the
-// agent client does NOT become ready (health check never returns 200 within
-// the window because no tunnel can be established).
+// TestSC6_TokenAuth_Failure verifies that a wrong token is rejected: the
+// client agent fails startup with the server's auth rejection and never
+// reports ready, so its import never serves traffic.
 func TestSC6_TokenAuth_Failure(t *testing.T) {
-	tunnelPort := freePortE2E(t)
-
-	// Agent A — server with token "secret".
+	// Agent A — server with token "server-secret".
 	cfgA := agentCfg(t, "cloud-auth-fail")
 	cfgA.Auth = agentconfig.AuthConfig{Token: "server-secret"}
 	cfgA.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "edge-auth-fail", Role: "server", ListenAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "edge-auth-fail", Role: "server", ListenAddr: loopbackAny},
 	}
-	startAgent(t, cfgA)
+	agentA := startAgent(t, cfgA)
 
-	// Agent B — client with WRONG token; Run is expected to fail or the
-	// tunnel to remain disconnected. We confirm no traffic gets through.
-	importPort := freePortE2E(t)
+	// Agent B — client with WRONG token.
 	cfgB := agentCfg(t, "edge-auth-fail")
 	cfgB.Auth = agentconfig.AuthConfig{Token: "wrong-token"}
 	cfgB.Tunnels = []agentconfig.TunnelConfig{
-		{RemoteRegion: "cloud-auth-fail", Role: "client", RemoteAddr: fmt.Sprintf("127.0.0.1:%d", tunnelPort)},
+		{RemoteRegion: "cloud-auth-fail", Role: "client", RemoteAddr: tunnelServerAddr(t, agentA, 0)},
 	}
 	cfgB.Imports = []agentconfig.ImportConfig{
-		{Name: "should-not-connect", ListenAddr: fmt.Sprintf("127.0.0.1:%d", importPort), RemoteRegion: "cloud-auth-fail", Protocol: "tcp"},
+		{Name: "should-not-connect", ListenAddr: loopbackAny, RemoteRegion: "cloud-auth-fail", Protocol: "tcp"},
 	}
+	agentB, done, runErr := launchAgent(t, cfgB)
 
-	// Start agent B but don't require it to reach ready — it may start health
-	// server even when the tunnel is rejected.
-	ctxB, cancelB := context.WithCancel(context.Background())
-	defer cancelB()
-	agentB := agent.New(cfgB, nil)
-	defer agentB.Stop()
-	go agentB.Run(ctxB)
-
-	// Give agent B time to attempt the connection.
-	time.Sleep(1 * time.Second)
-
-	// Attempting to use the import proxy should fail (no open stream to server).
-	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", importPort), 2*time.Second)
-	if err != nil {
-		// Import listener may not even be up — that is fine; connection rejected.
-		t.Logf("PASS SC6b: import port not reachable (tunnel rejected): %v", err)
-		return
-	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(2 * time.Second))
-	c.Write([]byte("should-fail"))
-	buf := make([]byte, 20)
-	n, _ := c.Read(buf)
-	if n > 0 {
-		t.Errorf("SC6b FAIL: received data %q despite wrong token — auth not enforced", buf[:n])
-	} else {
-		t.Log("PASS SC6b: wrong token → no data returned (connection dropped by server)")
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-done:
+			if *runErr == nil || !strings.Contains((*runErr).Error(), "authentication") {
+				t.Fatalf("SC6b FAIL: Run = %v, want the server's auth rejection", *runErr)
+			}
+			t.Logf("PASS SC6b: wrong token → agent startup rejected: %v", *runErr)
+			return
+		case <-deadline:
+			t.Fatal("SC6b FAIL: agent with wrong token neither failed nor stopped within 15s")
+		default:
+		}
+		if agentReady(agentB) {
+			t.Fatal("SC6b FAIL: agent with wrong token reported ready — auth not enforced")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
