@@ -78,10 +78,15 @@ Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
   `PeerProvider` must return the configured membership, not the live peers; an
   empty peer list is refused with `ErrTombstoneGCNoPeers`.
 - Collected keys raise the store's GC horizon. `Apply`, snapshot resync
-  included, refuses an absent key at or below the horizon. Peers with a lower
-  horizon, or whose digest still holds a value collected here, are refused with
-  `ResyncRequiredError` (HTTP 410) and resync from a snapshot. A consumer position
-  below the GC floor reports `NeedsSnapshot`.
+  included, refuses an absent key at or below the horizon. A peer whose digest
+  still holds a value collected here, or whose horizon is lower and that this
+  node cannot vouch for (it did not acknowledge every tombstone removed here,
+  is below a horizon adopted from another peer, or has horizon zero while this
+  node removed something), is refused with
+  `ResyncRequiredError` (HTTP 410) and resyncs from a snapshot. A lower horizon
+  alone, as during staggered collection in a healthy cluster, is not refused.
+  Resync commits each snapshot page as one durable record (one fsync per page).
+  A consumer position below the GC floor reports `NeedsSnapshot`.
 - `DurableStore.Compact` rewrites the log as a snapshot through a synced temp
   file, rename and directory sync; `CompactionMinRecords` (default 0 = off)
   enables `CompactIfNeeded`. A directory sync failure after rename makes the

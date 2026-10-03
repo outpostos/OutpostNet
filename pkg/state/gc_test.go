@@ -317,6 +317,9 @@ func TestLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T) {
 	}
 	// node-b still has a zero horizon, so node-a refuses its next push and
 	// node-b adopts the horizon through a snapshot resync, dropping the tombstone.
+	// node-b acknowledged the collected tombstone, but a zero horizon facing a
+	// non-zero floor is never vouched (ticket 03d review C): it is also what a
+	// node whose directory was wiped looks like.
 	if err := b.sync(t); err != nil {
 		t.Fatalf("node-b sync: %v", err)
 	}

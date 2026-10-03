@@ -120,6 +120,10 @@ type PushResponse struct {
 	Rejections      []PushRejection `json:"rejections,omitempty"`
 	// GCHorizon is the receiver's GC horizon; omitted when zero.
 	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
+	// NodeID is the receiver's node ID. The pusher records it next to its push
+	// progress so that, as a responder, it can tell whether a requester
+	// acknowledged its removed tombstones. Omitted by 03b nodes.
+	NodeID string `json:"node_id,omitempty"`
 }
 
 // PushRejection explains an entry rejection.

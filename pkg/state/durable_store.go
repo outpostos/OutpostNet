@@ -31,6 +31,9 @@ const (
 	durableRecordPeerProgress = "peer_progress"
 	// durableRecordPurge commits a tombstone GC pass or a resync purge.
 	durableRecordPurge = "purge"
+	// durableRecordBatch commits the accepted entries of one resync snapshot page
+	// together: one record, one fsync.
+	durableRecordBatch = "batch"
 	// durableRecordSnapshot is the first record of a compacted log. It restores
 	// counters, HLC, horizon and floor that collected entries no longer carry.
 	durableRecordSnapshot = "snapshot"
@@ -109,10 +112,13 @@ type DurableStoreConfig struct {
 type DurableStore struct {
 	*storeCore
 
-	dir           string
-	logFile       durableLog
-	lockFile      *os.File
-	peerProgress  map[string]uint64
+	dir          string
+	logFile      durableLog
+	lockFile     *os.File
+	peerProgress map[string]uint64
+	// peerNodes maps a peer address to the node ID that last acknowledged a push
+	// there. Guarded by mu, like peerProgress.
+	peerNodes     map[string]string
 	preAppendHook func(durableRecord) error
 	wrapLog       func(durableLog) durableLog
 
@@ -149,16 +155,30 @@ type durableRecord struct {
 	Sequence      uint64 `json:"sequence"`
 	Type          string `json:"type"`
 	Entry         *Entry `json:"entry,omitempty"`
-	Peer          string `json:"peer,omitempty"`
-	Position      uint64 `json:"position,omitempty"`
+	// Batch holds the entries of a batch record with their local positions.
+	Batch    []durableBatchEntry `json:"batch,omitempty"`
+	Peer     string              `json:"peer,omitempty"`
+	Position uint64              `json:"position,omitempty"`
+	// PeerNodeID is the node ID that answered at Peer (peer_progress records).
+	PeerNodeID string `json:"peer_node_id,omitempty"`
 	// Purge fields: the horizon and floor after the purge and the exact entry
 	// identities it removed.
 	Horizon *Timestamp     `json:"horizon,omitempty"`
 	Floor   uint64         `json:"floor,omitempty"`
 	Removed []removedEntry `json:"removed,omitempty"`
+	// Adopted is the highest peer horizon adopted through resync (purge and
+	// snapshot records).
+	Adopted *Timestamp `json:"adopted,omitempty"`
 	// Snapshot header fields: the change/position counter and HLC at compaction.
 	Counter uint64     `json:"counter,omitempty"`
 	HLC     *Timestamp `json:"hlc,omitempty"`
+}
+
+// durableBatchEntry is one entry of a batch record. Entry.Position is not
+// serialized, so the local position travels next to it.
+type durableBatchEntry struct {
+	Entry    Entry  `json:"entry"`
+	Position uint64 `json:"position"`
 }
 
 // CompactionResult reports one compaction.
@@ -198,6 +218,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		dir:           cfg.Dir,
 		lockFile:      lockFile,
 		peerProgress:  make(map[string]uint64),
+		peerNodes:     make(map[string]string),
 		preAppendHook: cfg.preAppendHook,
 		wrapLog:       cfg.wrapLog,
 
@@ -205,6 +226,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		compactionMinRecords: cfg.CompactionMinRecords,
 	}
 	core.purgeHook = store.appendPurge
+	core.batchHook = store.appendBatch
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -282,6 +304,9 @@ func (s *DurableStore) PeerProgress(ctx context.Context, peer string) (uint64, e
 }
 
 // SavePeerProgress durably records a successfully acknowledged push position.
+// It does not know which node answered, so it clears the address's node
+// mapping: GossipEngine vouches for a requester only through pushes whose
+// response named the node.
 func (s *DurableStore) SavePeerProgress(ctx context.Context, peer string, position uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -289,7 +314,7 @@ func (s *DurableStore) SavePeerProgress(ctx context.Context, peer string, positi
 	if strings.TrimSpace(peer) == "" {
 		return fmt.Errorf("state peer progress peer is required")
 	}
-	return s.appendPeerProgress(peer, position)
+	return s.appendPeerProgress(peer, "", position)
 }
 
 func (s *DurableStore) openManifest() error {
@@ -449,6 +474,21 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		}
 		record.Entry.Position = record.Position
 		return s.restoreEntry(*record.Entry)
+	case durableRecordBatch:
+		if len(record.Batch) == 0 {
+			return fmt.Errorf("durable batch record has no entries")
+		}
+		for _, item := range record.Batch {
+			if item.Position == 0 {
+				return fmt.Errorf("durable batch entry %q missing local position", item.Entry.Key)
+			}
+			entry := item.Entry
+			entry.Position = item.Position
+			if err := s.restoreEntry(entry); err != nil {
+				return err
+			}
+		}
+		return nil
 	case durableRecordPeerProgress:
 		if strings.TrimSpace(record.Peer) == "" {
 			return fmt.Errorf("durable peer progress missing peer")
@@ -456,17 +496,18 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		if record.Position > s.peerProgress[record.Peer] {
 			s.peerProgress[record.Peer] = record.Position
 		}
+		s.setPeerNodeLocked(record.Peer, record.PeerNodeID)
 		return nil
 	case durableRecordSnapshot:
 		s.clock.SetAtLeast(record.Counter)
 		s.hlc.Restore(timestampValue(record.HLC))
 		s.storeCore.mu.Lock()
-		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor})
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Adopted: timestampValue(record.Adopted)})
 		s.storeCore.mu.Unlock()
 		return nil
 	case durableRecordPurge:
 		s.storeCore.mu.Lock()
-		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed})
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed, Adopted: timestampValue(record.Adopted)})
 		s.storeCore.mu.Unlock()
 		return nil
 	default:
@@ -484,25 +525,78 @@ func (s *DurableStore) appendEntry(entry Entry) error {
 	})
 }
 
+// appendBatch writes the accepted entries of one resync snapshot page as a
+// single record, so the whole page costs one fsync and is recovered all or
+// nothing.
+func (s *DurableStore) appendBatch(entries []Entry) error {
+	batch := make([]durableBatchEntry, len(entries))
+	for index, entry := range entries {
+		batch[index] = durableBatchEntry{Entry: copyEntry(entry), Position: entry.Position}
+	}
+	return s.appendRecord(durableRecord{Type: durableRecordBatch, Batch: batch}, func() {})
+}
+
 func (s *DurableStore) appendPurge(set purgeSet) error {
 	return s.appendRecord(durableRecord{
 		Type:    durableRecordPurge,
 		Horizon: timestampPtr(set.Horizon),
 		Floor:   set.Floor,
 		Removed: append([]removedEntry(nil), set.Removed...),
+		Adopted: timestampPtr(set.Adopted),
 	}, func() {})
 }
 
-func (s *DurableStore) appendPeerProgress(peer string, position uint64) error {
+func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64) error {
 	return s.appendRecord(durableRecord{
-		Type:     durableRecordPeerProgress,
-		Peer:     peer,
-		Position: position,
+		Type:       durableRecordPeerProgress,
+		Peer:       peer,
+		Position:   position,
+		PeerNodeID: nodeID,
 	}, func() {
 		if position > s.peerProgress[peer] {
 			s.peerProgress[peer] = position
 		}
+		s.setPeerNodeLocked(peer, nodeID)
 	})
+}
+
+// setPeerNodeLocked records the node that answered the latest acknowledged push
+// at peer. An empty node ID (a 03b node, a record written by 03b, or a
+// SavePeerProgress call that does not know the answering node) clears the
+// mapping: that address then vouches for nobody until a push response names
+// its node again. Callers hold s.mu or run during replay.
+func (s *DurableStore) setPeerNodeLocked(peer, nodeID string) {
+	if nodeID == "" {
+		delete(s.peerNodes, peer)
+		return
+	}
+	s.peerNodes[peer] = nodeID
+}
+
+// savePeerAck durably records an acknowledged push position together with the
+// node ID that answered at peer.
+func (s *DurableStore) savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(peer) == "" {
+		return fmt.Errorf("state peer progress peer is required")
+	}
+	return s.appendPeerProgress(peer, nodeID, position)
+}
+
+// peersAnsweringAs returns the peer addresses whose latest acknowledged push
+// was answered by nodeID.
+func (s *DurableStore) peersAnsweringAs(nodeID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var peers []string
+	for peer, id := range s.peerNodes {
+		if id == nodeID {
+			peers = append(peers, peer)
+		}
+	}
+	return peers
 }
 
 // appendRecord writes one record and syncs it before apply runs. A failed or
@@ -647,6 +741,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	entries := filterAndSortEntries(s.storeCore.entries, 0, 0)
 	horizon := s.storeCore.horizon
 	floor := s.storeCore.floor
+	adopted := s.storeCore.adopted
 	s.storeCore.mu.RUnlock()
 	counter := s.clock.Current()
 	hlc := s.hlc.Current()
@@ -668,6 +763,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 		HLC:     timestampPtr(hlc),
 		Horizon: timestampPtr(horizon),
 		Floor:   floor,
+		Adopted: timestampPtr(adopted),
 	})
 	for index := range entries {
 		entry := entries[index]
@@ -679,7 +775,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	}
 	sort.Strings(peers)
 	for _, peer := range peers {
-		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer]})
+		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer], PeerNodeID: s.peerNodes[peer]})
 	}
 	sequence := s.nextSeq
 	for index := range records {

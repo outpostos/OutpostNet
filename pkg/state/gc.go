@@ -83,6 +83,8 @@ type purgeSet struct {
 	Horizon Timestamp
 	Floor   uint64
 	Removed []removedEntry
+	// Adopted is the peer horizon adopted by a resync; zero for collection.
+	Adopted Timestamp
 }
 
 func (t Timestamp) isZero() bool { return t == Timestamp{} }
@@ -112,10 +114,31 @@ func timestampValue(ts *Timestamp) Timestamp {
 // snapshot resync. MemoryStore and DurableStore implement it.
 type gcStore interface {
 	GCHorizon() Timestamp
+	GCFloor() uint64
+	adoptedHorizon() Timestamp
 	tombstoneGCEnabled() bool
 	markReplicated()
 	collectTombstones(ctx context.Context, safePosition uint64, gated bool) (TombstoneGCResult, error)
+	applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error)
 	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error)
+}
+
+// snapshotPageResult reports how one resync snapshot page was merged.
+type snapshotPageResult struct {
+	// Applied entries changed local state.
+	Applied int
+	// Refused entries are values for keys this store collected (absent, at or
+	// below the local horizon).
+	Refused int
+}
+
+// peerAckStore is implemented by stores that persist, with each acknowledged
+// push position, the node ID that answered at that peer address. DurableStore
+// implements it; GossipEngine uses it to vouch for lower-horizon requesters
+// across restarts.
+type peerAckStore interface {
+	savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error
+	peersAnsweringAs(nodeID string) []string
 }
 
 type resyncResult struct {
@@ -136,6 +159,13 @@ func (s *storeCore) GCFloor() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.floor
+}
+
+// adoptedHorizon returns the highest peer horizon adopted through a resync.
+func (s *storeCore) adoptedHorizon() Timestamp {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.adopted
 }
 
 func (s *storeCore) tombstoneGCEnabled() bool { return s.retention > 0 }
@@ -209,6 +239,7 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	}
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
 	s.floor = maxUint64(s.floor, set.Floor)
+	s.adopted = maxTimestamp(s.adopted, set.Adopted)
 	s.clock.SetAtLeast(s.floor)
 	// Local writes must order after every removed or adopted entry; otherwise a
 	// store whose physical clock lags the horizon would issue writes at or below
@@ -252,6 +283,12 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 		result.Horizon = set.Horizon
 		return result, nil
 	}
+	// Every removal of a resync, and every part of the horizon it raises, was
+	// decided by the peer: this store cannot vouch that any requester
+	// acknowledged it. That holds even when the local horizon does not move
+	// (the peer's horizon is lower but it collected a key we still held), so the
+	// peer horizon is recorded as adopted whenever the resync changes anything.
+	set.Adopted = peerHorizon
 	if len(set.Removed) > 0 {
 		// A purged value is a visible change. It gets a fresh local position that
 		// becomes the floor, so every consumer that may hold the value re-snapshots.
@@ -279,6 +316,79 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	return result, nil
 }
 
+// applySnapshotPage merges one resync snapshot page with the same rules as
+// Apply (validation, HLC offset, LWW, local horizon refusal), but commits every
+// accepted entry of the page together: DurableStore writes them as one record
+// with one fsync instead of one per entry, and the page becomes visible only
+// after that record is durable. A page is all or nothing: an entry that fails
+// validation or the HLC offset check aborts the page before anything is
+// written, and a crash mid-write leaves an unterminated record that recovery
+// discards.
+func (s *storeCore) applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error) {
+	var result snapshotPageResult
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
+	for _, incoming := range page {
+		if err := s.policy.ValidateApply(incoming); err != nil {
+			return result, fmt.Errorf("validate snapshot entry %q: %w", incoming.Key, err)
+		}
+		if _, err := s.hlc.Update(incoming.Version.HLC); err != nil {
+			return result, fmt.Errorf("reject remote HLC for key %q from %q: %w", incoming.Key, incoming.Version.WriterNodeID, err)
+		}
+	}
+	// commitMu excludes every other mutation, so the decisions taken under the
+	// read lock still hold when the batch is installed.
+	accepted := make([]Entry, 0, len(page))
+	pending := make(map[string]int, len(page))
+	s.mu.RLock()
+	for _, incoming := range page {
+		existing, found := s.entries[incoming.Key]
+		if index, ok := pending[incoming.Key]; ok {
+			existing, found = accepted[index], true
+		}
+		if found && s.policy.CompareEntries(incoming, existing) <= 0 {
+			continue
+		}
+		if !found && s.beyondHorizonLocked(incoming) {
+			if !incoming.Deleted {
+				result.Refused++
+			}
+			continue
+		}
+		entry := copyEntry(incoming)
+		entry.Position = s.clock.Merge(maxUint64(entry.Position, entry.ChangeID.Counter))
+		if index, ok := pending[entry.Key]; ok {
+			accepted[index] = entry
+			continue
+		}
+		pending[entry.Key] = len(accepted)
+		accepted = append(accepted, entry)
+	}
+	s.mu.RUnlock()
+	if len(accepted) == 0 {
+		return result, nil
+	}
+	if s.batchHook != nil {
+		if err := s.batchHook(accepted); err != nil {
+			return result, err
+		}
+	}
+	s.mu.Lock()
+	for _, entry := range accepted {
+		s.entries[entry.Key] = entry
+	}
+	s.mu.Unlock()
+	for _, entry := range accepted {
+		s.notify(entry)
+	}
+	result.Applied = len(accepted)
+	return result, nil
+}
+
 // beyondHorizonLocked reports whether an entry for an absent key must be refused.
 func (s *storeCore) beyondHorizonLocked(entry Entry) bool {
 	return !s.horizon.isZero() && entry.Version.HLC.Compare(s.horizon) <= 0
@@ -287,8 +397,9 @@ func (s *storeCore) beyondHorizonLocked(entry Entry) bool {
 // Both stores must keep the GC surface; a regression would silently disable
 // gated collection and resync in GossipEngine.
 var (
-	_ gcStore = (*MemoryStore)(nil)
-	_ gcStore = (*DurableStore)(nil)
+	_ gcStore      = (*MemoryStore)(nil)
+	_ gcStore      = (*DurableStore)(nil)
+	_ peerAckStore = (*DurableStore)(nil)
 	_ interface {
 		CompactIfNeeded(context.Context) (bool, error)
 	} = (*DurableStore)(nil)
