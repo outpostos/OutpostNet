@@ -13,7 +13,7 @@
 | `pkg/tunnel/stream.go` | 流头 wire：`NameLen(2B)+Name`，relay 位 + HopCount；名字上限 255 | Net 通用流（名字只是流的目标标签，不承载业务语义） |
 | `pkg/tunnel/lifecycle.go` `ManagedClient` | 自动重连、指数退避、`UpdateServerAddr` 换地址重拨、在途流计数与优雅关闭 | Net 通用重连 |
 | `pkg/tunnel/server.go` `AddRoute/RemoveRoute` + `handleStream` | 按流头名字把流转发到本地 TCP 地址；无路由时走 fallback（relay） | 路由表机制属 Net；**“哪个业务服务导出到哪个本地地址”是 Service 决策** |
-| `pkg/tunnel/client.go` `Client.ServeImport` | 早期单连接版本的本地监听导入 | 历史 API，保留兼容；新代码不使用 |
+| `pkg/tunnel/client.go` `Client.ServeImport` | 早期单连接版本的本地监听导入 | 历史 API，票09 时保留兼容；票11-D 确认全组织无调用方后已删除（本地入口由 `pkg/service.Entry` 承担） |
 | `internal/agent/tunnel_manager.go` `listenAndProxy`/`listenAndProxyDynamic`/`serveImport`/`serveDynamicImport` | 导入：本地稳定监听，每个连接打开一条服务流并双向转发 | **Service 领域（导入 / 稳定入口）**，与连接管理混在同一类型里 |
 | `internal/agent/tunnel_manager.go` `startServer` 中 `for exports: srv.AddRoute` | 导出注册 | **Service 领域（导出）** |
 | `internal/agent/tunnel_manager.go` 其余（`startClient`、`AddOrUpdatePeerClient`、`DynamicClient` 等） | 按 region / node_id 管理隧道客户端 | Net 宿主（连接管理） |

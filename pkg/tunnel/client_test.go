@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"testing"
 	"time"
 
@@ -53,73 +52,6 @@ func TestClientConnectAndOpenStream(t *testing.T) {
 
 	if !bytes.Equal(buf, msg) {
 		t.Fatalf("expected %q, got %q", msg, buf)
-	}
-}
-
-func TestClientServeImport(t *testing.T) {
-	// Start a prefix-echo TCP service (simulates a remote service).
-	echoLn := startPrefixEchoServer(t, "REMOTE:")
-
-	// Start tunnel server with route.
-	srv, srvAddr := newTestServer(t)
-	srv.AddRoute("remote-svc", echoLn.Addr().String())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Create and connect client.
-	client := NewClient(ClientConfig{
-		ServerAddr: srvAddr,
-		TLS:        tlsutil.ClientTLSConfig(true),
-	}, nil)
-	defer client.Close()
-
-	if err := client.Connect(ctx); err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
-	// Start serving import on a random port.
-	importLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	importAddr := importLn.Addr().String()
-	importLn.Close() // Free the port for ServeImport.
-
-	importCtx, importCancel := context.WithCancel(ctx)
-	defer importCancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- client.ServeImport(importCtx, "remote-svc", importAddr)
-	}()
-
-	// Wait for import listener to start.
-	time.Sleep(100 * time.Millisecond)
-
-	// Connect to the import listener as a local app would.
-	conn, err := net.DialTimeout("tcp", importAddr, 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial import: %v", err)
-	}
-	defer conn.Close()
-
-	// Send data through the tunnel.
-	msg := "hello"
-	if _, err := conn.Write([]byte(msg)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// Read response (should be prefixed by remote service).
-	buf := make([]byte, 128)
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-
-	expected := fmt.Sprintf("REMOTE:%s", msg)
-	if string(buf[:n]) != expected {
-		t.Fatalf("expected %q, got %q", expected, string(buf[:n]))
 	}
 }
 

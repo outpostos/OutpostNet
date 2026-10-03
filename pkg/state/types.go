@@ -1,13 +1,11 @@
 package state
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"sync/atomic"
 )
 
@@ -27,29 +25,6 @@ func (v ProtocolVersion) String() string {
 // CompatibleWith reports whether a peer can sync with the local protocol.
 func (v ProtocolVersion) CompatibleWith(local ProtocolVersion) bool {
 	return v.Major != 0 && v.Major == local.Major
-}
-
-// UnmarshalJSON accepts object versions and legacy integer major versions.
-func (v *ProtocolVersion) UnmarshalJSON(data []byte) error {
-	data = bytes.TrimSpace(data)
-	if len(data) == 0 {
-		return fmt.Errorf("empty protocol version")
-	}
-	if data[0] == '{' {
-		type protocolVersion ProtocolVersion
-		var decoded protocolVersion
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			return err
-		}
-		*v = ProtocolVersion(decoded)
-		return nil
-	}
-	major, err := strconv.Atoi(string(data))
-	if err != nil {
-		return fmt.Errorf("decode legacy integer protocol version: %w", err)
-	}
-	*v = ProtocolVersion{Major: major}
-	return nil
 }
 
 // ChangeID identifies the original write event. Forwarding preserves it.
