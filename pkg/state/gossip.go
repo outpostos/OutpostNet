@@ -205,6 +205,9 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			slog.Debug("state gossip: peer in backoff", "peer", redactedPeerURL(addr), "until", until)
 			continue
 		}
+		// The full digest goes to every peer on every round: the responder's
+		// collected-value check depends on it (docs/state-tombstone-gc.md
+		// "Invariant: the digest must be complete").
 		digest, err := g.LocalDigest(ctx)
 		if err != nil {
 			return err
@@ -417,7 +420,10 @@ func (e *PullEntryTooLargeError) Error() string {
 		e.Key, e.Bytes, e.MaxBytes)
 }
 
-// LocalDigest returns the local summary using the engine policy.
+// LocalDigest returns the local summary using the engine policy. It lists every
+// local entry. Tombstone GC safety depends on that: see
+// docs/state-tombstone-gc.md "Invariant: the digest must be complete" before
+// sampling, sharding or truncating it.
 func (g *GossipEngine) LocalDigest(ctx context.Context) (map[string]DigestRecord, error) {
 	entries, err := g.store.ListEntries(ctx)
 	if err != nil {
@@ -852,6 +858,9 @@ func (g *GossipEngine) peersAnsweringAs(nodeID string) []string {
 // digest-side counterpart of a beyond_gc_horizon push rejection: horizons can be
 // equal while the requester still holds a value deleted and collected here (its
 // push cursor already passed it), and only its resync from us removes it.
+// Vouched requesters are checked too: this check, not vouching, is what cleans
+// up a requester holding a stale value, and it is only as complete as the digest
+// (docs/state-tombstone-gc.md "Invariant: the digest must be complete").
 func (g *GossipEngine) checkRequesterHoldsCollected(ctx context.Context, local Timestamp, digest map[string]DigestRecord) error {
 	if local.isZero() {
 		return nil

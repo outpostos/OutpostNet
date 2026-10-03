@@ -173,23 +173,47 @@ answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
 The digest check (case 2 above) and the per-entry `beyond_gc_horizon` rejection
 are unchanged and apply to vouched requesters as well.
 
-**Why this cannot resurrect a key.** A 410 never merges an entry anywhere; it
-only makes the requester replace increments by a snapshot resync. When it is
-skipped, the exchange proceeds as an ordinary push or digest pull, and every
-entry it carries still goes through the receiver's horizon rejection and LWW.
-So the guarantee "a node whose horizon covers a deleted value, or that holds the
-newer tombstone, never accepts that value" is untouched. What the 03b rule added
-on top was early cleanup of a requester that still holds a stale value. A
-vouched requester cannot hold a value suppressed by one of `R`'s own removals:
-it acknowledged the tombstone, so it holds that tombstone or something newer, or
-its own horizon refuses the value. The ways that can still fail (its state was
-restored from an older backup or wiped, or it refused the tombstone
-non-transiently) are exactly what the digest check detects on the requester's
-next anti-entropy round, which compares the full digest against `R`'s state: any
-live value `<= H_R` for a key `R` lacks is answered with 410, vouched or not.
-Removals `R` adopted from others are not vouched (`H_Q >= A_R`). The regression
-tests of 03b (three resurrection scenarios, the digest 410 and resync refusal)
-run unchanged.
+**Why this cannot resurrect a key.** The no-resurrection guarantee does not
+rest on vouching. It rests on three mechanisms, none of which vouching skips:
+
+1. **Apply horizon rejection.** Every entry merged by a push, a digest pull or a
+   snapshot resync goes through the receiver's horizon rejection and LWW, so a
+   node whose horizon covers a deleted value, or that holds the newer
+   tombstone, never accepts that value. A 410 never merges an entry anywhere; it
+   only makes the requester replace increments by a snapshot resync, and when
+   it is skipped the exchange proceeds as an ordinary push or digest pull.
+2. **Full digest check.** Every anti-entropy round sends the requester's
+   complete digest to every peer, and the responder answers 410 to any digest
+   that holds a live value `<= H_R` for a key `R` no longer has, vouched or not.
+   That is what removes a stale value from a requester that still holds it.
+3. **Per-entry rejection.** A pushed value refused as `beyond_gc_horizon`
+   makes the pusher resync from the receiver.
+
+Vouching is an optimisation that only removes resyncs the 03b rule forced on
+requesters that have nothing to clean up. It is not a proof that a vouched
+requester holds no stale value: a requester whose state was restored from an
+older backup, that refused a tombstone non-transiently, or whose address was
+taken over can be vouched and still hold one. Such a value is cleaned up by
+mechanism 2 on the requester's next anti-entropy round (or by mechanism 3 on its
+next push of that value), not by a 410 on its first exchange. The vouching rule
+is kept no weaker than its stated scope: a removal `R` performed on another
+node's behalf (adopted through a resync, whether or not it raised `H_R`) is never
+vouched (`H_Q >= A_R`), a zero horizon is never vouched once `R` removed
+anything, and an address that stops sending `node_id` stops vouching.
+The 03b regression tests (three resurrection scenarios, the digest 410 and the
+resync refusal) run unchanged; with vouching forced on for every identified
+requester they fail only on their "requester was resynced" assertions, never by
+resurrecting a key, which is the evidence that safety does not depend on it.
+
+**Invariant: the digest must be complete.** Mechanism 2 only works because the
+digest of every anti-entropy round lists every local entry and is sent to every
+peer. A digest must not be sampled, sharded across rounds, truncated, or skipped
+for some peers or rounds (for example as a bandwidth optimisation): any of these
+lets a requester keep, serve and pass on a value deleted and collected
+elsewhere for as long as the omitted key is not offered, and with vouching that
+requester is not otherwise forced to resync. Changing the digest requires
+replacing this argument first. `GossipEngine.LocalDigest`, `AntiEntropyOnce` and
+`checkRequesterHoldsCollected` point back here.
 
 **Healthy cluster.** With stable membership, every member acknowledged every
 collected tombstone before any node collected it (the GC gate), no node holds a
