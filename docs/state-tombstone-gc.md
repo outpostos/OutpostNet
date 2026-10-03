@@ -73,14 +73,22 @@ exact identities removed) is committed before the entries leave memory.
 * **Horizon handshake (stale peers are forced to resync).** Push and digest
   pull requests carry the requester's horizon (`gc_horizon`, omitted when zero).
   A responder refuses the incremental exchange with `ResyncRequiredError`
-  (HTTP `410 Gone` + `gc_horizon`) when its horizon is higher, or when a digest
-  pull's digest holds a live value for a key the responder no longer has at or
-  below its horizon (the requester still holds something deleted and collected
-  here, even if the horizons are equal and its push cursor already passed that
-  value). The requester then performs a snapshot resync from that peer instead
-  of exchanging increments. A pushed entry that the receiver refuses
-  individually (`beyond_gc_horizon` rejection, receiver horizon in
-  `PushResponse.gc_horizon`) also triggers a resync of the pusher.
+  (HTTP `410 Gone` + `gc_horizon`) in two cases:
+  1. **Unvouched lower horizon**: the requester's horizon is lower than the
+     responder's *and* the responder cannot vouch that the requester received
+     every tombstone the responder removed (see "Requester horizon check" below;
+     ticket 03d). A lower horizon alone no longer forces a resync: in a healthy
+     cluster nodes collect the same tombstones on different ticks, and the one
+     that has not collected yet still holds the tombstones.
+  2. **Digest holds a collected value**: a digest pull's digest holds a live
+     value for a key the responder no longer has at or below its horizon (the
+     requester still holds something deleted and collected here, even if the
+     horizons are equal and its push cursor already passed that value).
+
+  The requester then performs a snapshot resync from that peer instead of
+  exchanging increments. A pushed entry that the receiver refuses individually
+  (`beyond_gc_horizon` rejection, receiver horizon in `PushResponse.gc_horizon`)
+  also triggers a resync of the pusher.
 * **Snapshot resync.** The resyncing node pages through the peer's full state
   (`PullRequest{SincePosition, Limit, MaxBytes}` without digest, never refused)
   and applies each page as it arrives through normal `Apply` (LWW plus the local
@@ -104,6 +112,69 @@ exact identities removed) is committed before the entries leave memory.
   value re-read or re-snapshot.
 * **Consumers.** `CheckConsumerPosition(p)` returns `NeedsSnapshot` when
   `0 < p < floor`, because the position may precede a removed tombstone.
+
+### Requester horizon check (ticket 03d)
+
+03b refused every incremental exchange from a requester whose horizon was lower.
+Horizons only say "entries at or below this HLC were removed here"; a lower
+requester horizon does not mean the requester holds a value those removals
+suppress. Every node collects a tombstone only after all members acknowledged
+it, but each node does so on its own maintenance tick, so in a healthy cluster
+horizons are unequal most of the time and the old rule forced full snapshot
+resyncs back and forth (measured: 152 resyncs in 240 rounds of a two-replica TTL
+load, 342 with three replicas, `TestHealthyStaggeredGCNeverForcesResync` before
+the change).
+
+**Rule.** Responder `R` (horizon `H_R`, GC floor `F_R`, adopted horizon `A_R`)
+answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
+`SourceNodeID`) with 410 for a lower horizon only when `H_Q < H_R` and `Q` is not
+*vouched*. `Q` is vouched when both hold:
+
+* **Acknowledged every own removal**: `R`'s push progress towards the address
+  that answered as node `Q` is `>= F_R`. Every tombstone `R` collected has a
+  local position `<= F_R`, so a push `Q` answered carried it (or `Q` already had
+  a newer entry, or its own horizon covered it). `R` learns which node answers
+  at an address from the optional `node_id` of the push response and keeps it
+  next to the push progress (`DurableStore` persists it in the `peer_progress`
+  record). A requester `R` never pushed to, or whose responses carry no
+  `node_id` (a 03b node), is not vouched.
+* **No unvouched adopted removals**: `H_Q >= A_R`, where `A_R` is the highest
+  peer horizon `R` adopted through a snapshot resync. `R` cannot vouch for
+  removals another node performed, so for those the 03b comparison applies.
+
+The digest check (case 2 above) and the per-entry `beyond_gc_horizon` rejection
+are unchanged and apply to vouched requesters as well.
+
+**Why this cannot resurrect a key.** A 410 never merges an entry anywhere; it
+only makes the requester replace increments by a snapshot resync. When it is
+skipped, the exchange proceeds as an ordinary push or digest pull, and every
+entry it carries still goes through the receiver's horizon rejection and LWW.
+So the guarantee "a node whose horizon covers a deleted value, or that holds the
+newer tombstone, never accepts that value" is untouched. What the 03b rule added
+on top was early cleanup of a requester that still holds a stale value. A
+vouched requester cannot hold a value suppressed by one of `R`'s own removals:
+it acknowledged the tombstone, so it holds that tombstone or something newer, or
+its own horizon refuses the value. The ways that can still fail (its state was
+restored from an older backup or wiped, or it refused the tombstone
+non-transiently) are exactly what the digest check detects on the requester's
+next anti-entropy round, which compares the full digest against `R`'s state: any
+live value `<= H_R` for a key `R` lacks is answered with 410, vouched or not.
+Removals `R` adopted from others are not vouched (`H_Q >= A_R`). The regression
+tests of 03b (three resurrection scenarios, the digest 410 and resync refusal)
+run unchanged.
+
+**Healthy cluster.** With stable membership, every member acknowledged every
+collected tombstone before any node collected it (the GC gate), no node holds a
+value below another node's horizon for a key the other lacks, no push entry is
+refused and no resync adopts anything. Every lower-horizon request comes from a
+vouched member, so no 410 is sent and no resync runs.
+
+**Mixed versions.** No request field changes; the push response gains the
+optional `node_id`. A 03b responder ignores vouching and keeps refusing lower
+horizons, which a 03d requester handles by resyncing as before. A 03d responder
+never vouches a 03b requester (no `node_id` in its push responses), so it applies
+the 03b rule to it. A mixed cluster is therefore as safe as 03b and only pairs
+with a 03b node keep the resync churn.
 
 ### Trade-off: peer acknowledgement vs. retention
 
