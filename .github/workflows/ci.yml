@@ -63,7 +63,7 @@ jobs:
       - name: Vet
         run: make vet
 
-      - name: Test
+      - name: Test (race)
         run: make test
 
       - name: Build agent

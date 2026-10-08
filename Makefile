@@ -84,7 +84,7 @@ install: build
 # Test targets
 test:
 	@echo "Running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST) -race -count=1 ./...
 
 test-verbose:
 	@echo "Running tests with verbose output..."
