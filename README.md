@@ -68,7 +68,21 @@ done
 
 The build needs read access to the private module `github.com/outpostos/OutpostRange`,
 passed only as a BuildKit secret (never a build arg or a copied file); without it the
-build fails. Base images come from Huawei SWR (`swr.cn-east-3.myhuaweicloud.com/risecloud`).
+build fails. When the key is held in a variable (for example the CI secret
+`OUTPOSTRANGE_DEPLOY_KEY`), write it to a 0600 file and pass the file with `src=`,
+then delete it:
+
+```bash
+keyfile=$(mktemp); trap 'rm -f "$keyfile"' EXIT
+( umask 077; printf '%s\n' "$OUTPOSTRANGE_DEPLOY_KEY" > "$keyfile" )
+docker build --target outpostnet-controller -t outpostnet-controller:latest \
+  --secret id=outpostrange_deploy_key,src="$keyfile" .
+```
+
+Do not use the secret's `env=` form. GitHub strips the trailing newline from stored
+secrets, `env=` hands the value to BuildKit unchanged, and OpenSSH rejects a private
+key without its trailing newline (`error in libcrypto: unsupported`). `printf '%s\n'`
+restores the newline. Base images come from Huawei SWR (`swr.cn-east-3.myhuaweicloud.com/risecloud`).
 Where `proxy.golang.org` is unreachable add `--build-arg GOPROXY=<module proxy>`.
 
 Build from source:

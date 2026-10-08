@@ -10,10 +10,19 @@
 #       [--build-arg VERSION=... --build-arg COMMIT=... --build-arg BUILD_TIME=...] .
 #   done
 #
-# The key may also come from the environment:
-# --secret id=outpostrange_deploy_key,env=OUTPOSTRANGE_DEPLOY_KEY (the read-only
-# deploy key CI holds as the OUTPOSTRANGE_DEPLOY_KEY secret). The secret is
-# required; the build fails without it.
+# When the key is held in a variable (CI keeps it as the OUTPOSTRANGE_DEPLOY_KEY
+# secret), write it to a 0600 file first and pass that file with src=, then
+# delete it:
+#
+#   keyfile=$(mktemp); trap 'rm -f "$keyfile"' EXIT
+#   ( umask 077; printf '%s\n' "$OUTPOSTRANGE_DEPLOY_KEY" > "$keyfile" )
+#   docker build ... --secret id=outpostrange_deploy_key,src="$keyfile" .
+#
+# Do not pass the variable with the secret's env= form. GitHub strips the
+# trailing newline from stored secrets, env= hands the value to BuildKit as is,
+# and OpenSSH rejects a private key without its trailing newline ("error in
+# libcrypto: unsupported"); printf '%s\n' restores it. The secret is required;
+# the build fails without it.
 #
 # Base images come only from Huawei SWR (risecloud namespace). Do not point FROM
 # at Docker Hub or ghcr directly; sync missing upstream images into SWR first.

@@ -14,6 +14,7 @@ Outpost OS four-layer refactor (Net state primitives / Service stable access / R
 
 ### Documentation
 - `docs/service-migration.md`: moving stable entries from the combined `outpostnet-agent` (`imports`/`exports`) to `outpostnet-service` — config mapping, phased order, mixed-period behavior, rollback; example configs in `examples/migration/` are loaded by tests.
+- Dockerfile header and README "Kubernetes": when the deploy key is held in a variable, write it with `printf '%s\n'` to a 0600 file, pass it as `--secret id=outpostrange_deploy_key,src=<file>` and delete it afterwards. The earlier `env=` suggestion fails: GitHub strips the trailing newline from stored secrets and OpenSSH rejects the key (`error in libcrypto: unsupported`). Guarded by `TestBuildDocsPassDeployKeyAsFile`.
 
 ### Removed
 - `pkg/tunnel`: `Client.ServeImport` (use `pkg/service` entries or `outpostnet-service`).
