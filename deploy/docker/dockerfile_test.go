@@ -153,6 +153,41 @@ func TestDockerfilePrivateModulesUseBuildSecrets(t *testing.T) {
 	}
 }
 
+// secretFromEnv matches a BuildKit secret taken from an environment variable:
+// --secret id=<id>,env=<VAR> (in any key order) or --secret env=<VAR>.
+var secretFromEnv = regexp.MustCompile(`(?:--secret[= ]|\bid=[\w.-]+,)(?:[\w-]+=[^,\s]*,)*env=`)
+
+// TestBuildDocsPassDeployKeyAsFile guards the build instructions: the deploy
+// key must be written to a 0600 file with a trailing newline and passed with
+// --secret id=...,src=<file>, never --secret id=...,env=<VAR>. GitHub strips the
+// trailing newline from stored secrets, env= hands the value to BuildKit as is,
+// and OpenSSH rejects a private key without the trailing newline ("error in
+// libcrypto: unsupported").
+func TestBuildDocsPassDeployKeyAsFile(t *testing.T) {
+	var files []string
+	for _, pattern := range []string{"Dockerfile", "*.md", "docs/*.md", "docs/*/*.md", "hack/*.sh", "deploy/*.md", "deploy/*/*.md", ".github/workflows/*.yml"} {
+		m, err := filepath.Glob(filepath.Join(repoRoot, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, m...)
+	}
+	if len(files) == 0 {
+		t.Fatal("found no build documentation; the scan patterns are stale")
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if secretFromEnv.MatchString(line) {
+				t.Errorf("%s:%d recommends --secret ...,env=; write the key to a 0600 file with printf '%%s\\n' and pass src= instead", f, i+1)
+			}
+		}
+	}
+}
+
 // TestDockerignoreKeepsCredentialsOutOfContext guards the build context: the
 // builder runs COPY . ., so a stray key file in the working tree would land in
 // a builder layer unless .dockerignore excludes it.
