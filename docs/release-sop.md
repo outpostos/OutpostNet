@@ -45,9 +45,11 @@ hack/e2e-cross-region.sh
 ```
 
 These scripts run in a Kubernetes cluster and expect the images named in each
-script header (for example `outpostnet-agent:latest`) to be present already.
-The repository has no Dockerfile or image build target (the Dockerfiles were
-deleted in v1.0.1), so provide the images out of band before running them.
+script header (for example `outpostnet-agent:latest`) to be present on the
+nodes. Build them from the repository `Dockerfile` (one target per image, the
+OutpostRange read-only deploy key passed as the BuildKit secret
+`outpostrange_deploy_key`; see README "Kubernetes") and load them into the
+cluster before running the scripts.
 
 Verify TCP tunnel connectivity across supported cross-node scenarios. UDP is verified only node-local (outpostnet-server + outpostnet-sidecar, `TestUDPEndToEnd`); cross-node UDP over the QUIC tunnel is not implemented.
 

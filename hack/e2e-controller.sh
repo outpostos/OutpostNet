@@ -12,6 +12,8 @@
 # Prerequisites:
 #   - kubectl configured and pointing to a cluster
 #   - Docker images built: outpostnet-server, outpostnet-sidecar, outpostnet-controller
+#     (docker build --target <image> -t <image>:latest from the repository
+#     Dockerfile, see README "Kubernetes"; loaded onto the cluster nodes)
 #
 # Usage:
 #   ./hack/e2e-controller.sh           # run full test

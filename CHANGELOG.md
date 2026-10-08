@@ -9,6 +9,7 @@ Outpost OS four-layer refactor (Net state primitives / Service stable access / R
 ### Added
 - `pkg/state`: generic state replication primitives — memory and durable stores, gossip push/pull and anti-entropy over authenticated `/state/v1`, tombstone GC with GC horizon and snapshot resync, durable log compaction, read-only `ReplicationStatus` including push-round catch-up (`OutboundRoundCaughtUp`, `OutboundRoundTime`). Used by OutpostMesh and OutpostLet.
 - `outpostnet-service`: OutpostService stable entries for `<service>@<node_id>`; included in `make release`.
+- `Dockerfile` for the images the Kubernetes entries reference (`outpostnet-controller`, `outpostnet-server`, `outpostnet-sidecar`, `outpostnet-agent`; `docker build --target <name>`). Base images come from Huawei SWR; the private OutpostRange module is fetched with a read-only deploy key passed as the required BuildKit secret `outpostrange_deploy_key`. Static guards in `deploy/docker/dockerfile_test.go`.
 - Loopback OutpostRange observation endpoints on `outpostnet-agent` (`--observation-addr`, default `127.0.0.1:17960`) and `outpostnet-service` (default `127.0.0.1:17961`). Upgrade OutpostRange before these components.
 
 ### Documentation
