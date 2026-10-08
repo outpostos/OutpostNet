@@ -1,0 +1,27 @@
+# Build context for Dockerfile. The builder runs COPY . ., so everything not
+# excluded here lands in a builder layer.
+
+# VCS and local tooling
+.git
+.github
+.claude
+_bmad
+_bmad-output
+build
+*.log
+
+# Not needed to compile cmd/ (docs, the separate v1-legacy module)
+docs
+v1-legacy
+
+# Credentials must never enter the build context (deploy keys come only from
+# BuildKit secrets, see Dockerfile).
+**/.ssh
+**/*.key
+**/*.pem
+**/*.crt
+**/id_rsa*
+**/id_ed25519*
+**/.env*
+**/.dev.vars*
+**/*-secret.yaml

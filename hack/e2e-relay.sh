@@ -11,6 +11,8 @@
 # Prerequisites:
 #   - kubectl configured and pointing to a cluster
 #   - Docker images built: outpostnet-agent:latest
+#     (docker build --target <image> -t <image>:latest from the repository
+#     Dockerfile, see README "Kubernetes"; loaded onto the cluster nodes)
 #
 # Usage:
 #   ./hack/e2e-relay.sh           # run full test

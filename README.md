@@ -52,6 +52,25 @@ sudo mv outpostnet-agent-v2.0.0-darwin-amd64 /usr/local/bin/outpostnet-agent
 kubectl apply -f https://github.com/outpostos/OutpostNet/releases/download/v2.0.0/outpostnet-k8s.yaml
 ```
 
+The manifests (this one, [deploy/](deploy/), [deploy/kustomize/](deploy/kustomize/))
+reference `outpostnet-controller:latest`, `outpostnet-server:latest` and
+`outpostnet-sidecar:latest` (the standalone overlay also `outpostnet-agent:latest`).
+These are unqualified local names (`imagePullPolicy: IfNotPresent`). Build them with the
+repository [Dockerfile](Dockerfile), one target per image, then load them onto the nodes
+(or push them to your registry and point the manifests there):
+
+```bash
+for c in outpostnet-controller outpostnet-server outpostnet-sidecar outpostnet-agent; do
+  docker build --target "$c" -t "$c:latest" \
+    --secret id=outpostrange_deploy_key,src=<OutpostRange read-only deploy key file> .
+done
+```
+
+The build needs read access to the private module `github.com/outpostos/OutpostRange`,
+passed only as a BuildKit secret (never a build arg or a copied file); without it the
+build fails. Base images come from Huawei SWR (`swr.cn-east-3.myhuaweicloud.com/risecloud`).
+Where `proxy.golang.org` is unreachable add `--build-arg GOPROXY=<module proxy>`.
+
 Build from source:
 
 Building from source needs the private observation contract module

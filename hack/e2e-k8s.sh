@@ -4,6 +4,8 @@
 # Prerequisites:
 #   - kubectl configured and pointing to a cluster
 #   - Docker images built: outpostnet-server:latest, outpostnet-sidecar:latest
+#     (docker build --target <image> -t <image>:latest from the repository
+#     Dockerfile, see README "Kubernetes"; loaded onto the cluster nodes)
 #
 # Usage:
 #   ./hack/e2e-k8s.sh           # run full test
