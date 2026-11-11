@@ -86,12 +86,9 @@ git status
 
 # Create annotated tag
 git tag -a v1.X.Y -m "OutpostNet v1.X.Y"
-
-# Verify version injection
-go run ./cmd/outpostnet-agent version
 ```
 
-The version package (`pkg/version`) injects `gitVersion`, `gitCommit`, and `buildDate` via `-ldflags` at build time.
+The version package (`pkg/version`) injects `gitVersion`, `gitCommit`, and `buildDate` via `-ldflags` at build time. `go run` does not pass those flags, so it prints `v0.0.0-dev` and cannot validate the injected metadata — verify it on the built artifact instead (see 2.3).
 
 ### 2.2 Build All Artifacts
 
@@ -112,12 +109,14 @@ This target:
 # Count: should be 20
 ls build/release/*.tar.gz | wc -l
 
-# Spot-check: extract and verify version
+# Spot-check: extract and verify the injected version metadata
 tar xzf build/release/outpostnet-agent-v1.X.Y-linux-amd64.tar.gz
-./outpostnet-agent-v1.X.Y-linux-amd64 version
+./outpostnet-agent-v1.X.Y-linux-amd64 --version
 ```
 
 Expected output includes: git version, commit hash, build date, Go version, platform.
+
+Use `--version` for every component. Only agent, server, sidecar, and controller also accept a `version` subcommand; `outpostnet-service` does not, so `outpostnet-service version` is parsed as an ordinary start and fails with `Error: --config is required`. `--version` is the portable form across all five components.
 
 ## Phase 3: Publish
 
