@@ -4,7 +4,7 @@ Standard Operating Procedure for releasing OutpostNet versions. This document co
 
 ## Overview
 
-OutpostNet releases produce **20 artifacts** (5 components x 4 platforms; v1.0.x–v2.0.0 shipped 16, before `outpostnet-service` existed) as compressed tarballs, published via GitHub Releases. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
+OutpostNet releases produce **20 artifacts** (5 components x 4 platforms; v1.0.x–v2.0.0 shipped 16, before `outpostnet-service` existed) as compressed tarballs, published via GitHub Releases. Each release also publishes the single-file Kubernetes manifest `outpostnet-k8s.yaml` and a `SHA256SUMS` checksum file covering every archive and the manifest. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
 
 ### Components
 
@@ -104,7 +104,11 @@ This target:
 2. Cross-compiles all 5 components (`RELEASE_COMPONENTS`) for all 4 platforms (`RELEASE_PLATFORMS`) with `CGO_ENABLED=0` (static linking)
 3. Strips debug symbols (`-s -w`) for smaller binaries
 4. Packages each binary as `<component>-<VERSION>-<os>-<arch>.tar.gz`
-5. Outputs to `build/release/`
+5. Generates `outpostnet-k8s.yaml` from `deploy/kustomize/base`, pinning every image tag to `<VERSION>` (`kubectl` must be on `PATH`, or set `KUSTOMIZE` to another kustomize-compatible command)
+6. Writes `SHA256SUMS` covering every archive and `outpostnet-k8s.yaml`
+7. Outputs everything to `build/release/`
+
+The `release` target removes stale `*.tar.gz` files from `build/release/` first, so the checksums and the publish glob cannot pick up artifacts from an older release.
 
 ### 2.3 Verify Artifacts
 
@@ -115,32 +119,47 @@ ls build/release/*.tar.gz | wc -l
 # Spot-check: extract and verify version
 tar xzf build/release/outpostnet-agent-v1.X.Y-linux-amd64.tar.gz
 ./outpostnet-agent-v1.X.Y-linux-amd64 version
+
+# Verify the manifest renders offline, its image tags, and the checksums
+kubectl kustomize deploy/kustomize/base > /dev/null
+grep -E "image: outpostnet-.*v1.X.Y" build/release/outpostnet-k8s.yaml
+make release-verify          # runs: (cd build/release && sha256sum -c SHA256SUMS)
 ```
 
-Expected output includes: git version, commit hash, build date, Go version, platform.
+Expected output includes: git version, commit hash, build date, Go version, platform, and one `OK` line per checksummed file.
 
 ## Phase 3: Publish
 
-### 3.1 Push Tag
+### 3.1 Push Tag (automated release)
 
 ```bash
 git push origin v1.X.Y
 ```
 
-### 3.2 Create GitHub Release
+Pushing a `v*.*.*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml). The workflow runs `make release` (which verifies the checksums before finishing), then creates the GitHub Release with:
+
+- all 20 `<component>-<VERSION>-<os>-<arch>.tar.gz` archives
+- `outpostnet-k8s.yaml`
+- `SHA256SUMS`
+
+### 3.2 Create a GitHub Release manually
+
+Use this path only when publishing a release built locally (for example, when the workflow did not run). Do not run it after the workflow has already created the release for the same tag.
 
 ```bash
 gh release create v1.X.Y \
   --title "OutpostNet v1.X.Y" \
   --notes-file CHANGELOG_EXCERPT.md \
-  build/release/*.tar.gz
+  build/release/*.tar.gz \
+  build/release/outpostnet-k8s.yaml \
+  build/release/SHA256SUMS
 ```
 
 Or create via GitHub UI:
 1. Go to Releases > Draft a new release
 2. Select the tag `v1.X.Y`
 3. Paste release notes from CHANGELOG.md
-4. Upload all 20 artifacts from `build/release/`
+4. Upload all 20 archives, `outpostnet-k8s.yaml`, and `SHA256SUMS` from `build/release/`
 
 ### 3.3 Update Landing Page
 
@@ -160,6 +179,13 @@ After pushing the landing page changes, verify [net.outpostos.com](https://net.o
 - [ ] GitHub Release page loads correctly
 - [ ] All 20 artifact download links work
 - [ ] Binary extracts and runs `--version` on at least one platform
+- [ ] `SHA256SUMS` is attached and `sha256sum -c SHA256SUMS` passes after downloading every asset
+- [ ] `outpostnet-k8s.yaml` is attached and its image tags match the release version
+
+```bash
+# In a directory containing all downloaded release assets:
+sha256sum -c SHA256SUMS
+```
 
 ### 4.2 Documentation Links
 
@@ -198,6 +224,8 @@ outpostnet-agent-v1.0.1-darwin-arm64.tar.gz
 outpostnet-server-v1.0.1-linux-arm64.tar.gz
 ```
 
+The release also ships two non-archive files: `outpostnet-k8s.yaml` (Kubernetes manifest) and `SHA256SUMS` (checksums for all archives and the manifest).
+
 ## Version History
 
 | Version | Date | Type | Notes |
@@ -207,7 +235,9 @@ outpostnet-server-v1.0.1-linux-arm64.tar.gz
 
 ## References
 
-- Makefile release target: `release` (`RELEASE_COMPONENTS`, `RELEASE_PLATFORMS`)
+- Makefile release targets: `release`, `release-archives`, `release-manifest`, `release-checksums`, `release-verify`
+- Release workflow: `.github/workflows/release.yml` (tag push builds and publishes all artifacts)
+- Kustomize base for the release manifest: `deploy/kustomize/base/`
 - Version injection: `pkg/version/version.go`
 - Config schema: `pkg/agentconfig/`
 - Example configs: `deploy/examples/`
