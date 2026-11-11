@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -311,6 +312,40 @@ func TestStableEntryFollowsReplacedInstance(t *testing.T) {
 	askEventually(t, entry, "v3:hello")
 	if got, err := kept.ask("after"); err != nil || got != "v2:after" {
 		t.Fatalf("established stream after export move = %q, %v (want v2:after)", got, err)
+	}
+}
+
+// ApplyExports applies routes on every tunnel server but must report each
+// affected name once, not once per server.
+func TestApplyExportsMergesChangesAcrossServers(t *testing.T) {
+	appV1 := startApp(t, "v1")
+	appV2 := startApp(t, "v2")
+	cfg := exportingNode(t, "node-multi", appV1, token)
+	cfg.Tunnels = []agentconfig.TunnelConfig{
+		{Role: "server", ListenAddr: "127.0.0.1:0"},
+		{Role: "server", ListenAddr: "127.0.0.1:0"},
+	}
+	r := startHost(t, cfg)
+	if got := len(r.h.TunnelAddrs()); got != 2 {
+		t.Fatalf("tunnel listeners = %d, want 2", got)
+	}
+
+	ch := r.h.ApplyExports([]agentconfig.ExportConfig{
+		{Name: "echo", LocalAddr: appV2, Protocol: "tcp"},
+		{Name: "extra", LocalAddr: appV1, Protocol: "tcp"},
+	})
+	if !reflect.DeepEqual(ch.Updated, []string{"echo"}) ||
+		!reflect.DeepEqual(ch.Added, []string{"extra"}) ||
+		len(ch.Removed) != 0 {
+		t.Fatalf("apply with two servers = %+v, want updated=[echo] added=[extra]", ch)
+	}
+
+	ch = r.h.ApplyExports([]agentconfig.ExportConfig{
+		{Name: "extra", LocalAddr: appV1, Protocol: "tcp"},
+	})
+	if !reflect.DeepEqual(ch.Removed, []string{"echo"}) ||
+		len(ch.Added) != 0 || len(ch.Updated) != 0 {
+		t.Fatalf("apply after removing echo = %+v, want removed=[echo]", ch)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
@@ -227,8 +228,23 @@ func (h *Host) ApplyExports(next []agentconfig.ExportConfig) service.ExportChang
 	next = append([]agentconfig.ExportConfig(nil), next...)
 	var ch service.ExportChanges
 	if h.tunnels != nil {
+		// Every server routes the same export set, so their change reports
+		// agree; dedup by name to keep the merged report stable anyway.
+		seen := make(map[string]struct{})
+		add := func(dst *[]string, names []string) {
+			for _, name := range names {
+				if _, ok := seen[name]; ok {
+					continue
+				}
+				seen[name] = struct{}{}
+				*dst = append(*dst, name)
+			}
+		}
 		for _, srv := range h.tunnels.Servers() {
-			ch = service.ApplyExports(srv, h.exports, next)
+			part := service.ApplyExports(srv, h.exports, next)
+			add(&ch.Added, part.Added)
+			add(&ch.Updated, part.Updated)
+			add(&ch.Removed, part.Removed)
 		}
 	}
 	h.exports = next
@@ -281,8 +297,14 @@ func (h *Host) reload(next *service.Config) {
 
 // sameRestartScope compares everything Run reads at startup except exports.
 func sameRestartScope(a, b *service.Config) bool {
-	return fmt.Sprint(a.NodeID, a.Tunnels, a.Imports, a.TLS, a.Auth, a.Management, a.HealthAddr, a.Peers) ==
-		fmt.Sprint(b.NodeID, b.Tunnels, b.Imports, b.TLS, b.Auth, b.Management, b.HealthAddr, b.Peers)
+	return a.NodeID == b.NodeID &&
+		reflect.DeepEqual(a.Tunnels, b.Tunnels) &&
+		reflect.DeepEqual(a.Imports, b.Imports) &&
+		reflect.DeepEqual(a.TLS, b.TLS) &&
+		reflect.DeepEqual(a.Auth, b.Auth) &&
+		reflect.DeepEqual(a.Management, b.Management) &&
+		a.HealthAddr == b.HealthAddr &&
+		reflect.DeepEqual(a.Peers, b.Peers)
 }
 
 // TunnelAddrs returns the bound addresses of this node's tunnel listeners.

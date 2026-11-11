@@ -3,6 +3,7 @@ package state
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -328,8 +329,10 @@ func (h *httpHandler) preflight(w http.ResponseWriter, r *http.Request, method s
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Sprintf("method %s not allowed", r.Method))
 		return false
 	}
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") ||
-		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != h.authToken {
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, prefix) ||
+		subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(h.authToken)) != 1 {
 		writeJSONError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 		return false
 	}
