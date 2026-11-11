@@ -120,8 +120,8 @@ ls build/release/*.tar.gz | wc -l
 tar xzf build/release/outpostnet-agent-v1.X.Y-linux-amd64.tar.gz
 ./outpostnet-agent-v1.X.Y-linux-amd64 version
 
-# Verify the manifest, image tags, and checksums
-kubectl apply --dry-run=client --validate=false -f build/release/outpostnet-k8s.yaml
+# Verify the manifest renders offline, its image tags, and the checksums
+kubectl kustomize deploy/kustomize/base > /dev/null
 grep -E "image: outpostnet-.*v1.X.Y" build/release/outpostnet-k8s.yaml
 make release-verify          # runs: (cd build/release && sha256sum -c SHA256SUMS)
 ```
@@ -136,7 +136,7 @@ Expected output includes: git version, commit hash, build date, Go version, plat
 git push origin v1.X.Y
 ```
 
-Pushing a `v*.*.*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml). The workflow runs `make release` and `make release-verify`, then creates the GitHub Release with:
+Pushing a `v*.*.*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml). The workflow runs `make release` (which verifies the checksums before finishing), then creates the GitHub Release with:
 
 - all 20 `<component>-<VERSION>-<os>-<arch>.tar.gz` archives
 - `outpostnet-k8s.yaml`

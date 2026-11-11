@@ -227,6 +227,13 @@ release-manifest:
 
 release-checksums:
 	@echo "Generating SHA256SUMS..."
+	@stale=$$(cd $(RELEASE_DIR) && ls *.tar.gz 2>/dev/null | grep -vF -- "-$(VERSION)-" || true); \
+	if [ -n "$$stale" ]; then \
+		echo "error: $(RELEASE_DIR) contains archives for another version:" >&2; \
+		echo "$$stale" >&2; \
+		echo "run 'make release' (which removes stale archives) or delete them first" >&2; \
+		exit 1; \
+	fi
 	@cd $(RELEASE_DIR) && sha256sum *.tar.gz $(K8S_MANIFEST) > SHA256SUMS.tmp
 	@cd $(RELEASE_DIR) && mv SHA256SUMS.tmp SHA256SUMS
 	@echo "Checksums written to $(RELEASE_DIR)/SHA256SUMS"
