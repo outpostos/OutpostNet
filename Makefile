@@ -42,7 +42,17 @@ RELEASE_PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller outpostnet-service
 RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gitCommit=$(COMMIT) -X $(VERSION_PKG).buildDate=$(BUILD_TIME)"
 
+# Release artifacts
+RELEASE_DIR = $(BUILD_DIR)/release
+K8S_MANIFEST = outpostnet-k8s.yaml
+K8S_IMAGES = outpostnet-controller outpostnet-server outpostnet-sidecar
+KUSTOMIZE ?= kubectl kustomize
+
 .PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release
+.PHONY: release-archives release-manifest release-checksums release-verify
+
+# `release` runs its prerequisites in order: fmt, vet, archives, manifest, checksums.
+.NOTPARALLEL: release
 
 # Default target
 all: clean fmt vet test build
@@ -169,9 +179,14 @@ bench-tunnel:
 	$(GOTEST) -bench=. -benchtime=3s -run=^$$ ./pkg/tunnel/
 
 # Release targets
-release: fmt vet
+release: fmt vet release-archives release-manifest release-checksums release-verify
+	@echo "Release artifacts ready in $(RELEASE_DIR)/"
+	@ls -lh $(RELEASE_DIR)/*.tar.gz $(RELEASE_DIR)/$(K8S_MANIFEST) $(RELEASE_DIR)/SHA256SUMS
+
+release-archives:
 	@echo "Building release binaries for all platforms..."
-	@mkdir -p $(BUILD_DIR)/release
+	@mkdir -p $(RELEASE_DIR)
+	@rm -f $(RELEASE_DIR)/*.tar.gz
 	@for component in $(RELEASE_COMPONENTS); do \
 		for platform in $(RELEASE_PLATFORMS); do \
 			os=$$(echo $$platform | cut -d/ -f1); \
@@ -179,14 +194,45 @@ release: fmt vet
 			binary=$$component-$(VERSION)-$$os-$$arch; \
 			echo "  $$os/$$arch $$component"; \
 			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GOBUILD) $(RELEASE_LDFLAGS) \
-				-o $(BUILD_DIR)/release/$$binary ./cmd/$$component || exit 1; \
-			tar -czf $(BUILD_DIR)/release/$$component-$(VERSION)-$$os-$$arch.tar.gz \
-				-C $(BUILD_DIR)/release $$binary; \
-			rm -f $(BUILD_DIR)/release/$$binary; \
+				-o $(RELEASE_DIR)/$$binary ./cmd/$$component || exit 1; \
+			tar -czf $(RELEASE_DIR)/$$component-$(VERSION)-$$os-$$arch.tar.gz \
+				-C $(RELEASE_DIR) $$binary; \
+			rm -f $(RELEASE_DIR)/$$binary; \
 		done \
 	done
-	@echo "Release archives built in $(BUILD_DIR)/release/"
-	@ls -lh $(BUILD_DIR)/release/
+	@echo "Release archives built in $(RELEASE_DIR)/"
+
+release-manifest:
+	@command -v $(firstword $(KUSTOMIZE)) >/dev/null 2>&1 || { \
+		echo "error: $(firstword $(KUSTOMIZE)) is required to generate $(K8S_MANIFEST); install kubectl or set KUSTOMIZE" >&2; \
+		exit 1; \
+	}
+	@echo "Generating Kubernetes manifest ($(K8S_MANIFEST)) for $(VERSION)..."
+	@mkdir -p $(RELEASE_DIR)/kustomize
+	@{ \
+		echo 'apiVersion: kustomize.config.k8s.io/v1beta1'; \
+		echo 'kind: Kustomization'; \
+		echo 'resources:'; \
+		echo '  - ../../../deploy/kustomize/base'; \
+		echo 'images:'; \
+		for image in $(K8S_IMAGES); do \
+			echo "  - name: $$image"; \
+			echo "    newTag: $(VERSION)"; \
+		done; \
+	} > $(RELEASE_DIR)/kustomize/kustomization.yaml
+	@$(KUSTOMIZE) $(RELEASE_DIR)/kustomize > $(RELEASE_DIR)/$(K8S_MANIFEST).tmp
+	@mv $(RELEASE_DIR)/$(K8S_MANIFEST).tmp $(RELEASE_DIR)/$(K8S_MANIFEST)
+	@rm -rf $(RELEASE_DIR)/kustomize
+	@echo "Kubernetes manifest written to $(RELEASE_DIR)/$(K8S_MANIFEST)"
+
+release-checksums:
+	@echo "Generating SHA256SUMS..."
+	@cd $(RELEASE_DIR) && sha256sum *.tar.gz $(K8S_MANIFEST) > SHA256SUMS.tmp
+	@cd $(RELEASE_DIR) && mv SHA256SUMS.tmp SHA256SUMS
+	@echo "Checksums written to $(RELEASE_DIR)/SHA256SUMS"
+
+release-verify:
+	@cd $(RELEASE_DIR) && sha256sum -c SHA256SUMS
 
 # Help
 help:
@@ -215,6 +261,7 @@ help:
 	@echo "  clean-all       - Clean all generated files"
 	@echo ""
 	@echo "  bench-tunnel         - Run QUIC tunnel benchmarks"
-	@echo "  release              - Build release archives for all platforms (5 components × 4 OS/arch)"
+	@echo "  release              - Build archives (5 components × 4 OS/arch), k8s manifest, and SHA256SUMS"
+	@echo "  release-verify       - Verify release artifacts against SHA256SUMS"
 	@echo "  e2e-k8s / e2e-controller / e2e-cross-region / e2e-relay - Run hack/ E2E scripts (*-cleanup to tear down)"
 	@echo "  help                 - Show this help"
