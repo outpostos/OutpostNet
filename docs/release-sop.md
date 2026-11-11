@@ -1,5 +1,7 @@
 # OutpostNet Release SOP
 
+> This document follows the OutpostOS Release Specification SOP: [OUT-34](https://paperclip.a2d2.dev/OUT/issues/OUT-34).
+
 Standard Operating Procedure for releasing OutpostNet versions. This document codifies the process used for v1.0.0/v1.0.1 and serves as the canonical reference for all future releases.
 
 ## Overview
