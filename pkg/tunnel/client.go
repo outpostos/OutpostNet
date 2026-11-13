@@ -80,6 +80,12 @@ func dialAndAuth(ctx context.Context, cfg ClientConfig) (*quic.Conn, error) {
 		conn.CloseWithError(1, "auth failed")
 		return nil, fmt.Errorf("write auth token: %w", err)
 	}
+	if cfg.NodeID != "" {
+		if err := writePeerHello(stream, cfg.NodeID); err != nil {
+			conn.CloseWithError(1, "auth failed")
+			return nil, err
+		}
+	}
 
 	resp := make([]byte, 1)
 	if _, err := io.ReadFull(stream, resp); err != nil {
