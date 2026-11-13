@@ -75,6 +75,34 @@ func TestSlowDestinationDoesNotCauseExpiredSendToNext(t *testing.T) {
 	}
 }
 
+func TestFlushKeepsNewExpiredStatusWhileAnotherMessageIsLive(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	o := mustOut(t, Config{Dir: t.TempDir(), NodeID: "a", Clock: func() time.Time { return now }, Transport: transportFunc(func(_ context.Context, _ string, b Batch) (BatchResult, error) {
+		r := BatchResult{}
+		for _, e := range b.Envelopes {
+			r.Envelopes = append(r.Envelopes, Result{e.MessageID, Accepted})
+		}
+		return r, nil
+	})})
+	e := message(now)
+	e.ExpiryTime = now.Add(time.Second)
+	id, err := o.Send(ctx, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = o.Send(ctx, message(now)); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	if err = o.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := o.Status(id); err != nil || s != Expired {
+		t.Fatalf("newly expired status = %s, %v", s, err)
+	}
+}
+
 func TestMalformedAcknowledgementsKeepPayloadPending(t *testing.T) {
 	for _, mode := range []string{"empty", "wrong-id", "unknown-code"} {
 		t.Run(mode, func(t *testing.T) {

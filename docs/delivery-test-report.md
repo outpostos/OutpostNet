@@ -11,7 +11,7 @@ Environment: macOS 13.7.8, amd64, Go 1.26.1; in-process transport and real files
 | 1. Red first; Send → Receive → Ack → optional HANDED_OFF | Pass | First commit `606c7fa` contains the failing flow test (`undefined: NewMemoryTransport`, `NewOutbox`, `NewInbox`, etc.). `TestSendReceiveAckHandoff`; `TestReceiptRaceAndLossSurviveRestart` |
 | 2. Crash durability and incomplete tails | Pass | `TestCrashRecoveryAtSendAcceptAndAck`; `TestFailedDiskOperationsNeverAcknowledge` (short Write, failed Sync, failed rollback for Send/Accept/Ack); `TestInboxBatchUsesOneSyncAndTornTailIsNotConfirmed`; `TestProcessCrashBoundaries` (actual SIGKILL after Send, Accept, Receive and Ack) |
 | 3. Deduplication and expiry + skew cleanup | Pass | `TestExpiryDedupAndCollection`: 50 repeated two-envelope batches, one delivery, duplicate after Ack, cleanup with injected clock |
-| 4. Sender/arrival expiry and expiry on delivery | Pass | `TestExpiryDedupAndCollection`; `TestInboxNeverDeliversExpiredQueuedEnvelope`; `TestSlowDestinationDoesNotCauseExpiredSendToNext`; `TestEnvelopeValidation` |
+| 4. Sender/arrival expiry and expiry on delivery | Pass | `TestExpiryDedupAndCollection`; `TestInboxNeverDeliversExpiredQueuedEnvelope`; `TestSlowDestinationDoesNotCauseExpiredSendToNext`; `TestFlushKeepsNewExpiredStatusWhileAnotherMessageIsLive`; `TestEnvelopeValidation` |
 | 5. Outbox refusal; Inbox full → backoff → space release → success | Pass | `TestQuotaBackoffAndPayloadRelease`; `TestPriorityByteBatchesAndTransportErrors` |
 | 6. At least 10k envelopes, randomized restarts and transport failures | Pass | `TestRandomCrashesAndTransportFailures10000`, deterministic seed 37: 10,000 unique messages, each Acked exactly once and ultimately HANDED_OFF; no expired delivery |
 | 7. Compaction preserves statuses, pending deliveries and dedup | Pass | `TestCompactionPreservesStatusPendingDedupAndSequence`; `TestReceiptRaceAndLossSurviveRestart` also compacts a pending receipt; `TestCompactionFailuresPreserveRecoverableState` covers temp write/sync, rename, directory sync and reopen |
@@ -48,7 +48,8 @@ a short one. No product change is needed. The longer test timeout accommodates
 10k real fsynced messages and recovery under the race detector on local storage.
 
 Build, vet, format and Linux agent cross-build: pass. Full repository race gate:
-pass (delivery package, including the 10k scenario, completed in 294.7 seconds).
+pass (the first complete run's delivery package, including the 10k scenario,
+completed in 294.7 seconds).
 Targeted durability, lifecycle, concurrency, receipt, compaction and SIGKILL race
 tests: pass. The additional subprocess and compaction/receipt assertions were
 also run separately with `-race -count=1` after the full suite was launched.

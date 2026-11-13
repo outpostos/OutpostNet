@@ -174,15 +174,30 @@ func (o *Outbox) Flush(ctx context.Context) error {
 	for _, dest := range destinations(batches) {
 		batch := batches[dest]
 		// Earlier peer calls may have taken long enough for this page to expire.
-		if err := o.Collect(ctx); err != nil {
-			return errors.Join(append(errs, err)...)
-		}
 		live := batch.Envelopes[:0]
 		now := o.cfg.Clock()
+		o.mu.Lock()
+		var expired []entry
 		for _, e := range batch.Envelopes {
+			current, ok := o.entries[e.MessageID]
+			if !ok || current.Status != Pending {
+				continue
+			}
 			if now.Before(e.ExpiryTime) {
 				live = append(live, e)
+			} else {
+				current.Status = Expired
+				current.Envelope.Payload = nil
+				expired = append(expired, current)
 			}
+		}
+		var expireErr error
+		if len(expired) > 0 {
+			expireErr = o.commit(transaction{Upserts: expired})
+		}
+		o.mu.Unlock()
+		if expireErr != nil {
+			return errors.Join(append(errs, expireErr)...)
 		}
 		batch.Envelopes = live
 		if len(live) == 0 {
