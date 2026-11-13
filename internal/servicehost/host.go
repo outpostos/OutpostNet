@@ -14,11 +14,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/outpostos/OutpostNet/internal/agent"
+	"github.com/outpostos/OutpostNet/internal/meshdirectory"
 	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 	"github.com/outpostos/OutpostNet/pkg/service"
@@ -38,6 +40,9 @@ type Host struct {
 
 	observationAddr string
 	observation     *agent.Observation
+
+	directory *meshdirectory.Directory
+	logical   map[string]*service.LogicalOpener // by logical service name
 }
 
 // New creates a host for a validated Service config.
@@ -119,6 +124,25 @@ func (h *Host) Run(ctx context.Context) error {
 	}
 	defer stopHealth()
 
+	// Service directory from the local Mesh gateway (ADR-0003 D2). It stops
+	// after the entries that read it (deferred later, so run earlier).
+	var svcDir *meshdirectory.Directory
+	if h.cfg.Mesh.GatewayURL != "" {
+		cachePath := ""
+		if h.cfg.Mesh.DirectoryCacheDir != "" {
+			cachePath = filepath.Join(h.cfg.Mesh.DirectoryCacheDir, meshdirectory.CacheFileName)
+		}
+		svcDir, err = meshdirectory.New(meshdirectory.Config{GatewayURL: h.cfg.Mesh.GatewayURL, CachePath: cachePath, Logger: h.logger})
+		if err != nil {
+			return fmt.Errorf("service directory: %w", err)
+		}
+		dirCtx, cancelDir := context.WithCancel(ctx)
+		dirDone := make(chan struct{})
+		go func() { defer close(dirDone); svcDir.Run(dirCtx) }()
+		defer func() { cancelDir(); <-dirDone }()
+	}
+	logical := map[string]*service.LogicalOpener{}
+
 	// Service: stable entries, resolved through the Net host per connection.
 	// Bind every entry before serving any, so a taken address fails startup
 	// with the real bind error.
@@ -129,7 +153,22 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 	}()
 	for i, tgt := range h.cfg.EntryTargets() {
-		opener, observer := observedOpener(obs, tm, tgt, service.NetOpener(tm))
+		var base service.StreamOpener = service.NetOpener(tm)
+		if tgt.Logical {
+			lo, err := service.NewLogicalOpener(service.LogicalConfig{
+				Self:      h.cfg.NodeID,
+				Directory: svcDir,
+				Peers:     tm,
+				Reachable: tm.PeerReachable,
+				Logger:    h.logger,
+			})
+			if err != nil {
+				return fmt.Errorf("service entry %s: %w", tgt, err)
+			}
+			logical[tgt.Service] = lo
+			base = lo
+		}
+		opener, observer := observedOpener(obs, tm, tgt, base)
 		e := service.NewEntry(service.EntryConfig{
 			Target:     tgt,
 			ListenAddr: h.cfg.Imports[i].ListenAddr,
@@ -162,6 +201,8 @@ func (h *Host) Run(ctx context.Context) error {
 	h.tunnels = tm
 	h.exports = exports
 	h.entries = entries
+	h.directory = svcDir
+	h.logical = logical
 	h.ready = true
 	h.mu.Unlock()
 	h.logger.Info("service host ready", "exports", len(exports), "entries", len(entries), "peers", len(h.cfg.Peers))
@@ -298,6 +339,7 @@ func (h *Host) reload(next *service.Config) {
 // sameRestartScope compares everything Run reads at startup except exports.
 func sameRestartScope(a, b *service.Config) bool {
 	return a.NodeID == b.NodeID &&
+		a.Mesh == b.Mesh &&
 		reflect.DeepEqual(a.Tunnels, b.Tunnels) &&
 		reflect.DeepEqual(a.Imports, b.Imports) &&
 		reflect.DeepEqual(a.TLS, b.TLS) &&
@@ -344,4 +386,24 @@ func (h *Host) HealthAddr() net.Addr {
 		return nil
 	}
 	return h.healthLn.Addr()
+}
+
+// LogicalStats returns the resolution counters of the logical entry for the
+// named service, if one is configured.
+func (h *Host) LogicalStats(name string) (service.LogicalStats, bool) {
+	h.mu.Lock()
+	lo := h.logical[name]
+	h.mu.Unlock()
+	if lo == nil {
+		return service.LogicalStats{}, false
+	}
+	return lo.Stats(), true
+}
+
+// Directory returns the service directory, or nil when mesh.gateway_url is
+// not configured or the host is not running.
+func (h *Host) Directory() *meshdirectory.Directory {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.directory
 }

@@ -188,6 +188,8 @@ func TestSnapshotThenDeltas(t *testing.T) {
 		s.holdOpen(r)
 	})
 	h := startDir(t, Config{GatewayURL: s.srv.URL})
+	// "b/READY" already holds after the third delta; wait for all five.
+	eventually(t, "all deltas", func() bool { return h.d.Stats().Deltas == 5 })
 	eventually(t, "final state", hasState(h.d, "b/READY"))
 	got, fr := h.d.Instances("echo")
 	if !fr.Synced || fr.Stale || fr.AsOf.IsZero() {
