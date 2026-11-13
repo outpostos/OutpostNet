@@ -250,3 +250,44 @@ func TestIndexedPositionReadsPreserveEmptyResults(t *testing.T) {
 		})
 	}
 }
+
+func TestBytePageKeepsOneLatestEntryPerKeyDuringOverwrites(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMemoryStore(MemoryStoreConfig{NodeID: "overwrites"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 600; i++ {
+		if _, err := store.Put(ctx, fmt.Sprintf("k/%03d", i), []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := store.Put(ctx, fmt.Sprintf("k/%03d", i%600), []byte("updated")); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	for round := 0; round < 20; round++ {
+		entries, err := store.ChangesSinceBytes(ctx, 0, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := make(map[string]bool)
+		for _, entry := range entries {
+			if seen[entry.Key] {
+				t.Fatalf("byte page repeats overwritten key %s", entry.Key)
+			}
+			seen[entry.Key] = true
+		}
+	}
+}

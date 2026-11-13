@@ -15,8 +15,10 @@ type BytePageStore interface {
 	ChangesSinceBytes(context.Context, uint64, int64) ([]Entry, error)
 }
 
-// ChangesSinceBytes seeks the maintained position index, then encodes bounded
-// chunks outside the read lock. It never sorts or materializes the tail.
+// ChangesSinceBytes seeks the maintained position index. The read lock keeps
+// one latest entry per key throughout this page, including during overwrites.
+// Work under the lock is bounded to page candidates: JSON encoding and copying
+// selected values, with no tail materialization or sorting.
 func (s *storeCore) ChangesSinceBytes(ctx context.Context, since uint64, maxBytes int64) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -24,51 +26,40 @@ func (s *storeCore) ChangesSinceBytes(ctx context.Context, since uint64, maxByte
 	if maxBytes <= 0 {
 		return nil, fmt.Errorf("state page byte budget must be positive")
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var result []Entry
 	var used int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	var pageErr error
+	s.byPosition.AscendGreaterOrEqual(entryRef{position: since}, func(ref entryRef) bool {
+		if ref.position <= since {
+			return true
 		}
-		var chunk [128]Entry
-		count := 0
-		s.mu.RLock()
-		s.byPosition.AscendGreaterOrEqual(entryRef{position: since}, func(ref entryRef) bool {
-			if ref.position <= since {
-				return true
-			}
-			chunk[count] = s.entries[ref.key]
-			count++
-			return count < len(chunk)
-		})
-		s.mu.RUnlock()
-		for _, e := range chunk[:count] {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			encoded, err := json.Marshal(e)
-			if err != nil {
-				return nil, err
-			}
-			size := int64(len(encoded))
-			if len(result) > 0 {
-				size++
-			}
-			oversized := int64(len(encoded)) > s.maxEntryBytes
-			if len(result) > 0 && (used+size > maxBytes || oversized) {
-				return result, nil
-			}
-			result = append(result, copyEntry(e))
-			used += size
-			since = e.Position
-			if used >= maxBytes || oversized {
-				return result, nil
-			}
+		if pageErr = ctx.Err(); pageErr != nil {
+			return false
 		}
-		if count < len(chunk) {
-			return result, nil
+		entry := s.entries[ref.key]
+		var encoded []byte
+		encoded, pageErr = json.Marshal(entry)
+		if pageErr != nil {
+			return false
 		}
+		size := int64(len(encoded))
+		if len(result) > 0 {
+			size++
+		}
+		oversized := int64(len(encoded)) > s.maxEntryBytes
+		if len(result) > 0 && (used+size > maxBytes || oversized) {
+			return false
+		}
+		result = append(result, copyEntry(entry))
+		used += size
+		return used < maxBytes && !oversized
+	})
+	if pageErr != nil {
+		return nil, pageErr
 	}
+	return result, nil
 }
 
 func pushPage(ctx context.Context, store Store, since uint64, maxBytes int64) ([]Entry, error) {

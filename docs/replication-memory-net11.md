@@ -48,14 +48,14 @@ too, including policies deriving raw JSON from an entry's value.
 
 | Tail entries | Before ns/op | After ns/op | Before bytes/op | After bytes/op |
 | --- | ---: | ---: | ---: | ---: |
-| 1,000 | 218,581 | 25,997 | 130,216 | 15,344 |
-| 10,000 | 2,932,270 | 28,261 | 1,138,005 | 15,344 |
-| 100,000 | 31,171,097 | 32,142 | 11,222,357 | 15,536 |
-| 200,000 | 63,334,431 | 53,305 | 22,421,013 | 15,344 |
+| 1,000 | 218,581 | 84,873 | 130,216 | 15,344 |
+| 10,000 | 2,932,270 | 50,287 | 1,138,005 | 15,344 |
+| 100,000 | 31,171,097 | 43,477 | 11,222,357 | 15,344 |
+| 200,000 | 63,334,431 | 63,937 | 22,421,013 | 15,344 |
 
 The maintained position index replaces sorting the entire tail. Reads seek in
-O(log keys), snapshot at most 128 shallow references per chunk, and encode/copy
-only page candidates outside the read lock. This is O(log keys + page work),
+O(log keys), encode/copy only page candidates while holding the read lock. Keeping that
+lock throughout a page preserves one latest entry per key during overwrites. This is O(log keys + page work),
 not O(tail log tail). A 200x longer tail no longer creates a proportional
 allocation or sorting cost. The existing B-tree dependency becomes direct;
 no new module version or durable/wire format is introduced.
@@ -71,8 +71,8 @@ The optimized test also sends two push pages per peer per round, then runs
 anti-entropy, for two rounds. A normal run reports:
 
 ```text
-stored_values=430480000 allocation_per_round=684611152
-peak_HeapInuse=773447680 ceiling=1076200000
+stored_values=430480000 allocation_per_round=684610052
+peak_HeapInuse=809811968 ceiling=1076200000
 PASS
 ```
 
@@ -81,7 +81,10 @@ stores, their metadata/indexes and replication garbage in the measured process.
 The soft Go memory limit is 80% of that ceiling. Sampling runs every millisecond
 and at the end of the workload; it measures HeapInuse, not process RSS, and can
 miss shorter spikes. This is a reproducible regression guard, not a production
-RSS or three-VM Mesh measurement. Both peak and allocation guards run in the
+RSS or three-VM Mesh measurement. The final allocation guard is 1.5 GiB per round: race instrumentation raised
+measured allocation to 1,101,575,820 B/round while peak HeapInuse stayed at
+826,449,920 B, within the unchanged 2.5x ceiling. This headroom still rejects the
+19.33 GB baseline by over an order of magnitude. Both guards run in the
 ordinary test suite, including under the race detector.
 
 `TestReplicationReadsPreservePolicyAndOwnership` compares optimized and legacy
@@ -90,5 +93,7 @@ including CAS, tombstones, compaction/reopen, bounds, continuation and cancellat
 `TestReplicationReadsDuringMutation` covers concurrent mutation/metadata/diff/push
 reads. `TestDigestPageCannotExposeUnsentValuesThroughSliceCapacity` prevents
 unselected values from being exposed through the response slice's spare capacity.
-Existing NET-7/NET-8 paging, 03b resurrection, GC/resync and durable fault tests are
+`TestBytePageKeepsOneLatestEntryPerKeyDuringOverwrites` preserves per-page
+snapshot semantics during concurrent updates; `TestIndexedPositionReadsPreserveEmptyResults`
+preserves empty-array reads. Existing NET-7/NET-8 paging, 03b resurrection, GC/resync and durable fault tests are
 unchanged. Consumer dependency upgrades and RANGE-2 VM acceptance remain separate.

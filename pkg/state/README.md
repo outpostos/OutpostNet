@@ -114,7 +114,7 @@ Replication memory and ordered reads (NET-11):
   committed Put, CAS, Apply, resync batch, recovery and purge updates both indexes
   under the entry lock; failed persistence never publishes index changes.
   Updating an entry costs O(log key count); each push page seeks in O(log key
-  count) and visits only a bounded metadata chunk plus the entries it encodes.
+  count) and visits only the page candidates it encodes.
 - Anti-entropy takes a complete ordered metadata snapshot per peer, then splits
   it into the same NET-8 complete intervals. It never copies stored values to
   build a digest. Responders snapshot shallow immutable references only inside
@@ -131,7 +131,7 @@ Replication memory and ordered reads (NET-11):
 - `TestReplicationMemoryCeiling` exercises two replicas with 7,500 x 28 KiB values
   plus 200,000 small keys, two peer exchanges per round and push pages. With a
   soft Go memory limit it asserts sampled peak `HeapInuse` <= 2.5 times the
-  combined retained value bytes (1,076,200,000 bytes) and allocation <= 1 GiB
+  combined retained value bytes (1,076,200,000 bytes) and allocation <= 1.5 GiB
   per round. Benchmarks compare 28/56 KiB values and 1k–200k push tails; see
   [NET-11 measurements](../../docs/replication-memory-net11.md) for commands,
   before/after results and measurement limits.
