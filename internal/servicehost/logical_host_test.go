@@ -154,6 +154,12 @@ func TestLogicalFailureReasonsCounted(t *testing.T) {
 		cfgA := validated(t, logicalNode(t, "node-a", entry, mesh.url(), []service.Peer{{NodeID: "node-b", Addr: tunnelAddr(t, nodeB)}}))
 		nodeA := startHost(t, cfgA)
 		waitFor(t, 5*time.Second, "tunnel up", func() bool { return peerStatus(t, cfgA.Management.SocketPath, "node-b") == "connected" })
+		// Without this wait the connection can arrive before the first
+		// snapshot and is (correctly) counted as directory_stale.
+		waitFor(t, 5*time.Second, "directory synced with both registrations", func() bool {
+			insts, fr := nodeA.h.Directory().Instances("echo")
+			return fr.Synced && !fr.Stale && len(insts) == 2
+		})
 		expectRefused(t, entry)
 		waitFor(t, 5*time.Second, "all_unreachable counted", func() bool {
 			st, _ := nodeA.h.LogicalStats("echo")

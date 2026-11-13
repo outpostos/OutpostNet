@@ -179,6 +179,27 @@ func (d *Directory) Instances(name string) ([]service.Instance, service.Freshnes
 	return out, service.Freshness{Synced: d.synced, Stale: d.stale, AsOf: d.asOf}
 }
 
+// ServiceNames returns the names of every service with at least one
+// unexpired instance, sorted.
+func (d *Directory) ServiceNames() []string {
+	now := d.cfg.Now()
+	d.mu.RLock()
+	seen := map[string]struct{}{}
+	for _, in := range d.entities {
+		if !in.Expiry.IsZero() && !now.Before(in.Expiry) {
+			continue
+		}
+		seen[in.ServiceName] = struct{}{}
+	}
+	d.mu.RUnlock()
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Subscribe implements service.Directory.
 func (d *Directory) Subscribe(fn func()) (cancel func()) {
 	d.subMu.Lock()

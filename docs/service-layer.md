@@ -141,3 +141,13 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 - 无候选时立即关闭连接并计数：`no_candidate`（目录新鲜但无可用实例）、`all_unreachable`（有候选但都失败）、`directory_stale`（无可用实例且目录未同步或已断线）。目录 stale 时仍照常选择，成功计入 `ResolvedFromStale` 并记日志。计数见 `Host.LogicalStats`；观测事实 `ServiceAccessChanged` 的 backend 为实际选中的节点与地址（本地为 `127.0.0.1:<port>`，远端为 `<node_id>/<service>`），`no_candidate` / `directory_stale` 记为 `NO_BACKEND`，`all_unreachable` 记为 `UNREACHABLE`。实例 ID 与尝试次数只进日志，不在观测契约中。
 - 兼容：只有逻辑入口使用确认；旧版提供方不认识 bit 14，会把流当成超长名称关闭，入口记为不可达并换下一个候选。逻辑服务要求承载节点与消费节点都升级。`name@node` 与静态入口不变。
 
+## 10. 目录驱动导出（P1-NET-4，ADR-0003 D4）
+
+配置 `mesh.gateway_url` 后，`outpostnet-service` 按目录自动维护本节点的导出路由（`internal/servicehost/direxports.go`），远端逻辑入口无需本节点写静态 `exports`：
+
+- 对目录中每个服务，取 `node_id == 本节点` 的实例，按 `service.Select` 的过滤与排序取首个，导出 `<service_name> → 127.0.0.1:<port>`。订阅目录变更即时对账，另每 1s 兜底对账一次。
+- 实例变为 `DRAINING`/`NOT_READY`、`is_live=false` 或 TTL 到期时路由移除；端口变化时路由原地改址，已建立的流保持原后端（路由只在开流时查找）。
+- 与静态 `exports` 同名时静态生效，并按服务名每分钟至多告警一次；静态导出移除后目录导出接管，目录登记也消失后路由删除，不残留。
+- 目录 stale（Mesh 不可达）时继续使用最后的目录内容，实例照常按 TTL 到期移除。
+- 路由表 = 静态导出 ∪ 目录导出（静态优先），`Host.ApplyExports` 与配置文件热更新只改静态部分；`Host.ExportRoutes` 返回当前生效的路由。
+
