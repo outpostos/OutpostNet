@@ -226,3 +226,27 @@ func TestDigestPageCannotExposeUnsentValuesThroughSliceCapacity(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexedPositionReadsPreserveEmptyResults(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			store := pagingStore(t, durable, "empty")
+			entries, err := store.ListEntries(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(entries)
+			if err != nil || string(encoded) != "[]" {
+				t.Fatalf("empty ListEntries encoding = %s, %v; want []", encoded, err)
+			}
+			entries, err = store.ChangesSince(context.Background(), store.CurrentPosition(), 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err = json.Marshal(entries)
+			if err != nil || string(encoded) != "[]" {
+				t.Fatalf("empty ChangesSince encoding = %s, %v; want []", encoded, err)
+			}
+		})
+	}
+}

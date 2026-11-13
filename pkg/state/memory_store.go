@@ -399,7 +399,7 @@ func (s *storeCore) notify(entry Entry) {
 }
 
 func (s *storeCore) positionEntriesLocked(since uint64, limit int) []Entry {
-	var result []Entry
+	result := make([]Entry, 0)
 	s.byPosition.AscendGreaterOrEqual(entryRef{position: since}, func(ref entryRef) bool {
 		if ref.position <= since {
 			return true
