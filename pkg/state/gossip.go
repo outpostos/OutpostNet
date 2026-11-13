@@ -24,6 +24,10 @@ type GossipConfig struct {
 	AntiEntropyInterval time.Duration
 	BackoffBase         time.Duration
 	BackoffMax          time.Duration
+	// MaxPushBytes bounds the encoded push request (default 768 KiB).
+	MaxPushBytes int64
+	// MaxPushPagesPerRound bounds work per peer (default 16).
+	MaxPushPagesPerRound int
 }
 
 // GossipEngine exchanges state with peers through a Syncer.
@@ -37,6 +41,9 @@ type GossipEngine struct {
 	antiEntropyInterval time.Duration
 	backoffBase         time.Duration
 	backoffMax          time.Duration
+
+	maxPushBytes         int64
+	maxPushPagesPerRound int
 
 	mu         sync.Mutex
 	peerStates map[string]*peerState
@@ -101,22 +108,35 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	if backoffMax < backoffBase {
 		backoffMax = backoffBase
 	}
+	maxPushBytes := cfg.MaxPushBytes
+	if maxPushBytes == 0 {
+		maxPushBytes = 768 << 10
+	}
+	maxPages := cfg.MaxPushPagesPerRound
+	if maxPages == 0 {
+		maxPages = 16
+	}
+	if maxPushBytes < 0 || maxPages < 0 {
+		return nil, fmt.Errorf("gossip push limits must be positive")
+	}
 	if gs, ok := cfg.Store.(gcStore); ok {
 		// From now on tombstones may only be collected through the engine, which
 		// knows the peers that must acknowledge them first.
 		gs.markReplicated()
 	}
 	return &GossipEngine{
-		nodeID:              cfg.NodeID,
-		store:               cfg.Store,
-		syncer:              cfg.Syncer,
-		peerProvider:        cfg.PeerProvider,
-		policy:              storePolicy,
-		interval:            interval,
-		antiEntropyInterval: antiEntropyInterval,
-		backoffBase:         backoffBase,
-		backoffMax:          backoffMax,
-		peerStates:          make(map[string]*peerState),
+		nodeID:               cfg.NodeID,
+		store:                cfg.Store,
+		syncer:               cfg.Syncer,
+		peerProvider:         cfg.PeerProvider,
+		policy:               storePolicy,
+		interval:             interval,
+		antiEntropyInterval:  antiEntropyInterval,
+		backoffBase:          backoffBase,
+		backoffMax:           backoffMax,
+		peerStates:           make(map[string]*peerState),
+		maxPushBytes:         maxPushBytes,
+		maxPushPagesPerRound: maxPages,
 	}, nil
 }
 
@@ -180,49 +200,58 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 	if err != nil {
 		return false, redactPeerErr(addr, err)
 	}
-	changes, err := g.store.ChangesSince(ctx, since, 0)
-	if err != nil {
-		return false, &localStoreError{err: err}
-	}
-	if len(changes) == 0 {
-		// Nothing past the acknowledged position. The local position can still be
-		// ahead of it (a resync purge allocates a floor position with no entry),
-		// but the peer already holds everything this store can push.
-		return true, nil
-	}
-	resp, err := g.syncer.Push(ctx, addr, PushRequest{
-		ProtocolVersion: StateProtocolVersion,
-		PolicyID:        g.policy.ID(),
-		SourceNodeID:    g.nodeID,
-		GCHorizon:       g.localHorizon(),
-		Entries:         changes,
-	})
-	if err != nil {
-		var resync *ResyncRequiredError
-		if errors.As(err, &resync) {
-			// The peer refused our increments because we lag behind its GC
-			// horizon. Resync from it; the cursor stays put and the next round
-			// pushes whatever survived the resync.
-			if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
+	for page := 0; page < g.maxPushPagesPerRound; page++ {
+		req := PushRequest{ProtocolVersion: StateProtocolVersion, PolicyID: g.policy.ID(), SourceNodeID: g.nodeID, GCHorizon: g.localHorizon(), Entries: []Entry{}}
+		envelope, err := json.Marshal(req)
+		if err != nil {
+			return false, &localStoreError{err: err}
+		}
+		changes, err := pushPage(ctx, g.store, since, g.maxPushBytes-int64(len(envelope)))
+		if err != nil {
+			return false, &localStoreError{err: err}
+		}
+		if len(changes) == 0 {
+			// Nothing past the acknowledged position. The local position can still be
+			// ahead of it (a resync purge allocates a floor position with no entry),
+			// but the peer already holds everything this store can push.
+			return true, nil
+		}
+		req.Entries = changes
+		resp, err := g.syncer.Push(ctx, addr, req)
+		if err != nil {
+			var resync *ResyncRequiredError
+			if errors.As(err, &resync) {
+				// The peer refused our increments because we lag behind its GC
+				// horizon. Resync from it; the cursor stays put and the next round
+				// pushes whatever survived the resync.
+				if err := g.resyncFrom(ctx, addr, resync.Horizon); err != nil {
+					return false, g.recordPeerFailure(addr, "push-resync", err, now)
+				}
+				g.recordPeerSuccess(addr)
+				return false, nil
+			}
+			return false, g.recordPeerFailure(addr, "push", err, now)
+		}
+		pushed := g.pushSuccessPosition(addr, since, changes, resp)
+		if err := g.recordPushSuccess(ctx, addr, pushed, resp); err != nil {
+			return false, g.recordPeerFailure(addr, "push-progress", err, now)
+		}
+		if hasBeyondHorizonRejection(resp) {
+			// The peer refused entries for keys it collected. We hold stale state for
+			// them, so we resync from the peer, which purges those entries locally.
+			if err := g.resyncFrom(ctx, addr, timestampValue(resp.GCHorizon)); err != nil {
 				return false, g.recordPeerFailure(addr, "push-resync", err, now)
 			}
-			g.recordPeerSuccess(addr)
+		}
+		if hasBeyondHorizonRejection(resp) || pushed < maxPosition(changes) {
 			return false, nil
 		}
-		return false, g.recordPeerFailure(addr, "push", err, now)
-	}
-	pushed := g.pushSuccessPosition(addr, since, changes, resp)
-	if err := g.recordPushSuccess(ctx, addr, pushed, resp); err != nil {
-		return false, g.recordPeerFailure(addr, "push-progress", err, now)
-	}
-	if hasBeyondHorizonRejection(resp) {
-		// The peer refused entries for keys it collected. We hold stale state for
-		// them, so we resync from the peer, which purges those entries locally.
-		if err := g.resyncFrom(ctx, addr, timestampValue(resp.GCHorizon)); err != nil {
-			return false, g.recordPeerFailure(addr, "push-resync", err, now)
+		if pushed >= startPosition {
+			return true, nil
 		}
+		since = pushed
 	}
-	return pushed >= startPosition, nil
+	return false, nil
 }
 
 // AntiEntropyOnce performs one digest pull round.
