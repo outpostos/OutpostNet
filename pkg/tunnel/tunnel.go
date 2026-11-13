@@ -55,6 +55,10 @@ type ClientConfig struct {
 	// Token is the shared secret sent to the server for authentication.
 	// An empty token disables authentication (backward compatible).
 	Token string
+	// NodeID, when set together with Token, is declared to the server after
+	// authentication so it can open reverse streams to this client
+	// (ADR-0003 D5). It is self-reported, not authenticated.
+	NodeID string
 }
 
 // ServiceRoute maps a service name to a local TCP address.

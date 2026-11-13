@@ -52,6 +52,12 @@ type ManagedClientConfig struct {
 
 	// OnStateChange is called when the connection state changes.
 	OnStateChange StateCallback
+
+	// StreamHandler, when set, serves streams the remote server opens on
+	// this client's connection (reverse streams, ADR-0003 D5). It is called
+	// on its own goroutine per stream and owns the stream. When nil, the
+	// client does not accept streams (previous behaviour).
+	StreamHandler func(ctx context.Context, stream *quic.Stream)
 }
 
 // ManagedClient wraps Client with automatic reconnection and lifecycle management.
@@ -171,6 +177,7 @@ func (mc *ManagedClient) Connect(ctx context.Context) error {
 	mc.mu.Lock()
 	mc.conn = conn
 	mc.mu.Unlock()
+	mc.serveReverseStreams(conn)
 	mc.setState(StateConnected)
 
 	mc.logger.Info("managed client connected", "addr", cfg.ServerAddr)
@@ -267,10 +274,30 @@ func (mc *ManagedClient) reconnect(ctx context.Context) {
 		mc.mu.Lock()
 		mc.conn = conn
 		mc.mu.Unlock()
+		mc.serveReverseStreams(conn)
 		mc.setState(StateConnected)
 		mc.logger.Info("reconnected", "attempt", attempt)
 		return
 	}
+}
+
+// serveReverseStreams accepts streams the server opens on conn and hands
+// each to StreamHandler, until conn closes.
+func (mc *ManagedClient) serveReverseStreams(conn *quic.Conn) {
+	handler := mc.cfg.StreamHandler
+	if handler == nil {
+		return
+	}
+	go func() {
+		ctx := conn.Context()
+		for {
+			stream, err := conn.AcceptStream(ctx)
+			if err != nil {
+				return
+			}
+			go handler(ctx, stream)
+		}
+	}()
 }
 
 // UpdateServerAddr closes the active connection so the existing managed
