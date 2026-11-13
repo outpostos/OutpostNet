@@ -116,3 +116,16 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 - 不承诺在途连接无损迁移（见第 4 节）。
 - 本票只在单机多进程/同进程多监听上验证；多台物理机/真实网络下未验证。
 - `tunnel.ManagedClient.GracefulShutdown` 开始后不再接受新流（`OpenServiceStream`/`OpenRelayStream` 返回 `net.ErrClosed`），只等待已登记的在途流，超时后强制关闭。（票09b 已修复原 `sync.WaitGroup` 在等待期间被 `Add` 的竞态。）
+
+## 8. 逻辑服务目录（P1-NET-2，ADR-0003 D2）
+
+`internal/meshdirectory` 实现 `service.Directory`：订阅本节点 Mesh 网关 `GET /v1alpha1/entities:stream?filter.requiredComponents=ENTITY_COMPONENT_SERVICE_REGISTRATION`（SSE），用本地最小 JSON 结构体解码（**不**在 `go.mod` 引入 OutpostMesh，`gomod_test.go` 守护）。
+
+- 快照在 `SNAPSHOT_COMPLETE` 时原子替换；`DELTA` 按实体更新，`DELETED`/`EXPIRED`/`is_live=false` 移除（`EXPIRED` 事件中 `isLive` 仍为 true，按事件类型判断）。
+- 断线以 100ms 起、上限 5s 的指数退避重连并携带最后确认的 `resumeCursor`；游标不可用时 Mesh 回落为新快照，按首个快照处理。
+- 每个实例保留 `expiry_time`，本地每 250ms 剔除过期实例并通知订阅者，`Instances` 也不返回已过期实例。
+- 冷启动缓存 `<data-dir>/service-directory.json`：快照完成时与之后至多每 5s 写一次（临时文件 + fsync + rename）；启动时载入并标记 `Stale=true`，首个快照完成后清除；断线期间 `Stale=true`，缓存实例照常按 TTL 剔除；损坏的缓存告警后忽略。
+- Mesh 的权重在端点上，实例取其首个 TCP 端点的权重。
+- 契约样本：`internal/meshdirectory/testdata/*.sse` 为真实网关（OutpostMesh f0ab178）录制的 SSE 输出；`-tags integration` 的 `TestRealMeshGateway` 对真实二进制验证（`OUTPOSTMESH_GATEWAY_BIN`）。
+- 本票只提供目录；入口与导出接入见 P1-NET-3 / P1-NET-4。
+
