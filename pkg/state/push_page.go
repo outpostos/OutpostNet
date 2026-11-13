@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -33,10 +34,10 @@ func (s *storeCore) ChangesSinceBytes(ctx context.Context, since uint64, maxByte
 		}
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Position < ordered[j].Position })
-	return fitEntryPage(ctx, ordered, maxBytes)
+	return fitEntryPage(ctx, ordered, maxBytes, s.maxEntryBytes)
 }
 
-func fitEntryPage(ctx context.Context, entries []Entry, maxBytes int64) ([]Entry, error) {
+func fitEntryPage(ctx context.Context, entries []Entry, maxBytes, maxEntryBytes int64) ([]Entry, error) {
 	var result []Entry
 	var used int64
 	for _, e := range entries {
@@ -51,12 +52,12 @@ func fitEntryPage(ctx context.Context, entries []Entry, maxBytes int64) ([]Entry
 		if len(result) > 0 {
 			size++
 		}
-		if len(result) > 0 && used+size > maxBytes {
+		if len(result) > 0 && (used+size > maxBytes || int64(len(encoded)) > maxEntryBytes) {
 			break
 		}
 		result = append(result, copyEntry(e))
 		used += size
-		if used >= maxBytes {
+		if used >= maxBytes || int64(len(encoded)) > maxEntryBytes {
 			break
 		}
 	}
@@ -91,14 +92,41 @@ func pushPage(ctx context.Context, store Store, since uint64, maxBytes int64) ([
 		if len(result) > 0 {
 			size++
 		}
-		if len(result) > 0 && used+size > maxBytes {
+		if len(result) > 0 && (used+size > maxBytes || int64(len(encoded)) > entryLimit(store)) {
 			return result, nil
 		}
 		result = append(result, e)
 		used += size
-		if used >= maxBytes {
+		if used >= maxBytes || int64(len(encoded)) > entryLimit(store) {
 			return result, nil
 		}
 		since = e.Position
 	}
+}
+
+const defaultMaxEntryBytes int64 = 512 << 10
+
+// ErrEntryTooLarge reports a local entry exceeding MaxEntryBytes. Nothing is
+// persisted or published for the rejected write.
+var ErrEntryTooLarge = errors.New("state entry exceeds MaxEntryBytes")
+
+// MaxEntryBytes returns the encoded local entry limit used by this store.
+func (s *storeCore) MaxEntryBytes() int64 { return s.maxEntryBytes }
+
+func entryLimit(store Store) int64 {
+	if limits, ok := store.(interface{ MaxEntryBytes() int64 }); ok {
+		return limits.MaxEntryBytes()
+	}
+	return defaultMaxEntryBytes
+}
+
+func (s *storeCore) checkEntrySize(entry Entry) error {
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	if int64(len(encoded)) > s.maxEntryBytes {
+		return fmt.Errorf("%w: encoded entry needs %d bytes, limit %d", ErrEntryTooLarge, len(encoded), s.maxEntryBytes)
+	}
+	return nil
 }

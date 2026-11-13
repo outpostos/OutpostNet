@@ -13,8 +13,11 @@ import (
 
 // MemoryStoreConfig configures an in-memory state replica.
 type MemoryStoreConfig struct {
-	NodeID        string
-	Policy        MergePolicy
+	NodeID string
+	Policy MergePolicy
+	// MaxEntryBytes bounds a local entry's JSON encoding (default 512 KiB).
+	// Remote Apply and recovery preserve larger legacy entries.
+	MaxEntryBytes int64
 	PhysicalClock PhysicalClock
 	// TombstoneRetention enables tombstone GC: CollectTombstones removes
 	// tombstones whose HLC wall time is at least this old. Zero (the default)
@@ -33,7 +36,7 @@ var _ Store = (*MemoryStore)(nil)
 
 // NewMemoryStore creates a state replica.
 func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention, cfg.MaxEntryBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +56,8 @@ type storeCore struct {
 	ready atomic.Bool
 
 	// retention is the minimum tombstone age before collection; 0 disables GC.
-	retention time.Duration
+	retention     time.Duration
+	maxEntryBytes int64
 	// replicated is set once a GossipEngine owns replication of this store, after
 	// which peer-blind collection is refused.
 	replicated atomic.Bool
@@ -78,20 +82,27 @@ type storeCore struct {
 	nextObsID   uint64
 }
 
-func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, retention time.Duration) (*storeCore, error) {
+func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, retention time.Duration, maxEntryBytes int64) (*storeCore, error) {
 	if nodeID == "" {
 		return nil, fmt.Errorf("state store node id is required")
 	}
 	if retention < 0 {
 		return nil, fmt.Errorf("state tombstone retention must not be negative")
 	}
+	if maxEntryBytes == 0 {
+		maxEntryBytes = defaultMaxEntryBytes
+	}
+	if maxEntryBytes < 0 {
+		return nil, fmt.Errorf("state max entry bytes must be positive")
+	}
 	core := &storeCore{
-		nodeID:    nodeID,
-		policy:    normalizePolicy(policy),
-		entries:   make(map[string]Entry),
-		hlc:       newHLCClock(physical),
-		observers: make(map[uint64]func(Entry)),
-		retention: retention,
+		maxEntryBytes: maxEntryBytes,
+		nodeID:        nodeID,
+		policy:        normalizePolicy(policy),
+		entries:       make(map[string]Entry),
+		hlc:           newHLCClock(physical),
+		observers:     make(map[uint64]func(Entry)),
+		retention:     retention,
 	}
 	core.ready.Store(true)
 	return core, nil
@@ -121,6 +132,9 @@ func (s *storeCore) put(ctx context.Context, key string, mutation Mutation, pers
 	defer s.commitMu.Unlock()
 
 	entry := s.newLocalEntry(key, mutation)
+	if err := s.checkEntrySize(entry); err != nil {
+		return Entry{}, err
+	}
 	if err := s.policy.ValidateApply(entry); err != nil {
 		return Entry{}, err
 	}
@@ -156,6 +170,10 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 		return copyEntry(current), false, nil
 	}
 	entry := s.newLocalEntry(key, mutation)
+	if err := s.checkEntrySize(entry); err != nil {
+		s.mu.Unlock()
+		return Entry{}, false, err
+	}
 	if err := s.policy.ValidateApply(entry); err != nil {
 		s.mu.Unlock()
 		return Entry{}, false, err
