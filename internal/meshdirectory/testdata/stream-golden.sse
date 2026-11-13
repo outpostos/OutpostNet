@@ -1,0 +1,24 @@
+: Recorded from a real outpostmesh-gateway (OutpostMesh f0ab178) on 2026-11-12:
+: GET /v1alpha1/entities:stream?filter.requiredComponents=ENTITY_COMPONENT_SERVICE_REGISTRATION
+: (Accept: text/event-stream). Sequence: uid-a snapshot; uid-b published NOT_READY then READY;
+: uid-a withdrawn (is_live=false -> DELETED); uid-c published with a short expiry. A non-registration
+: entity existed and was filtered out by the gateway. Comment lines are SSE comments.
+
+event: snapshot
+data: {"phase":"STREAM_PHASE_SNAPSHOT", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-a", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T08:43:31Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:31.668226464Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-a", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAI"}
+
+event: snapshot-complete
+data: {"phase":"STREAM_PHASE_SNAPSHOT_COMPLETE", "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAI"}
+
+event: delta
+data: {"phase":"STREAM_PHASE_DELTA", "eventType":"ENTITY_EVENT_TYPE_PUBLISHED", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-b", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T08:43:31Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:32.982398641Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-b", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_NOT_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAM"}
+
+event: delta
+data: {"phase":"STREAM_PHASE_DELTA", "eventType":"ENTITY_EVENT_TYPE_OVERRIDDEN", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-b", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T08:43:31Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:33.296898796Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-b", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAQ"}
+
+event: delta
+data: {"phase":"STREAM_PHASE_DELTA", "eventType":"ENTITY_EVENT_TYPE_DELETED", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-a", "isLive":false, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T08:43:31Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:31.668226464Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-a", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAU"}
+
+event: delta
+data: {"phase":"STREAM_PHASE_DELTA", "eventType":"ENTITY_EVENT_TYPE_PUBLISHED", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-c", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T07:43:35.620980982Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:33.622873630Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-c", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAY"}
+
