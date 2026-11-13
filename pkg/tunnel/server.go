@@ -260,6 +260,9 @@ func (s *Server) ServeStream(ctx context.Context, stream *quic.Stream) {
 
 func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 	defer stream.Close()
+	// Close only ends the write side. Release the receive side as well,
+	// even when a rejected stream returns before reading the peer's FIN.
+	defer stream.CancelRead(0)
 
 	// Read service header (handles both standard and relay headers).
 	hdr, err := ReadStreamHeader(stream)
