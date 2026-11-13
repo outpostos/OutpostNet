@@ -256,8 +256,10 @@ func TestCompactionPreservesStatusPendingDedupAndSequence(t *testing.T) {
 	}
 	original := o.entries[id].Envelope
 	original.Payload = []byte("data")
-	r, e := ri.Accept(ctx, []Envelope{original})
-	if e != nil || r[0].Code != Duplicate {
+	live := o.entries[id2].Envelope
+	live.Payload = []byte("data")
+	r, e := ri.Accept(ctx, []Envelope{original, live})
+	if e != nil || r[0].Code != Duplicate || r[1].Code != Duplicate {
 		t.Fatalf("dedup %v %v", r, e)
 	}
 	next, e := ro.Send(ctx, message(now))

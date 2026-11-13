@@ -148,6 +148,9 @@ func TestReceiptRaceAndLossSurviveRestart(t *testing.T) {
 	if err = in.Ack(ctx, e2.MessageID); err != nil {
 		t.Fatal(err)
 	}
+	if err = in.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
 	ri := mustIn(t, Config{Dir: crashImage(t, in.cfg.Dir), NodeID: "b", Transport: transportFunc(func(_ context.Context, _ string, b Batch) (BatchResult, error) {
 		if len(b.Receipts) != 1 || b.Receipts[0].MessageID != e2.MessageID {
 			t.Fatal(b)
