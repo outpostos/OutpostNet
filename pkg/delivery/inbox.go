@@ -47,7 +47,7 @@ func (in *Inbox) Accept(ctx context.Context, envelopes []Envelope) ([]Result, er
 			results[i].Code = Duplicate
 			continue
 		}
-		v := entry{Envelope: clone(e), Status: Pending}
+		v := entry{Envelope: clone(e), Status: Pending, QueuedAt: now}
 		n := entryCharge(v)
 		if usage+n > in.cfg.QuotaBytes {
 			results[i].Code = Full
@@ -66,6 +66,7 @@ func (in *Inbox) Accept(ctx context.Context, envelopes []Envelope) ([]Result, er
 			return nil, err
 		}
 	}
+	in.countResults(envelopes, results)
 	return results, nil
 }
 
