@@ -74,6 +74,10 @@ func (o *EntryObserver) Wrap(next service.StreamOpener, cfg OpenerConfig) servic
 			}
 			return nil, err
 		}
+		// Logical entries learn their backend only while opening.
+		if rb, ok := stream.(interface{ ResolvedBackend() (string, string) }); ok {
+			backend.NodeID, backend.Address = rb.ResolvedBackend()
+		}
 		return &observedStream{ReadWriteCloser: stream, observer: o, backend: backend}, nil
 	})
 }

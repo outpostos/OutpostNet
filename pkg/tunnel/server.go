@@ -270,6 +270,13 @@ func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 
 	localAddr, ok := s.getRoute(hdr.ServiceName)
 	if !ok {
+		if hdr.WantsConfirm {
+			// Confirmed streams are never relayed: the opener must learn
+			// that this provider cannot serve it, before any data moves.
+			s.logger.Debug("no route for confirmed stream", "service", hdr.ServiceName)
+			_ = writeStreamAck(stream, StreamAckNoRoute)
+			return
+		}
 		// No local route — try the fallback (relay handler).
 		if fb := s.getFallback(); fb != nil {
 			fb(ctx, stream, hdr)
@@ -285,9 +292,17 @@ func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
 		s.logger.Error("dial local service", "service", hdr.ServiceName, "addr", localAddr, "error", err)
+		if hdr.WantsConfirm {
+			_ = writeStreamAck(stream, StreamAckDialFailed)
+		}
 		return
 	}
 	defer localConn.Close()
+	if hdr.WantsConfirm {
+		if err := writeStreamAck(stream, StreamAckOK); err != nil {
+			return
+		}
+	}
 
 	// Bidirectional forwarding.
 	relay(stream, localConn)

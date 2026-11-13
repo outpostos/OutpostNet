@@ -170,15 +170,17 @@ Runnable two-node example: [`examples/service/`](../examples/service/README.md).
 Moving an agent's `imports`/`exports` to `outpostnet-service`: [service-migration.md](service-migration.md).
 
 The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports`, `tls`, `auth`,
-`management`, `health_addr`) plus `peers`, with these differences:
+`management`, `health_addr`) plus `peers` and `mesh`, with these differences:
 
 | Item | outpostnet-service |
 |------|--------------------|
 | `node_id` | Required |
-| `imports[]` | Stable entries. `service: <name>@<node_id>` = dynamic path (peer directory); `name` + `remote_region` = static path (configured client tunnel — a `tunnels` entry with `role: client` and the same `remote_region` is required, otherwise startup fails). `listen_addr` must be unique across entries (port `0` excepted); an address already in use fails startup with the bind error |
+| `imports[]` | Stable entries. `service: <name>` (no `@`) = **logical service**, resolved per connection from the Mesh service directory (needs `mesh.gateway_url`; `<name>` is a DNS-1123 subdomain; no `remote_region`); `service: <name>@<node_id>` = dynamic path (peer directory); `name` + `remote_region` = static path (configured client tunnel — a `tunnels` entry with `role: client` and the same `remote_region` is required, otherwise startup fails). `listen_addr` must be unique across entries (port `0` excepted); an address already in use fails startup with the bind error |
 | `protocol` | `tcp` only for imports and exports; `udp` is rejected (UDP over the QUIC tunnel is not implemented) |
 | `relays` | Rejected (relay forwarding stays on `outpostnet-agent`) |
 | `peers[]` | `{node_id, addr}` seed for the peer directory at startup; later changes via `PUT /v1/peers`. `node_id` must be unique and differ from this node's `node_id`; `addr` must be `host:port` (port 1-65535) |
+| `mesh.gateway_url` | Local OutpostMesh REST base URL (`http(s)://host:port`). Enables the service directory; required when any import is a logical service |
+| `mesh.directory_cache_dir` | Directory for the cold-start cache `service-directory.json`; empty disables the cache |
 | `management.socket_path` | Default `/run/outpostnet/service.sock` |
 | `health_addr` | Default `:8083` (`/healthz`, `/readyz`) |
 | `persistence`, `metrics` | Accepted for schema compatibility, not used |
@@ -186,7 +188,7 @@ The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports
 
 Runtime changes: export `local_addr` add/change/remove applies in place when the config file
 changes (`--watch-interval`, default 5s). `node_id`, tunnels, entries, auth, TLS, management,
-`health_addr` and `peers` require a restart (the watcher logs a warning; `--node-id` /
+`health_addr`, `peers` and `mesh` require a restart (the watcher logs a warning; `--node-id` /
 `--health-addr` overrides are re-applied before comparing, so they do not trigger it); peer
 address changes at runtime go through `PUT /v1/peers`.
 
