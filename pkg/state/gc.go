@@ -234,7 +234,7 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 		if !ok || current.ChangeID != ref.ChangeID || current.Version != ref.Version {
 			continue
 		}
-		delete(s.entries, ref.Key)
+		s.removeEntryLocked(current)
 		removed = append(removed, current)
 	}
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
@@ -379,7 +379,7 @@ func (s *storeCore) applySnapshotPage(ctx context.Context, page []Entry) (snapsh
 	}
 	s.mu.Lock()
 	for _, entry := range accepted {
-		s.entries[entry.Key] = entry
+		s.setEntryLocked(entry)
 	}
 	s.mu.Unlock()
 	for _, entry := range accepted {

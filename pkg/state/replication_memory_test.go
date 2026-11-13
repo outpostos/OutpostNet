@@ -58,7 +58,7 @@ func memoryFixture(tb testing.TB, valueBytes, smallKeys int) (*GossipEngine, *Me
 	}
 	// Two peer exchanges against the same independent replica keep the retained
 	// payload at two copies while exercising per-peer digest reconstruction.
-	g, err := NewGossipEngine(GossipConfig{NodeID: "local", Store: a, Syncer: memorySyncer{target}, PeerProvider: NewStaticPeerProvider([]string{"peer-1", "peer-2"})})
+	g, err := NewGossipEngine(GossipConfig{NodeID: "local", Store: a, Syncer: memorySyncer{target}, MaxPushPagesPerRound: 2, PeerProvider: NewStaticPeerProvider([]string{"peer-1", "peer-2"})})
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -138,14 +138,16 @@ func TestReplicationMemoryCeiling(t *testing.T) {
 			}
 		}
 	}()
+	defer func() { close(stop); <-done }()
 	for i := 0; i < 2; i++ {
+		if err := g.SyncOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.AntiEntropyOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	sample()
-	close(stop)
-	<-done
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(g)

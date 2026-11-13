@@ -19,22 +19,20 @@ func (e *DigestEntryTooLargeError) Error() string {
 	return fmt.Sprintf("state digest key %q needs %d request bytes, above MaxDigestBytes %d; raise the digest and peer request limits", e.Key, e.Bytes, e.MaxBytes)
 }
 
-func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest map[string]DigestRecord) error {
+func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest []KeyDigest) error {
 	pager, ok := g.syncer.(SnapshotSyncer)
 	if !ok {
 		return fmt.Errorf("digest paging requires a syncer implementing SnapshotSyncer")
 	}
-	keys := make([]string, 0, len(digest))
 	longest := ""
-	for key := range digest {
-		keys = append(keys, key)
-		encoded, _ := json.Marshal(key)
-		prev, _ := json.Marshal(longest)
-		if len(encoded) > len(prev) {
-			longest = key
+	longestBytes := 0
+	for _, item := range digest {
+		encoded, _ := json.Marshal(item.Key)
+		if len(encoded) > longestBytes {
+			longest = item.Key
+			longestBytes = len(encoded)
 		}
 	}
-	sort.Strings(keys)
 	start := ""
 	for offset := 0; ; {
 		if err := ctx.Err(); err != nil {
@@ -61,10 +59,10 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 		emptyRecord, _ := json.Marshal(DigestRecord{})
 		used := int64(len(envelope) - len(emptyRecord) - 3) // remove "":record; retain {}
 		end := offset
-		for end < len(keys) {
-			key := keys[end]
+		for end < len(digest) {
+			key := digest[end].Key
 			k, _ := json.Marshal(key)
-			record, err := json.Marshal(digest[key])
+			record, err := json.Marshal(digest[end].Record)
 			if err != nil {
 				return err
 			}
@@ -79,11 +77,11 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 				break
 			}
 			used += size
-			req.Digest[key] = digest[key]
+			req.Digest[key] = digest[end].Record
 			end++
 		}
-		if end < len(keys) {
-			req.EndKey = keys[end]
+		if end < len(digest) {
+			req.EndKey = digest[end].Key
 		}
 		for {
 			encoded, err := json.Marshal(req)
@@ -108,7 +106,7 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 			}
 			req.AfterKey = resp.NextKey
 		}
-		if end == len(keys) {
+		if end == len(digest) {
 			return nil
 		}
 		start = req.EndKey
@@ -143,50 +141,15 @@ func (g *GossipEngine) handleDigestResponse(ctx context.Context, req PullRequest
 	if err := g.checkRequesterHoldsCollected(ctx, horizon, req.Digest); err != nil {
 		return nil, err
 	}
+	if reader, ok := g.store.(ReplicationReadStore); ok {
+		return reader.DigestDiffPage(ctx, req, *resp)
+	}
 	entries, err := g.store.ListEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
-	limit := req.Limit
-	if limit == 0 {
-		limit = resyncPageSize
-	}
-	var candidates []Entry
-	for _, entry := range entries {
-		if !digestKeyInRange(entry.Key, req) || (req.AfterKey != "" && entry.Key <= req.AfterKey) {
-			continue
-		}
-		record, exists := req.Digest[entry.Key]
-		if !exists || g.policy.CompareEntryToDigest(entry, record) > 0 {
-			candidates = append(candidates, entry)
-			if len(candidates) > limit {
-				break
-			}
-		}
-	}
-	more := len(candidates) > limit
-	if more {
-		candidates = candidates[:limit]
-	}
-	resp.Entries = candidates
-	maxBytes := req.MaxBytes
-	if maxBytes == 0 {
-		maxBytes = defaultMaxResponseBytes
-	}
-	fit, err := fitDigestPage(resp, maxBytes)
-	if err != nil {
-		return nil, err
-	}
-	if fit < len(candidates) {
-		resp.Entries = candidates[:fit]
-		more = true
-	}
-	if more {
-		resp.More = true
-		resp.NextKey = resp.Entries[len(resp.Entries)-1].Key
-	}
-	return resp, nil
+	return digestDiffPage(ctx, req, resp, entries, g.policy)
 }
 
 // Like fitPullPage, but budget the actual exclusive key cursor instead of a
