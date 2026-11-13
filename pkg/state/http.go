@@ -113,19 +113,33 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 }
 
 // Pull retrieves entries from a remote peer.
+// Digest continuations are drained for callers using the entries-only seam.
 func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
-	resp, err := s.pull(ctx, addr, req)
-	if err != nil {
-		return nil, err
+	var entries []Entry
+	for {
+		resp, err := s.PullSnapshot(ctx, addr, req)
+		if err != nil {
+			return nil, err
+		}
+		if req.StartKey == nil && len(req.Digest) == 0 {
+			return resp.Entries, nil
+		}
+		if err := validateDigestResponse(req, resp); err != nil {
+			return nil, err
+		}
+		entries = append(entries, resp.Entries...)
+		if !resp.More {
+			return entries, nil
+		}
+		req.AfterKey = resp.NextKey
 	}
-	return resp.Entries, nil
 }
 
 // PullSnapshot performs a pull and returns the full response, including the
-// peer's GC horizon and paging cursor. A paged position pull (Limit > 0, no
-// digest) asks the peer to keep each page within this syncer's response limit.
+// peer's GC horizon and position or key cursor. Every page is bounded by the
+// smaller of MaxBytes and this syncer's response limit.
 func (s *HTTPSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
-	if req.MaxBytes == 0 && req.Limit > 0 && len(req.Digest) == 0 {
+	if req.MaxBytes == 0 || req.MaxBytes > s.maxResponseBytes {
 		req.MaxBytes = s.maxResponseBytes
 	}
 	return s.pull(ctx, addr, req)
@@ -234,6 +248,9 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	}
 	if limit < 0 {
 		return nil, fmt.Errorf("http state handler max request bytes must be >= 0")
+	}
+	if cfg.Engine.maxDigestBytes >= limit {
+		return nil, fmt.Errorf("gossip MaxDigestBytes must be below handler MaxRequestBytes")
 	}
 	if err := validatePushRequestLimit(cfg.Engine.maxPushBytes, limit); err != nil {
 		return nil, err

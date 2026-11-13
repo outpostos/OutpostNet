@@ -272,7 +272,15 @@ them on to other nodes whose horizon does not cover them. It is cleaned up
 through the digest check or a refused push rather than by a 410 on its first
 push. Both are lineage problems tracked by 03a.
 
-**Mixed versions.** No request field changes; the push response gains the
+**NET-8 upgrade.** Digest range paging changes the state wire protocol from
+1.0 to 2.0. Mixed old/new clusters are unsupported: request majors mismatch
+with HTTP 426, and the client rejects old response majors. Stop all hosts of
+a keyspace, upgrade their pinned Net dependency together and restart them.
+This includes Mesh, Let and Range test consumers as applicable; it does not
+change the durable log format. The following 03b/03d compatibility discussion
+is historical and applies only within protocol 1.0.
+
+**Historical mixed 03b/03d versions.** No request field changes; the push response gains the
 optional `node_id`. A 03b responder ignores vouching and keeps refusing lower
 horizons, which a 03d requester handles by resyncing as before. A 03d responder
 never vouches a 03b requester (no `node_id` in its push responses), so it applies
@@ -372,6 +380,12 @@ anti-entropy tick when they are enabled. Stores without an engine call
 `CollectTombstones` / `CompactIfNeeded` themselves.
 
 ## Impact on consumers and wire
+
+NET-8 supersedes the historical wire compatibility notes below: protocol 2.0
+adds `start_key` / `end_key` and `after_key` to digest requests, and `next_key`
+to diff responses. `MaxBytes` bounds digest responses too. See the cluster
+upgrade requirement above; optional JSON fields do not make 1.0/2.0 mixed
+operation safe. The remaining notes describe the earlier GC rollout.
 
 * Default behavior is unchanged: with both settings zero no entry is removed,
   no new record type is written, and the GC fields (`gc_horizon`) are never sent
