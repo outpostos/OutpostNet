@@ -23,6 +23,39 @@ func destinations(b map[string]Batch) []string {
 	return all
 }
 func (b *box) send(ctx context.Context, dest string, batch Batch) (BatchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	b.mu.Lock()
+	backoff := b.retries[dest]
+	b.mu.Unlock()
+	if b.cfg.Clock().Before(backoff.next) {
+		r := BatchResult{}
+		for _, e := range batch.Envelopes {
+			r.Envelopes = append(r.Envelopes, Result{e.MessageID, Full})
+		}
+		for _, rct := range batch.Receipts {
+			r.Receipts = append(r.Receipts, Result{rct.MessageID, Full})
+		}
+		return r, nil
+	}
+	failed := true
+	defer func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if !failed {
+			delete(b.retries, dest)
+			return
+		}
+		delay := backoff.delay * 2
+		if delay < b.cfg.RetryMin {
+			delay = b.cfg.RetryMin
+		}
+		if delay > b.cfg.RetryMax || delay < 0 {
+			delay = b.cfg.RetryMax
+		}
+		b.retries[dest] = retry{next: b.cfg.Clock().Add(delay), delay: delay}
+	}()
 	if b.cfg.Transport == nil {
 		return BatchResult{}, errors.New("delivery transport required")
 	}
@@ -55,6 +88,12 @@ func (b *box) send(ctx context.Context, dest string, batch Batch) (BatchResult, 
 	}
 	if !validate(ids, r.Envelopes) || !validate(receipts, r.Receipts) {
 		return BatchResult{}, errors.New("invalid delivery transport response")
+	}
+	failed = false
+	for _, item := range append(append([]Result(nil), r.Envelopes...), r.Receipts...) {
+		if item.Code == Full {
+			failed = true
+		}
 	}
 	return r, nil
 }

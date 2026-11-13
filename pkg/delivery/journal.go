@@ -62,6 +62,7 @@ type box struct {
 	fatal           error
 	changed         chan struct{}
 	retries         map[string]retry
+	usedBytes       int64
 }
 
 func openBox(cfg Config, kind string) (_ *box, err error) {
@@ -197,11 +198,19 @@ func (b *box) recover() error {
 func (b *box) apply(tx transaction) {
 	if tx.Snapshot {
 		b.entries = make(map[MessageID]entry)
+		b.usedBytes = 0
 	}
 	for _, e := range tx.Upserts {
+		if previous, ok := b.entries[e.Envelope.MessageID]; ok {
+			b.usedBytes -= int64(encodedSize(previous))
+		}
 		b.entries[e.Envelope.MessageID] = e
+		b.usedBytes += int64(encodedSize(e))
 	}
 	for _, id := range tx.Deletes {
+		if previous, ok := b.entries[id]; ok {
+			b.usedBytes -= int64(encodedSize(previous))
+		}
 		delete(b.entries, id)
 		delete(b.leased, id)
 	}
@@ -223,11 +232,10 @@ func (b *box) commit(tx transaction) error {
 	if tx.MessageSeq < b.messageSeq {
 		tx.MessageSeq = b.messageSeq
 	}
-	data, e := json.Marshal(tx)
+	data, e := encodeTransaction(tx)
 	if e != nil {
 		return e
 	}
-	data = append(data, '\n')
 	n, e := b.file.Write(data)
 	if e == nil && n != len(data) {
 		e = io.ErrShortWrite
@@ -252,6 +260,11 @@ func (b *box) commit(tx transaction) error {
 	close(b.changed)
 	b.changed = make(chan struct{})
 	return nil
+}
+
+func encodeTransaction(tx transaction) ([]byte, error) {
+	data, err := json.Marshal(tx)
+	return append(data, '\n'), err
 }
 func (b *box) Close() error {
 	b.mu.Lock()

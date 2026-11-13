@@ -82,7 +82,7 @@ func (in *Inbox) Receive(ctx context.Context, mailbox string) (Envelope, error) 
 			return Envelope{}, err
 		}
 		all := ordered(in.entries, func(e entry) bool {
-			return !e.Acked && e.Envelope.Mailbox == mailbox && !in.leased[e.Envelope.MessageID]
+			return !e.Acked && in.cfg.Clock().Before(e.Envelope.ExpiryTime) && e.Envelope.Mailbox == mailbox && !in.leased[e.Envelope.MessageID]
 		})
 		if len(all) > 0 {
 			e := clone(all[0].Envelope)
@@ -141,6 +141,9 @@ func (in *Inbox) Ack(ctx context.Context, id MessageID) error {
 func (in *Inbox) Flush(ctx context.Context) error {
 	in.flushMu.Lock()
 	defer in.flushMu.Unlock()
+	if err := in.Collect(ctx); err != nil {
+		return err
+	}
 	in.mu.Lock()
 	if err := in.writable(); err != nil {
 		in.mu.Unlock()

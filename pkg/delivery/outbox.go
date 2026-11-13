@@ -47,11 +47,7 @@ func (o *Outbox) Send(ctx context.Context, e Envelope) (MessageID, error) {
 	return e.MessageID, nil
 }
 func (b *box) usage() int64 {
-	var n int64
-	for _, e := range b.entries {
-		n += int64(encodedSize(e))
-	}
-	return n
+	return b.usedBytes
 }
 func (o *Outbox) Status(id MessageID) (Status, error) {
 	o.mu.Lock()
@@ -145,6 +141,9 @@ func ordered(entries map[MessageID]entry, keep func(entry) bool) []entry {
 func (o *Outbox) Flush(ctx context.Context) error {
 	o.flushMu.Lock()
 	defer o.flushMu.Unlock()
+	if err := o.Collect(ctx); err != nil {
+		return err
+	}
 	o.mu.Lock()
 	if err := o.writable(); err != nil {
 		o.mu.Unlock()
