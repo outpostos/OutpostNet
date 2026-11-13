@@ -1,10 +1,15 @@
 package delivery
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/outpostos/OutpostNet/internal/peerredact"
 )
+
+// net/http can rewrite URL passwords to *** before constructing url.Error.
+// Match URL text too, so that spelling never bypasses exact-address redaction.
+var errorURL = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 type httpError struct {
 	message string
@@ -22,5 +27,6 @@ func safeHTTPError(addr, token string, err error) error {
 			message = strings.ReplaceAll(message, secret, peerredact.Secret)
 		}
 	}
+	message = errorURL.ReplaceAllString(message, peerredact.Secret)
 	return &httpError{message: "delivery HTTP: " + message, cause: err}
 }

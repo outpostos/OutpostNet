@@ -85,7 +85,7 @@ func TestHTTPIdentityProtocolAndResponseValidation(t *testing.T) {
 func TestHTTPNoCredentialOrPeerURLInErrorsOrLogs(t *testing.T) {
 	const token = "unique-test-bearer"
 	const password = "unique-peer-password"
-	for _, mode := range []string{"remote_body", "client_error", "decode", "redirect"} {
+	for _, mode := range []string{"remote_body", "client_error", "decode", "redirect", "network_error"} {
 		t.Run(mode, func(t *testing.T) {
 			peers := map[string]string{}
 			var logs bytes.Buffer
@@ -108,6 +108,9 @@ func TestHTTPNoCredentialOrPeerURLInErrorsOrLogs(t *testing.T) {
 			}))
 			defer endpoint.Close()
 			peers["b"] = strings.Replace(endpoint.URL, "http://", "http://user:"+password+"@", 1)
+			if mode == "network_error" {
+				endpoint.Close()
+			}
 			a := newHTTPNode(t, "a", peers, func(_ *delivery.Config, w *delivery.HTTPTransportConfig, _ *delivery.HTTPHandlerConfig) {
 				w.AuthToken = token
 				if mode == "client_error" {
@@ -122,7 +125,7 @@ func TestHTTPNoCredentialOrPeerURLInErrorsOrLogs(t *testing.T) {
 			slog.Error("flush failed", "error", err)
 			raw, _ := json.Marshal(a.out.DeliveryStatus())
 			text := logs.String() + err.Error() + string(raw)
-			for _, secret := range []string{token, password, endpoint.URL, peers["b"]} {
+			for _, secret := range []string{token, password, endpoint.URL, peers["b"], "http://", "https://"} {
 				if strings.Contains(text, secret) {
 					t.Fatalf("credential or address leaked in %s", mode)
 				}
