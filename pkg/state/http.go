@@ -115,14 +115,20 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 // Pull retrieves entries from a remote peer.
 // Digest continuations are drained for callers using the entries-only seam.
 func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
+	// Preserve the position convenience API: only an explicit paging caller can
+	// consume More/NextSincePosition. An unpaged oversize response must fail.
+	if req.StartKey == nil && len(req.Digest) == 0 {
+		resp, err := s.pull(ctx, addr, req)
+		if err != nil {
+			return nil, err
+		}
+		return resp.Entries, nil
+	}
 	var entries []Entry
 	for {
 		resp, err := s.PullSnapshot(ctx, addr, req)
 		if err != nil {
 			return nil, err
-		}
-		if req.StartKey == nil && len(req.Digest) == 0 {
-			return resp.Entries, nil
 		}
 		if err := validateDigestResponse(req, resp); err != nil {
 			return nil, err

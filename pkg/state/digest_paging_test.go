@@ -505,3 +505,31 @@ func TestHTTPSyncerPullDrainsDigestDiff(t *testing.T) {
 		t.Fatalf("Pull silently lost diff entries: got %d, want 10", len(entries))
 	}
 }
+
+func TestHTTPSyncerPositionPullDoesNotSilentlyTruncate(t *testing.T) {
+	ctx := context.Background()
+	remote := pagingStore(t, false, "remote")
+	for i := 0; i < 10; i++ {
+		if _, err := remote.Put(ctx, fmt.Sprintf("key/%02d", i), bytes.Repeat([]byte("x"), 300)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target, err := NewGossipEngine(GossipConfig{NodeID: "remote", Store: remote, Syncer: noopSyncer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHTTPHandler(HTTPHandlerConfig{NodeID: "remote", Engine: target, AuthToken: "digest-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	syncer, err := NewHTTPSyncer(HTTPSyncerConfig{NodeID: "local", AuthToken: "digest-test", MaxResponseBytes: 1100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = syncer.Pull(ctx, server.URL, PullRequest{})
+	if err == nil || !strings.Contains(err.Error(), "response body exceeds 1100 bytes") {
+		t.Fatalf("unpaged position pull must retain its visible size failure, got %v", err)
+	}
+}
