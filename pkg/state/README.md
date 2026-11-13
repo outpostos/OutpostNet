@@ -63,8 +63,52 @@ Push paging and write limits (NET-7):
   Wrappers should forward `BytePageStore` and `MaxEntryBytes() int64` when they
   change the store's default limit. Byte budgets count encoded entries plus
   commas, excluding the array; a first oversized entry is returned alone.
-  The state protocol remains 1.0. Digest anti-entropy is still complete and
-  unpaged; its pagination is NET-8.
+
+Digest anti-entropy paging (NET-8, ADR-0004 D2):
+
+- `GossipConfig.MaxDigestBytes` defaults to 768 KiB of **complete encoded
+  request**, including the range, digest, horizon and continuation envelope.
+  It must be positive and strictly below both the syncer's declared peer
+  request limit and the local handler's limit. Zero selects the default.
+- Each peer receives a fresh, complete local digest every round, sorted into
+  contiguous `[start_key, end_key)` intervals. `start_key` is explicitly
+  present (a Go `*string`); the first is the empty string. Empty `end_key`
+  means no upper bound. An empty requester sends one unbounded digest interval,
+  which still runs the GC handshake; it is never mistaken for a snapshot.
+- Every interval includes all local keys in its bounds, including tombstones.
+  Responders check only those bounds for collected values (410) and diff,
+  returning keys the requester lacks as well as newer entries. The GC check
+  repeats over the entire interval on each continuation, including keys before
+  the diff cursor. Sampling, truncation and spreading coverage across rounds
+  are forbidden; the proof is in [tombstone GC](../../docs/state-tombstone-gc.md).
+- Diff pages are sorted by key, capped at 256 entries by default and at
+  `PullRequest.MaxBytes` (default 1 MiB). `HTTPSyncer.PullSnapshot` caps that
+  budget at `MaxResponseBytes`, including JSON escaping, the `more` /
+  `next_key` envelope and the HTTP newline. The requester repeats the complete
+  interval digest with exclusive `after_key = next_key` until `more` is false,
+  then advances to the next digest interval. `HTTPSyncer.Pull` drains digest
+  continuations for callers using its entries-only convenience API.
+- A failed transfer, invalid continuation, apply error or 410/resync abandons
+  the round; the next attempt starts from the first interval with a fresh
+  digest. Already applied pages are ordinary merges; `LastPullTime` advances
+  only after every interval finishes. Resync alone never counts as a pull.
+- A single digest record/envelope that cannot fit fails explicitly with
+  `DigestEntryTooLargeError`; a diff entry that cannot fit fails with
+  `PullEntryTooLargeError`. No oversized request is sent. A remote continuation
+  key larger than the reserved local key budget can also cause an explicit
+  digest size failure; raise the digest and peer limits in that case.
+- Custom Syncers used for anti-entropy must implement `SnapshotSyncer` to return
+  paging metadata for both digest and snapshot pulls. Missing support fails
+  visibly. Stores still supply `ListEntries` for the full digest and each diff
+  page; payloads and sorting are not bounded to one page in memory.
+
+**Protocol upgrade:** NET-8 raises `StateProtocolVersion` from 1.0 to **2.0**.
+New/old majors reject each other (HTTP 426 for requests; response validation
+also rejects an old peer). Mixed clusters are unsupported. Stop all hosts
+embedding `pkg/state`, upgrade their pinned Net dependency and restart the
+whole keyspace together (including Mesh, Let and Range test consumers where
+applicable). Durable log format is unchanged. Consumer dependency upgrades and
+three-VM RANGE-2 acceptance are separate tickets.
 
 Durable store:
 

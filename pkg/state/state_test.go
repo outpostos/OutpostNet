@@ -399,7 +399,7 @@ func TestHTTPAdapterRequiresObjectProtocolVersion(t *testing.T) {
 		return resp.StatusCode
 	}
 	policy := NewHLCLWWPolicy().ID()
-	if status := post(`{"protocol_version":{"major":1,"minor":0},"policy_id":"` + policy + `","source":"node-b","entries":[]}`); status != http.StatusOK {
+	if status := post(`{"protocol_version":{"major":2,"minor":0},"policy_id":"` + policy + `","source":"node-b","entries":[]}`); status != http.StatusOK {
 		t.Fatalf("object protocol version: status %d, want 200", status)
 	}
 	if status := post(`{"protocol_version":1,"policy_id":"` + policy + `","source":"node-b","entries":[]}`); status != http.StatusBadRequest {
@@ -409,7 +409,7 @@ func TestHTTPAdapterRequiresObjectProtocolVersion(t *testing.T) {
 
 func TestHTTPSyncerRejectsOversizeSuccessAndErrorResponses(t *testing.T) {
 	ctx := context.Background()
-	oversizeJSON := `{"protocol_version":{"major":1,"minor":0},"policy_id":"outpostnet.state.hlc-lww/v1","accepted":0,"rejected":0,"padding":"` + strings.Repeat("x", 128) + `"}`
+	oversizeJSON := `{"protocol_version":{"major":2,"minor":0},"policy_id":"outpostnet.state.hlc-lww/v1","accepted":0,"rejected":0,"padding":"` + strings.Repeat("x", 128) + `"}`
 	oversizeError := strings.Repeat("e", 128)
 	tests := []struct {
 		name   string
@@ -464,11 +464,11 @@ func TestHTTPSyncerRejectsMissingOrMismatchedPolicyResponse(t *testing.T) {
 	}{
 		{
 			name: "missing policy id",
-			body: `{"protocol_version":{"major":1,"minor":0},"accepted":0,"rejected":0}`,
+			body: `{"protocol_version":{"major":2,"minor":0},"accepted":0,"rejected":0}`,
 		},
 		{
 			name: "mismatched policy id",
-			body: `{"protocol_version":{"major":1,"minor":0},"policy_id":"other-policy/v1","accepted":0,"rejected":0}`,
+			body: `{"protocol_version":{"major":2,"minor":0},"policy_id":"other-policy/v1","accepted":0,"rejected":0}`,
 		},
 	}
 	for _, tt := range tests {
@@ -931,3 +931,12 @@ func (p epochPolicy) CompareEntryToDigest(entry Entry, record DigestRecord) int 
 }
 
 var _ = time.Second
+
+func (n noopSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
+	entries, err := n.Pull(ctx, addr, req)
+	return &PullResponse{Entries: entries}, err
+}
+func (s *scriptedPullSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
+	entries, err := s.Pull(ctx, addr, req)
+	return &PullResponse{Entries: entries}, err
+}

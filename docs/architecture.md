@@ -43,9 +43,22 @@ the envelope and remains strictly below the HTTP request limit (default
 the local handler also validates its own limit. There is no limit negotiation.
 Store page reads copy page payloads instead of the whole backlog. See
 [state configuration and semantics](../pkg/state/README.md) for the exact
-encoding budget, optional store interfaces and counter lifetime. Wire protocol
-1.0, per-entry rejection and 410 resync semantics are preserved; digest
-anti-entropy remains complete and unpaged pending NET-8.
+encoding budget, optional store interfaces and counter lifetime.
+
+Digest anti-entropy sends contiguous key intervals within each round, bounded
+by `GossipConfig.MaxDigestBytes` (768 KiB including the request envelope).
+Intervals cover the entire key space at every peer: first start is empty,
+last end is unbounded, and each digest is complete within its half-open bounds.
+Diff responses page by encoded `MaxBytes` and an exclusive key cursor; the
+requester finishes each interval before advancing. Any failed page or resync
+abandons the round; the next round starts over. Pull success is recorded only
+after every interval completes. Collected-value checks run over the complete
+interval on every continuation (see the [GC proof](state-tombstone-gc.md)).
+
+NET-8 raises the state protocol to **2.0**; old/new majors reject each other.
+Upgrade the whole cluster of hosts embedding `pkg/state` together, including
+consumer dependency pins. Durable format is unchanged. Per-entry rejection
+and 410 snapshot resync retain their existing semantics.
 
 ## Core Concept
 

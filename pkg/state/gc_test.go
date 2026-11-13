@@ -116,13 +116,18 @@ func TestLocalStoreCollectsTombstonesOnlyAfterRetention(t *testing.T) {
 
 // loopNet routes in-process gossip between engines with a directional blocklist.
 type loopNet struct {
-	mu      sync.Mutex
-	engines map[string]*GossipEngine
-	blocked map[string]bool
+	digestBytes int64
+	mu          sync.Mutex
+	engines     map[string]*GossipEngine
+	blocked     map[string]bool
 }
 
-func newLoopNet() *loopNet {
-	return &loopNet{engines: make(map[string]*GossipEngine), blocked: make(map[string]bool)}
+func newLoopNet(budget ...int64) *loopNet {
+	var digestBytes int64
+	if len(budget) > 0 {
+		digestBytes = budget[0]
+	}
+	return &loopNet{digestBytes: digestBytes, engines: make(map[string]*GossipEngine), blocked: make(map[string]bool)}
 }
 
 func (n *loopNet) setBlocked(a, b string, blocked bool) {
@@ -186,10 +191,11 @@ func newLoopNode(t *testing.T, net *loopNet, id string, clock PhysicalClock, pee
 	node := &loopNode{id: id, store: mustGCMemoryStore(t, id, clock, testRetention)}
 	node.peers.Store(peers)
 	engine, err := NewGossipEngine(GossipConfig{
-		NodeID:       id,
-		Store:        node.store,
-		Syncer:       loopSyncer{net: net, from: id},
-		PeerProvider: PeerProviderFunc(func() []string { return node.peers.Load() }),
+		NodeID:         id,
+		Store:          node.store,
+		Syncer:         loopSyncer{net: net, from: id},
+		MaxDigestBytes: net.digestBytes,
+		PeerProvider:   PeerProviderFunc(func() []string { return node.peers.Load() }),
 	})
 	if err != nil {
 		t.Fatalf("NewGossipEngine: %v", err)
@@ -272,9 +278,14 @@ func TestReplicatedGCWaitsUntilEveryPeerAcknowledged(t *testing.T) {
 }
 
 func TestLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T) {
+	for _, budget := range []int64{0, 512, 680} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { runLaggingPeerIsForcedToResyncAndCannotResurrect(t, budget) })
+	}
+}
+func runLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T, budget int64) {
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
-	net := newLoopNet()
+	net := newLoopNet(budget)
 	a := newLoopNode(t, net, "node-a", clock, "node-b", "node-l")
 	b := newLoopNode(t, net, "node-b", clock, "node-a")
 	l := newLoopNode(t, net, "node-l", clock, "node-a")

@@ -188,9 +188,10 @@ rest on vouching. It rests on three mechanisms, none of which vouching skips:
    tombstone, never accepts that value. A 410 never merges an entry anywhere; it
    only makes the requester replace increments by a snapshot resync, and when
    it is skipped the exchange proceeds as an ordinary push or digest pull.
-2. **Full digest check.** Every anti-entropy round sends the requester's
-   complete digest to every peer, and the responder answers 410 to any digest
-   that holds a live value `<= H_R` for a key `R` no longer has, vouched or not.
+2. **Range-complete digest check.** Every anti-entropy round sends every peer
+   contiguous digest intervals covering the whole key space (see the invariant
+   below). Within each interval the responder answers 410 if the requester
+   holds a live value `<= H_R` for a key `R` no longer has, vouched or not.
    That is what removes a stale value from a requester that still holds it.
 3. **Per-entry rejection.** A pushed value refused as `beyond_gc_horizon`
    makes the pusher resync from the receiver.
@@ -211,15 +212,40 @@ resync refusal) run unchanged; with vouching forced on for every identified
 requester they fail only on their "requester was resynced" assertions, never by
 resurrecting a key, which is the evidence that safety does not depend on it.
 
-**Invariant: the digest must be complete.** Mechanism 2 only works because the
-digest of every anti-entropy round lists every local entry and is sent to every
-peer. A digest must not be sampled, sharded across rounds, truncated, or skipped
-for some peers or rounds (for example as a bandwidth optimisation): any of these
-lets a requester keep, serve and pass on a value deleted and collected
-elsewhere for as long as the omitted key is not offered, and with vouching that
-requester is not otherwise forced to resync. Changing the digest requires
-replacing this argument first. `GossipEngine.LocalDigest`, `AntiEntropyOnce` and
-`checkRequesterHoldsCollected` point back here.
+**Invariant: each round covers all keys at every peer.** A round submits a
+complete local digest to each peer, optionally split into sorted contiguous
+intervals `[start_key, end_key)`. The first starts at the empty string (the
+minimum key); the last has no upper bound. Each intervening end equals the
+next start: the lower boundary is included, the upper boundary is excluded.
+Thus a boundary key belongs to exactly the following interval. Every local key,
+including tombstones, is included in exactly one interval's digest. Sampling,
+truncation, skipping peers, and splitting coverage across rounds are forbidden.
+
+Mechanism 2 remains complete: any stale local value belongs to one interval;
+when that interval reaches the collecting responder, its live digest record
+is checked and yields 410, even at an inclusive lower boundary. A record at an
+exclusive upper boundary is checked by the following interval. The responder
+checks only the declared interval, regardless of the diff continuation cursor;
+continuations repeat the complete interval digest, so response paging never
+hides a collected value. Request records outside the interval are invalid.
+
+An interval containing no requester keys still declares its bounds and sends
+an empty digest. It is a digest exchange, not a position snapshot: the horizon
+handshake still runs. There is no held value for mechanism 2 to reject in that
+interval, but responder keys absent from the requester must still be returned
+by the diff. This includes keys before the requester's first key, between its
+keys, and after its last key. An empty requester sends one unbounded interval.
+
+Diff responses page in key order inside the interval using `More` and an
+exclusive last-key cursor. The requester finishes all continuations before the
+next interval. Only completion of every interval records pull success. Any
+failed page, apply failure, or 410/resync invalidates the round; the next round
+starts at the first interval with a fresh complete digest. Already applied
+pages remain ordinary horizon-checked merges, not a successful partial round.
+Concurrent writes are ordinary later state changes: a round's digest is a
+local snapshot, not a consistent distributed cut; the next round covers them.
+`LocalDigest`, `AntiEntropyOnce` and `checkRequesterHoldsCollected` implement
+this invariant.
 
 **Healthy cluster.** With stable membership, every member acknowledged every
 collected tombstone before any node collected it (the GC gate), no node holds a
@@ -246,7 +272,15 @@ them on to other nodes whose horizon does not cover them. It is cleaned up
 through the digest check or a refused push rather than by a 410 on its first
 push. Both are lineage problems tracked by 03a.
 
-**Mixed versions.** No request field changes; the push response gains the
+**NET-8 upgrade.** Digest range paging changes the state wire protocol from
+1.0 to 2.0. Mixed old/new clusters are unsupported: request majors mismatch
+with HTTP 426, and the client rejects old response majors. Stop all hosts of
+a keyspace, upgrade their pinned Net dependency together and restart them.
+This includes Mesh, Let and Range test consumers as applicable; it does not
+change the durable log format. The following 03b/03d compatibility discussion
+is historical and applies only within protocol 1.0.
+
+**Historical mixed 03b/03d versions.** No request field changes; the push response gains the
 optional `node_id`. A 03b responder ignores vouching and keeps refusing lower
 horizons, which a 03d requester handles by resyncing as before. A 03d responder
 never vouches a 03b requester (no `node_id` in its push responses), so it applies
@@ -346,6 +380,12 @@ anti-entropy tick when they are enabled. Stores without an engine call
 `CollectTombstones` / `CompactIfNeeded` themselves.
 
 ## Impact on consumers and wire
+
+NET-8 supersedes the historical wire compatibility notes below: protocol 2.0
+adds `start_key` / `end_key` and `after_key` to digest requests, and `next_key`
+to diff responses. `MaxBytes` bounds digest responses too. See the cluster
+upgrade requirement above; optional JSON fields do not make 1.0/2.0 mixed
+operation safe. The remaining notes describe the earlier GC rollout.
 
 * Default behavior is unchanged: with both settings zero no entry is removed,
   no new record type is written, and the GC fields (`gc_horizon`) are never sent

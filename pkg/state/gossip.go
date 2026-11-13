@@ -26,6 +26,8 @@ type GossipConfig struct {
 	BackoffMax          time.Duration
 	// MaxPushBytes bounds the encoded push request (default 768 KiB).
 	MaxPushBytes int64
+	// MaxDigestBytes bounds each encoded digest request (default 768 KiB).
+	MaxDigestBytes int64
 	// MaxPushPagesPerRound bounds work per peer (default 16).
 	MaxPushPagesPerRound int
 }
@@ -42,6 +44,7 @@ type GossipEngine struct {
 	backoffBase         time.Duration
 	backoffMax          time.Duration
 
+	maxDigestBytes       int64
 	maxPushBytes         int64
 	maxPushPagesPerRound int
 
@@ -135,6 +138,13 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	if err := validatePushRequestLimit(maxPushBytes, requestLimit); err != nil {
 		return nil, err
 	}
+	maxDigestBytes := cfg.MaxDigestBytes
+	if maxDigestBytes == 0 {
+		maxDigestBytes = 768 << 10
+	}
+	if maxDigestBytes <= 0 || maxDigestBytes >= requestLimit {
+		return nil, fmt.Errorf("gossip MaxDigestBytes must be positive and below the HTTP request limit (%d)", requestLimit)
+	}
 	if gs, ok := cfg.Store.(gcStore); ok {
 		// From now on tombstones may only be collected through the engine, which
 		// knows the peers that must acknowledge them first.
@@ -152,6 +162,7 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 		backoffMax:           backoffMax,
 		peerStates:           make(map[string]*peerState),
 		maxPushBytes:         maxPushBytes,
+		maxDigestBytes:       maxDigestBytes,
 		maxPushPagesPerRound: maxPages,
 	}, nil
 }
@@ -291,23 +302,13 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			slog.Debug("state gossip: peer in backoff", "peer", redactedPeerURL(addr), "until", until)
 			continue
 		}
-		// The full digest goes to every peer on every round: the responder's
-		// collected-value check depends on it (docs/state-tombstone-gc.md
-		// "Invariant: the digest must be complete").
+		// Each peer gets a fresh, range-complete digest; no cursor survives a round.
 		digest, err := g.LocalDigest(ctx)
 		if err != nil {
 			return err
 		}
-		// A pull reports the peer's state as of when it was asked, so its start
-		// time is what "inbound caught up" can claim.
 		started := time.Now()
-		entries, err := g.syncer.Pull(ctx, addr, PullRequest{
-			ProtocolVersion: StateProtocolVersion,
-			PolicyID:        g.policy.ID(),
-			SourceNodeID:    g.nodeID,
-			GCHorizon:       g.localHorizon(),
-			Digest:          digest,
-		})
+		err = g.pullDigestRound(ctx, addr, digest)
 		if err != nil {
 			var resync *ResyncRequiredError
 			if errors.As(err, &resync) {
@@ -319,31 +320,6 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 				continue
 			}
 			errs = append(errs, g.recordPeerFailure(addr, "pull", err, now))
-			continue
-		}
-		var applyErrs []error
-		var beyondHorizon int
-		for _, entry := range entries {
-			if _, err := g.store.Apply(ctx, entry); err != nil {
-				var beyond *BeyondGCHorizonError
-				if errors.As(err, &beyond) {
-					// The peer lags behind our GC horizon. Refusing its stale entry is
-					// the intended outcome, not a local failure; the peer resyncs on
-					// its own next exchange with us.
-					beyondHorizon++
-					continue
-				}
-				applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", redactedPeerURL(addr), entry.Key, err))
-			}
-		}
-		if beyondHorizon > 0 {
-			slog.Warn("state gossip: refused pulled entries below the local GC horizon; peer must resync",
-				"peer", redactedPeerURL(addr),
-				"refused", beyondHorizon,
-			)
-		}
-		if err := errors.Join(applyErrs...); err != nil {
-			errs = append(errs, g.recordPeerFailure(addr, "pull-apply", err, now))
 			continue
 		}
 		g.recordPullSuccess(addr, started)
@@ -421,19 +397,8 @@ func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) 
 		PolicyID:        g.policy.ID(),
 		GCHorizon:       timestampPtr(horizon),
 	}
-	if len(req.Digest) > 0 {
-		if err := g.checkRequesterHorizon(ctx, horizon, req.GCHorizon, req.SourceNodeID); err != nil {
-			return nil, err
-		}
-		if err := g.checkRequesterHoldsCollected(ctx, horizon, req.Digest); err != nil {
-			return nil, err
-		}
-		entries, err := g.diffAgainstDigest(ctx, req.Digest, req.Limit)
-		if err != nil {
-			return nil, err
-		}
-		resp.Entries = entries
-		return resp, nil
+	if req.StartKey != nil || len(req.Digest) > 0 {
+		return g.handleDigestResponse(ctx, req, resp, horizon)
 	}
 	entries, err := g.store.ChangesSince(ctx, req.SincePosition, req.Limit)
 	if err != nil {
@@ -508,7 +473,7 @@ func (e *PullEntryTooLargeError) Error() string {
 
 // LocalDigest returns the local summary using the engine policy. It lists every
 // local entry. Tombstone GC safety depends on that: see
-// docs/state-tombstone-gc.md "Invariant: the digest must be complete" before
+// docs/state-tombstone-gc.md "Invariant: each round covers all keys at every peer" before
 // sampling, sharding or truncating it.
 func (g *GossipEngine) LocalDigest(ctx context.Context) (map[string]DigestRecord, error) {
 	entries, err := g.store.ListEntries(ctx)
@@ -520,24 +485,6 @@ func (g *GossipEngine) LocalDigest(ctx context.Context) (map[string]DigestRecord
 		digest[entry.Key] = newDigestRecord(entry, g.policy)
 	}
 	return digest, nil
-}
-
-func (g *GossipEngine) diffAgainstDigest(ctx context.Context, digest map[string]DigestRecord, limit int) ([]Entry, error) {
-	entries, err := g.store.ListEntries(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]Entry, 0, len(entries))
-	for _, entry := range entries {
-		record, ok := digest[entry.Key]
-		if !ok || g.policy.CompareEntryToDigest(entry, record) > 0 {
-			result = append(result, entry)
-		}
-	}
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
 }
 
 func (g *GossipEngine) allowAttempt(addr string, now time.Time) (bool, time.Time) {
@@ -743,8 +690,8 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// SnapshotSyncer is implemented by syncers that can page through a peer's full
-// state with GC horizon metadata. Snapshot resync requires it.
+// SnapshotSyncer returns complete pull response metadata for both digest diff
+// pages and position snapshots. Anti-entropy and snapshot resync require it.
 type SnapshotSyncer interface {
 	PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error)
 }
@@ -958,7 +905,7 @@ func (g *GossipEngine) peersAnsweringAs(nodeID string) []string {
 // push cursor already passed it), and only its resync from us removes it.
 // Vouched requesters are checked too: this check, not vouching, is what cleans
 // up a requester holding a stale value, and it is only as complete as the digest
-// (docs/state-tombstone-gc.md "Invariant: the digest must be complete").
+// (docs/state-tombstone-gc.md "Invariant: each round covers all keys at every peer").
 func (g *GossipEngine) checkRequesterHoldsCollected(ctx context.Context, local Timestamp, digest map[string]DigestRecord) error {
 	if local.isZero() {
 		return nil
@@ -988,4 +935,32 @@ func hasBeyondHorizonRejection(resp *PushResponse) bool {
 		}
 	}
 	return false
+}
+
+func (g *GossipEngine) applyDigestPage(ctx context.Context, addr string, entries []Entry) error {
+	var applyErrs []error
+	var beyondHorizon int
+	for _, entry := range entries {
+		if _, err := g.store.Apply(ctx, entry); err != nil {
+			var beyond *BeyondGCHorizonError
+			if errors.As(err, &beyond) {
+				// The peer lags behind our GC horizon. Refusing its stale entry is
+				// the intended outcome, not a local failure; the peer resyncs on
+				// its own next exchange with us.
+				beyondHorizon++
+				continue
+			}
+			applyErrs = append(applyErrs, fmt.Errorf("apply pulled entry from %s key %q: %w", redactedPeerURL(addr), entry.Key, err))
+		}
+	}
+	if beyondHorizon > 0 {
+		slog.Warn("state gossip: refused pulled entries below the local GC horizon; peer must resync",
+			"peer", redactedPeerURL(addr),
+			"refused", beyondHorizon,
+		)
+	}
+	if err := errors.Join(applyErrs...); err != nil {
+		return err
+	}
+	return nil
 }
