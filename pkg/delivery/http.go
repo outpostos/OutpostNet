@@ -238,7 +238,13 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(BatchPath, func(w http.ResponseWriter, r *http.Request) {
-		fail := func(code int, message string) { http.Error(w, message, code) }
+		fail := func(code int, message string) {
+			if int64(len(message)+1) > cfg.MaxResponseBytes {
+				w.WriteHeader(code)
+				return
+			}
+			http.Error(w, message, code)
+		}
 		if r.Method != http.MethodPost {
 			fail(http.StatusMethodNotAllowed, "delivery requires POST")
 			return

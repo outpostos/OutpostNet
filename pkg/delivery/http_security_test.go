@@ -134,3 +134,18 @@ func TestHTTPNoCredentialOrPeerURLInErrorsOrLogs(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPErrorResponsesRespectByteCap(t *testing.T) {
+	peers := map[string]string{}
+	b := newHTTPNode(t, "b", peers, nil)
+	h, err := delivery.NewHTTPHandler(delivery.HTTPHandlerConfig{NodeID: "b", AuthToken: "test-token", Inbox: b.in, MaxResponseBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", delivery.BatchPath, strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 401 || w.Body.Len() > 1 {
+		t.Fatalf("status %d, response %d bytes", w.Code, w.Body.Len())
+	}
+}

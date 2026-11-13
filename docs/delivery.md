@@ -286,7 +286,8 @@ from expiry. Gauges reflect stored records until Collect/Flush maintenance.
 Counters reset on reopen. Send success/failure counts actual Flush batch
 attempts, not skipped backoff polls; `full` counts as a failed attempt. Unknown
 peer counts resolution failures. Receiver counters count duplicate, expired,
-invalid and full admission results, including retries; local committed expiry
+invalid and full admission results, including retries; Outbox also counts receipt
+admission results and committed rejections. Local committed expiry
 also increments expiry. Outbox full counts Send refusals. Counters do not claim
 business execution or network-wide delivery. See [observation.md](observation.md)
 for mapping these facts to the existing Range MetricSample event stream.

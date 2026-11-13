@@ -231,7 +231,7 @@ mailbox, payload, endpoint address, token or error text becomes a metric label.
 | `delivery_unknown_peer_total` | Destination missing from existing membership/identity mapping |
 | `delivery_duplicate_total` | Receiver deduplication hits |
 | `delivery_expired_total` | Expired arrivals plus locally committed expiry transitions |
-| `delivery_rejected_total` | Invalid admission results |
+| `delivery_rejected_total` | Invalid envelope/receipt admission results and committed Outbox rejections |
 | `delivery_inbox_full_total`, `delivery_outbox_full_total` | Receiver admission refusals / local Send quota refusals |
 
 Queue gauges survive box recovery; counters describe this process and reset on

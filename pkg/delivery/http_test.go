@@ -419,3 +419,51 @@ func TestHTTPUnknownPeerBackoffRecoveryAndObservation(t *testing.T) {
 		t.Fatalf("recovered: %+v", s)
 	}
 }
+
+func TestHTTPHandoffReceiptResponseLoss(t *testing.T) {
+	peers := map[string]string{}
+	a := newHTTPNode(t, "a", peers, nil)
+	b := newHTTPNode(t, "b", peers, func(c *delivery.Config, _ *delivery.HTTPTransportConfig, _ *delivery.HTTPHandlerConfig) {
+		c.RetryMin = time.Millisecond
+		c.RetryMax = time.Millisecond
+	})
+	id := sendHTTP(t, a, "b", []byte("once"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.out.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e, err := b.in.Receive(ctx, "commands")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.in.Ack(ctx, e.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	lost := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.handler.ServeHTTP(httptest.NewRecorder(), r)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			panic(err)
+		}
+		conn.Close()
+	}))
+	defer lost.Close()
+	peers["a"] = lost.URL
+	if err := b.in.Flush(ctx); err == nil {
+		t.Fatal("lost receipt response accepted")
+	}
+	statusHTTP(t, a, id, delivery.HandedOff)
+	if b.in.DeliveryStatus().Peers[0].PendingReceipts != 1 {
+		t.Fatal("unconfirmed receipt discarded")
+	}
+	peers["a"] = a.server.URL
+	time.Sleep(2 * time.Millisecond)
+	if err := b.in.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b.in.DeliveryStatus().Peers[0].PendingReceipts != 0 || a.out.DeliveryStatus().Peers[0].Counters.Duplicate != 1 {
+		t.Fatal("receipt retry did not deduplicate")
+	}
+	statusHTTP(t, a, id, delivery.HandedOff)
+}
