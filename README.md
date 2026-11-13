@@ -218,6 +218,7 @@ own repositories and report their own replication status.
 - [Migrating agent imports/exports to outpostnet-service](docs/service-migration.md)
 - [Observation producers (Range)](docs/observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
+- [Durable delivery library (`pkg/delivery`)](docs/delivery.md)
 - [Deployment Examples](deploy/examples/)
 
 ## Supported Platforms
