@@ -17,6 +17,9 @@ type PeerReplicationStatus struct {
 	// acknowledged: the PeerProgressStore value when the store persists
 	// progress (so it survives restarts), otherwise the engine's cursor.
 	AcknowledgedPosition uint64
+	// OversizedPushEntries counts attempted sends of entries exceeding the
+	// store MaxEntryBytes. Includes retries; resets when this engine restarts.
+	OversizedPushEntries uint64
 	// OutboundCaughtUp holds when AcknowledgedPosition covers the local
 	// position read at the start of ReplicationStatus.
 	OutboundCaughtUp bool
@@ -91,6 +94,7 @@ func (g *GossipEngine) ReplicationStatus(ctx context.Context) (ReplicationStatus
 		peer := PeerReplicationStatus{
 			Peer:                 redactedPeerURL(addr),
 			AcknowledgedPosition: acknowledged,
+			OversizedPushEntries: state.oversizedPushEntries,
 			OutboundCaughtUp:     acknowledged >= status.Local.CurrentPosition,
 			LastPullTime:         state.lastPull,
 			InboundCaughtUp:      !state.lastPull.IsZero() && (state.lastErrorTime.IsZero() || state.lastErrorTime.Before(state.lastPull)),

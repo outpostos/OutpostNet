@@ -79,9 +79,12 @@ type durableLog interface {
 
 // DurableStoreConfig configures a file-backed state replica.
 type DurableStoreConfig struct {
-	Dir           string
-	NodeID        string
-	Policy        MergePolicy
+	Dir    string
+	NodeID string
+	Policy MergePolicy
+	// MaxEntryBytes bounds a local entry's JSON encoding (default 512 KiB).
+	// Remote Apply and recovery preserve larger legacy entries.
+	MaxEntryBytes int64
 	PhysicalClock PhysicalClock
 	// TombstoneRetention enables tombstone GC; see MemoryStoreConfig. Zero (the
 	// default) keeps every tombstone.
@@ -194,7 +197,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention, cfg.MaxEntryBytes)
 	if err != nil {
 		return nil, err
 	}

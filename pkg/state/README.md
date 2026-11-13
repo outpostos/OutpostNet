@@ -24,6 +24,48 @@ Identity model:
 - `StateVersion` orders conflicting states through HLC plus writer identity.
 - `Entry.Position` is a local consumption cursor and is not serialized on the wire.
 
+Push paging and write limits (NET-7):
+
+- `GossipConfig.MaxPushBytes` defaults to 768 KiB of encoded JSON request,
+  including its envelope. Push walks local positions in order, acknowledging
+  and saving progress after each page. `MaxPushPagesPerRound` defaults to 16
+  per peer; remaining pages wait for the next round so other peers get a turn.
+  A transport or progress-save failure resumes from the last saved position.
+  A transient rejection stops at the confirmed prefix; a 410 or a
+  `beyond_gc_horizon` rejection still triggers snapshot resync.
+- A capped round only reports `OutboundRoundCaughtUp` when acknowledgements
+  cover the position read at its start (or there is nothing left to replicate).
+  Writes arriving during the round do not extend that target.
+- Both `MemoryStoreConfig.MaxEntryBytes` and `DurableStoreConfig.MaxEntryBytes`
+  default to 512 KiB. This bounds the **complete JSON encoding of an Entry**:
+  base64 value, escaped key, writer/change identity and version metadata count;
+  the node-local position does not. `Put` and successful-condition
+  `CompareAndSet` reject larger entries with `errors.Is(err, ErrEntryTooLarge)`
+  before persistence, visibility or notification. Tombstone mutations use the
+  same limit. Zero selects the default; negative limits are invalid.
+- `Apply` and durable recovery retain larger existing/remote entries for
+  compatibility. Each such entry is sent alone, even if it exceeds
+  `MaxPushBytes`. A warning and the per-peer `OversizedPushEntries` counter
+  report each attempted send (including retries); the counter resets with the
+  engine. If a legacy entry also exceeds the peer's HTTP request limit, that
+  page fails visibly and cannot advance until the operator raises the limit.
+- Construction requires `MaxPushBytes >= MaxEntryBytes + envelope overhead`
+  (including the largest GC horizon encoding) and strictly less than the HTTP
+  request limit. `HTTPSyncerConfig.MaxRequestBytes` declares that peer limit
+  (default 1 MiB); `NewGossipEngine` checks it, and `NewHTTPHandler` checks its
+  own `MaxRequestBytes` against the engine. Configure the sender for the
+  smallest peer limit; limits are not negotiated on the wire. Other Syncers
+  can expose `MaxRequestBytes() int64`, otherwise the 1 MiB default is assumed.
+- Both stores implement the optional `BytePageStore.ChangesSinceBytes` seam.
+  It copies only page payloads; sorting scans the key index using shallow
+  references under the read lock (O(key count) metadata). Existing custom
+  `Store` implementations remain compatible and are read one entry at a time.
+  Wrappers should forward `BytePageStore` and `MaxEntryBytes() int64` when they
+  change the store's default limit. Byte budgets count encoded entries plus
+  commas, excluding the array; a first oversized entry is returned alone.
+  The state protocol remains 1.0. Digest anti-entropy is still complete and
+  unpaged; its pagination is NET-8.
+
 Durable store:
 
 - `NewDurableStore(DurableStoreConfig{Dir, NodeID, ...})` opens a file-backed
