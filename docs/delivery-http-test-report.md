@@ -77,3 +77,12 @@ runtime wiring and their observation sampling tick.
 No Mesh/Let dependency updates, gateway deployment, multi-hop forwarding,
 priority bandwidth scheduling or three-VM 50k RANGE-2 acceptance is included.
 No VMs were modified. The PR is for review and is not merged by the implementer.
+
+## Final local result
+
+All listed local gates passed. The serialized repository race run completed
+all packages, including delivery (280.1 s), state (246.6 s), tunnel (17.5 s) and
+e2e (5.5 s). Final focused HTTP/status/example race tests passed after the last
+redaction change (5.0 s); the observation mapping and dependency-boundary race
+checks also passed. Build, vet, formatting and Linux agent cross-build passed
+again on code commit `4c76f24`.
