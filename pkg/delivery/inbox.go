@@ -48,7 +48,7 @@ func (in *Inbox) Accept(ctx context.Context, envelopes []Envelope) ([]Result, er
 			continue
 		}
 		v := entry{Envelope: clone(e), Status: Pending}
-		n := int64(encodedSize(v))
+		n := entryCharge(v)
 		if usage+n > in.cfg.QuotaBytes {
 			results[i].Code = Full
 			continue

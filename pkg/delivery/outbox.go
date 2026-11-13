@@ -17,7 +17,8 @@ func NewOutbox(cfg Config) (*Outbox, error) {
 }
 
 // Send assigns the source identity and checksum. Success means the complete
-// envelope is synced; a failed call never admits the envelope.
+// envelope is synced. Quota refusals never admit an envelope. A disk error whose
+// rollback also fails is ambiguous and makes the box fail closed until reopen.
 func (o *Outbox) Send(ctx context.Context, e Envelope) (MessageID, error) {
 	if err := ctx.Err(); err != nil {
 		return MessageID{}, err
@@ -26,6 +27,9 @@ func (o *Outbox) Send(ctx context.Context, e Envelope) (MessageID, error) {
 	defer o.mu.Unlock()
 	if err := o.writable(); err != nil {
 		return MessageID{}, err
+	}
+	if o.messageSeq == ^uint64(0) {
+		return MessageID{}, errors.New("delivery source sequence exhausted")
 	}
 	e = clone(e)
 	e.MessageID = MessageID{o.cfg.NodeID, o.identity.Incarnation, o.messageSeq + 1}
@@ -38,7 +42,7 @@ func (o *Outbox) Send(ctx context.Context, e Envelope) (MessageID, error) {
 		return MessageID{}, err
 	}
 	v := entry{Envelope: e, Status: Pending}
-	if o.usage()+int64(encodedSize(v)) > o.cfg.QuotaBytes {
+	if o.usage()+entryCharge(v) > o.cfg.QuotaBytes {
 		return MessageID{}, ErrOutboxFull
 	}
 	if err := o.commit(transaction{Upserts: []entry{v}, MessageSeq: e.MessageID.Seq}); err != nil {
@@ -152,17 +156,38 @@ func (o *Outbox) Flush(ctx context.Context) error {
 	all := ordered(o.entries, func(e entry) bool { return e.Status == Pending })
 	o.mu.Unlock()
 	batches := make(map[string]Batch)
+	filled := make(map[string]bool)
 	for _, e := range all {
 		dest := e.Envelope.DestinationNodeID
+		if filled[dest] {
+			continue
+		}
 		b := batches[dest]
 		candidate := Batch{Envelopes: append(append([]Envelope(nil), b.Envelopes...), clone(e.Envelope))}
 		if encodedSize(candidate) <= o.cfg.MaxBatchBytes {
 			batches[dest] = candidate
+		} else {
+			filled[dest] = true
 		}
 	}
 	var errs []error
 	for _, dest := range destinations(batches) {
 		batch := batches[dest]
+		// Earlier peer calls may have taken long enough for this page to expire.
+		if err := o.Collect(ctx); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		live := batch.Envelopes[:0]
+		now := o.cfg.Clock()
+		for _, e := range batch.Envelopes {
+			if now.Before(e.ExpiryTime) {
+				live = append(live, e)
+			}
+		}
+		batch.Envelopes = live
+		if len(live) == 0 {
+			continue
+		}
 		response, err := o.send(ctx, dest, batch)
 		if err != nil {
 			errs = append(errs, err)

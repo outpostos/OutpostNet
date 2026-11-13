@@ -92,6 +92,7 @@ func transitiveDeps(t *testing.T, root, pkg string) map[string][]string {
 func TestNetCommonLayerDoesNotImportService(t *testing.T) {
 	root := repoRoot(t)
 	netPkgs := []string{
+		modulePath + "/pkg/delivery",
 		modulePath + "/pkg/tunnel",
 		modulePath + "/pkg/tunnel/tlsutil",
 		modulePath + "/pkg/protocol",
@@ -226,6 +227,7 @@ func TestNetLibrariesDoNotDependOnOutpostRange(t *testing.T) {
 	root := repoRoot(t)
 	const rangeModule = "github.com/outpostos/OutpostRange"
 	libraries := []string{
+		modulePath + "/pkg/delivery",
 		modulePath + "/pkg/state",
 		modulePath + "/pkg/tunnel",
 		modulePath + "/pkg/tunnel/tlsutil",

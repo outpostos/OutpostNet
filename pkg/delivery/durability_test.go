@@ -114,16 +114,13 @@ func TestFailedDiskOperationsNeverAcknowledge(t *testing.T) {
 				ctx := context.Background()
 				f := &diskFault{}
 				cfg := Config{Dir: t.TempDir(), NodeID: "b", wrapLog: f.wrap}
-				var b *box
 				var action func() error
 				id := external(time.Now(), 1).MessageID
 				if kind == "outbox" {
 					o := mustOut(t, cfg)
-					b = o.box
 					action = func() error { _, e := o.Send(ctx, message(time.Now())); return e }
 				} else {
 					in := mustIn(t, cfg)
-					b = in.box
 					if kind == "ack" {
 						if _, e := in.Accept(ctx, []Envelope{external(time.Now(), 1)}); e != nil {
 							t.Fatal(e)
@@ -170,7 +167,6 @@ func TestFailedDiskOperationsNeverAcknowledge(t *testing.T) {
 						noDelivery(t, in)
 					}
 				}
-				_ = b
 			})
 		}
 	}

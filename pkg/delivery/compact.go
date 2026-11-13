@@ -19,6 +19,9 @@ func (b *box) Compact(ctx context.Context) error {
 	if err := b.writable(); err != nil {
 		return err
 	}
+	if b.seq == ^uint64(0) {
+		return errors.New("delivery log sequence exhausted")
+	}
 	var up []entry
 	for _, e := range ordered(b.entries, func(entry) bool { return true }) {
 		up = append(up, e)

@@ -112,6 +112,9 @@ func openBox(cfg Config, kind string) (_ *box, err error) {
 		if b.identity.Version != 1 || b.identity.NodeID != cfg.NodeID || b.identity.Kind != kind || b.identity.Incarnation == "" {
 			return nil, errors.New("delivery manifest version or identity mismatch")
 		}
+		if _, e = os.Stat(filepath.Join(cfg.Dir, "delivery.log")); e != nil {
+			return nil, fmt.Errorf("delivery manifest without readable log: %w", e)
+		}
 	}
 	if e = os.Remove(filepath.Join(cfg.Dir, "delivery.log.compact")); e != nil && !errors.Is(e, os.ErrNotExist) {
 		return nil, e
@@ -189,6 +192,9 @@ func (b *box) recover() error {
 		if tx.Version != 1 || tx.Sequence <= b.seq || tx.MessageSeq < b.messageSeq || (tx.Snapshot && line != 1) {
 			return fmt.Errorf("invalid delivery log sequence/version at line %d", line)
 		}
+		if e = b.validateRecovered(tx); e != nil {
+			return fmt.Errorf("invalid delivery log line %d: %w", line, e)
+		}
 		b.apply(tx)
 		b.offset += int64(len(data))
 	}
@@ -202,14 +208,14 @@ func (b *box) apply(tx transaction) {
 	}
 	for _, e := range tx.Upserts {
 		if previous, ok := b.entries[e.Envelope.MessageID]; ok {
-			b.usedBytes -= int64(encodedSize(previous))
+			b.usedBytes -= entryCharge(previous)
 		}
 		b.entries[e.Envelope.MessageID] = e
-		b.usedBytes += int64(encodedSize(e))
+		b.usedBytes += entryCharge(e)
 	}
 	for _, id := range tx.Deletes {
 		if previous, ok := b.entries[id]; ok {
-			b.usedBytes -= int64(encodedSize(previous))
+			b.usedBytes -= entryCharge(previous)
 		}
 		delete(b.entries, id)
 		delete(b.leased, id)
@@ -226,6 +232,9 @@ func (b *box) writable() error {
 func (b *box) commit(tx transaction) error {
 	if e := b.writable(); e != nil {
 		return e
+	}
+	if b.seq == ^uint64(0) {
+		return errors.New("delivery log sequence exhausted")
 	}
 	tx.Version = 1
 	tx.Sequence = b.seq + 1
@@ -262,9 +271,54 @@ func (b *box) commit(tx transaction) error {
 	return nil
 }
 
+func (b *box) validateRecovered(tx transaction) error {
+	seen := make(map[MessageID]bool)
+	for _, v := range tx.Upserts {
+		e := v.Envelope
+		id := e.MessageID
+		if id.SourceNodeID == "" || id.SourceIncarnation == "" || id.Seq == 0 || seen[id] || e.DestinationNodeID == "" || e.Mailbox == "" || e.Category == "" || e.Priority > P3 || e.ExpiryTime.IsZero() {
+			return errors.New("invalid persisted envelope")
+		}
+		seen[id] = true
+		switch v.Status {
+		case Pending, Delivered, HandedOff, Expired, Rejected:
+		default:
+			return errors.New("invalid persisted status")
+		}
+		if b.identity.Kind == "outbox" {
+			if id.SourceNodeID != b.identity.NodeID || id.SourceIncarnation != b.identity.Incarnation || id.Seq > tx.MessageSeq {
+				return errors.New("persisted source identity/counter mismatch")
+			}
+		} else if e.DestinationNodeID != b.identity.NodeID {
+			return errors.New("persisted destination mismatch")
+		}
+		if v.Status == Pending && !v.Acked && e.Checksum != Checksum(e.Payload) {
+			return errors.New("persisted payload checksum mismatch")
+		}
+	}
+	for _, id := range tx.Deletes {
+		if id.SourceNodeID == "" || id.SourceIncarnation == "" || id.Seq == 0 || seen[id] {
+			return errors.New("invalid persisted removal")
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
 func encodeTransaction(tx transaction) ([]byte, error) {
 	data, err := json.Marshal(tx)
 	return append(data, '\n'), err
+}
+
+// Reserve the retained metadata even for an empty payload, so Ack/receipt
+// bookkeeping can never force a previously accepted message over quota.
+func entryCharge(e entry) int64 {
+	actual := encodedSize(e)
+	e.Envelope.Payload = nil
+	e.Status = HandedOff
+	e.Acked = true
+	e.ReceiptPending = true
+	return int64(max(actual, encodedSize(e)))
 }
 func (b *box) Close() error {
 	b.mu.Lock()
