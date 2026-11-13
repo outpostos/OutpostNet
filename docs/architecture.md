@@ -20,6 +20,33 @@ deployments use `outpostnet-service` (moving an existing agent's entries:
 [service-migration.md](service-migration.md)). Upgrade OutpostRange before the
 components that report to it ([observation.md](observation.md) section 7).
 
+## State replication limits
+
+`pkg/state` sends ordinary push in position order as JSON pages, bounded by
+`GossipConfig.MaxPushBytes` (768 KiB by default, including the envelope) and
+`MaxPushPagesPerRound` (16 per peer per round). Every acknowledged page saves
+its cursor before the next is sent. Failed transfers resume after confirmed
+pages; a capped round yields to the next peer. The push-round caught-up fact
+only covers the local position read at the start of that round.
+
+Memory and durable stores bound local writes by `MaxEntryBytes` (512 KiB of
+encoded entry, including base64 and metadata); `Put`/`CompareAndSet` return
+`ErrEntryTooLarge` before committing larger entries. Remote Apply and recovery
+preserve legacy entries: oversized entries travel alone and emit a warning
+and a per-peer `OversizedPushEntries` count. They may exceed the page budget;
+an entry above the peer's HTTP request limit still fails visibly and requires
+a larger configured request limit.
+
+Startup validates that a page can hold the store's largest local entry plus
+the envelope and remains strictly below the HTTP request limit (default
+1 MiB). The syncer's `MaxRequestBytes` declares the smallest peer limit;
+the local handler also validates its own limit. There is no limit negotiation.
+Store page reads copy page payloads instead of the whole backlog. See
+[state configuration and semantics](../pkg/state/README.md) for the exact
+encoding budget, optional store interfaces and counter lifetime. Wire protocol
+1.0, per-entry rejection and 410 resync semantics are preserved; digest
+anti-entropy remains complete and unpaged pending NET-8.
+
 ## Core Concept
 
 OutpostNet's core is `outpostnet-agent` — one binary that acts as either a server or client role, creating encrypted QUIC tunnels between hosts.

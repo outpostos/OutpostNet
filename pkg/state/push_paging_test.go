@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -42,6 +43,7 @@ func TestPushPagesCatchUpLargeBacklog(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var sizesMu sync.Mutex
 			var sizes []int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
@@ -49,7 +51,9 @@ func TestPushPagesCatchUpLargeBacklog(t *testing.T) {
 					t.Error(err)
 					return
 				}
+				sizesMu.Lock()
 				sizes = append(sizes, len(body))
+				sizesMu.Unlock()
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				handler.ServeHTTP(w, r)
 			}))
@@ -58,21 +62,29 @@ func TestPushPagesCatchUpLargeBacklog(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine, err := NewGossipEngine(GossipConfig{NodeID: "source", Store: source, Syncer: syncer, PeerProvider: NewStaticPeerProvider([]string{server.URL})})
+			engine, err := NewGossipEngine(GossipConfig{NodeID: "source", Store: source, Syncer: syncer, PeerProvider: NewStaticPeerProvider([]string{server.URL}), MaxPushPagesPerRound: 2})
 			if err != nil {
 				t.Fatal(err)
 			}
+			rounds := 0
 			for round := 0; round < 32; round++ {
 				if err := engine.SyncOnce(ctx); err != nil {
 					t.Fatalf("round %d: %v", round, err)
 				}
-				if peerStatusFor(t, engine, server.URL).OutboundCaughtUp {
+				rounds++
+				if status := peerStatusFor(t, engine, server.URL); status.OutboundCaughtUp {
 					break
 				}
 			}
 			if !peerStatusFor(t, engine, server.URL).OutboundCaughtUp {
 				t.Fatal("backlog never caught up")
 			}
+			sizesMu.Lock()
+			defer sizesMu.Unlock()
+			if rounds < 2 {
+				t.Fatal("expected multiple capped rounds")
+			}
+			t.Logf("8 MiB backlog: %d rounds, %d requests, each <= 768 KiB", rounds, len(sizes))
 			if len(sizes) < 2 {
 				t.Fatalf("requests = %d, want multiple pages", len(sizes))
 			}

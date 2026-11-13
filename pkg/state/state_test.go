@@ -342,7 +342,7 @@ func TestHTTPAdapterRequiresAuthIdentityProtocolAndSizeLimit(t *testing.T) {
 		NodeID:          "node-small",
 		Engine:          node.engine,
 		AuthToken:       token,
-		MaxRequestBytes: 64,
+		MaxRequestBytes: (768 << 10) + 1,
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPHandler small: %v", err)
@@ -357,7 +357,9 @@ func TestHTTPAdapterRequiresAuthIdentityProtocolAndSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHTTPSyncer: %v", err)
 	}
-	_, err = syncer.Push(ctx, small.URL, PushRequest{SourceNodeID: "node-b", Entries: []Entry{entry}})
+	oversized := entry
+	oversized.Value = make([]byte, 700<<10)
+	_, err = syncer.Push(ctx, small.URL, PushRequest{SourceNodeID: "node-b", Entries: []Entry{oversized}})
 	if err == nil || !strings.Contains(err.Error(), "status 413") {
 		t.Fatalf("expected 413 size error, got %v", err)
 	}

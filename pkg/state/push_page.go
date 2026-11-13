@@ -130,3 +130,10 @@ func (s *storeCore) checkEntrySize(entry Entry) error {
 	}
 	return nil
 }
+
+func validatePushRequestLimit(pushBytes, requestBytes int64) error {
+	if pushBytes >= requestBytes {
+		return fmt.Errorf("gossip MaxPushBytes (%d) must be less than HTTP MaxRequestBytes (%d)", pushBytes, requestBytes)
+	}
+	return nil
+}

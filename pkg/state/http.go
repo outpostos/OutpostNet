@@ -27,10 +27,13 @@ const (
 
 // HTTPSyncerConfig configures HTTP peer calls.
 type HTTPSyncerConfig struct {
-	Client           *http.Client
-	NodeID           string
-	AuthToken        string
-	PolicyID         string
+	Client    *http.Client
+	NodeID    string
+	AuthToken string
+	PolicyID  string
+	// MaxRequestBytes declares the peer request limit (default 1 MiB).
+	// Gossip validates MaxPushBytes against it at construction.
+	MaxRequestBytes  int64
 	MaxResponseBytes int64
 }
 
@@ -41,6 +44,7 @@ type HTTPSyncer struct {
 	authToken        string
 	policyID         string
 	maxResponseBytes int64
+	maxRequestBytes  int64
 }
 
 // NewHTTPSyncer creates an authenticated HTTP syncer.
@@ -50,6 +54,13 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	}
 	if cfg.AuthToken == "" {
 		return nil, fmt.Errorf("http syncer auth token is required")
+	}
+	maxRequestBytes := cfg.MaxRequestBytes
+	if maxRequestBytes == 0 {
+		maxRequestBytes = defaultMaxRequestBytes
+	}
+	if maxRequestBytes < 0 {
+		return nil, fmt.Errorf("http syncer MaxRequestBytes must be positive")
 	}
 	maxResponseBytes := cfg.MaxResponseBytes
 	if maxResponseBytes == 0 {
@@ -72,8 +83,12 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 		authToken:        cfg.AuthToken,
 		policyID:         policyID,
 		maxResponseBytes: maxResponseBytes,
+		maxRequestBytes:  maxRequestBytes,
 	}, nil
 }
+
+// MaxRequestBytes returns the configured peer request limit.
+func (s *HTTPSyncer) MaxRequestBytes() int64 { return s.maxRequestBytes }
 
 // Push sends entries to a remote peer.
 func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
@@ -219,6 +234,9 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	}
 	if limit < 0 {
 		return nil, fmt.Errorf("http state handler max request bytes must be >= 0")
+	}
+	if err := validatePushRequestLimit(cfg.Engine.maxPushBytes, limit); err != nil {
+		return nil, err
 	}
 	h := &httpHandler{
 		nodeID:          cfg.NodeID,

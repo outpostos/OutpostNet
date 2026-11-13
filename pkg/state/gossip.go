@@ -50,7 +50,8 @@ type GossipEngine struct {
 }
 
 type peerState struct {
-	lastPushPosition uint64
+	lastPushPosition     uint64
+	oversizedPushEntries uint64
 	// nodeID is the node that answered the latest acknowledged push here.
 	nodeID      string
 	failures    int
@@ -118,6 +119,21 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	}
 	if maxPushBytes < 0 || maxPages < 0 {
 		return nil, fmt.Errorf("gossip push limits must be positive")
+	}
+	// Reserve the largest horizon encoding, even when GC is currently off.
+	envelope, err := json.Marshal(PushRequest{ProtocolVersion: StateProtocolVersion, PolicyID: storePolicy.ID(), SourceNodeID: cfg.NodeID, GCHorizon: &Timestamp{WallMS: math.MinInt64, Logical: math.MaxUint16}, Entries: []Entry{}})
+	if err != nil {
+		return nil, fmt.Errorf("encode push envelope: %w", err)
+	}
+	if maxPushBytes < entryLimit(cfg.Store) || maxPushBytes-entryLimit(cfg.Store) < int64(len(envelope)) {
+		return nil, fmt.Errorf("gossip MaxPushBytes must cover MaxEntryBytes (%d) plus push envelope (%d)", entryLimit(cfg.Store), len(envelope))
+	}
+	requestLimit := defaultMaxRequestBytes
+	if limits, ok := cfg.Syncer.(interface{ MaxRequestBytes() int64 }); ok {
+		requestLimit = limits.MaxRequestBytes()
+	}
+	if err := validatePushRequestLimit(maxPushBytes, requestLimit); err != nil {
+		return nil, err
 	}
 	if gs, ok := cfg.Store.(gcStore); ok {
 		// From now on tombstones may only be collected through the engine, which
@@ -215,6 +231,18 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 			// ahead of it (a resync purge allocates a floor position with no entry),
 			// but the peer already holds everything this store can push.
 			return true, nil
+		}
+		for _, entry := range changes {
+			encoded, err := json.Marshal(entry)
+			if err != nil {
+				return false, &localStoreError{err: err}
+			}
+			if int64(len(encoded)) > entryLimit(g.store) {
+				g.mu.Lock()
+				g.peerStateLocked(addr).oversizedPushEntries++
+				g.mu.Unlock()
+				slog.Warn("state gossip: pushing oversized legacy entry alone", "peer", redactedPeerURL(addr), "bytes", len(encoded), "maxEntryBytes", entryLimit(g.store))
+			}
 		}
 		req.Entries = changes
 		resp, err := g.syncer.Push(ctx, addr, req)
