@@ -8,6 +8,8 @@ import (
 )
 
 // MergePolicy owns conflict ordering and digest metadata for one keyspace.
+// Policy callbacks must treat entries as immutable and support concurrent reads;
+// replication may evaluate immutable snapshots after releasing the store lock.
 type MergePolicy interface {
 	ID() string
 	ValidateApply(entry Entry) error

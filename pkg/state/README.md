@@ -57,8 +57,8 @@ Push paging and write limits (NET-7):
   smallest peer limit; limits are not negotiated on the wire. Other Syncers
   can expose `MaxRequestBytes() int64`, otherwise the 1 MiB default is assumed.
 - Both stores implement the optional `BytePageStore.ChangesSinceBytes` seam.
-  It copies only page payloads; sorting scans the key index using shallow
-  references under the read lock (O(key count) metadata). Existing custom
+  It seeks a maintained position index and copies only page payloads;
+  page reads do not sort or materialize the remaining tail. Existing custom
   `Store` implementations remain compatible and are read one entry at a time.
   Wrappers should forward `BytePageStore` and `MaxEntryBytes() int64` when they
   change the store's default limit. Byte budgets count encoded entries plus
@@ -99,8 +99,42 @@ Digest anti-entropy paging (NET-8, ADR-0004 D2):
   digest size failure; raise the digest and peer limits in that case.
 - Custom Syncers used for anti-entropy must implement `SnapshotSyncer` to return
   paging metadata for both digest and snapshot pulls. Missing support fails
-  visibly. Stores still supply `ListEntries` for the full digest and each diff
-  page; payloads and sorting are not bounded to one page in memory.
+  visibly. The built-in stores use the optional `ReplicationReadStore` described below.
+  Custom stores without it retain the compatible `ListEntries` fallback.
+
+Replication memory and ordered reads (NET-11):
+
+- Both stores implement optional `ReplicationReadStore`: `DigestRange` returns
+  owned metadata in key order within `[start, end)` (empty end is unbounded),
+  `HasKey` checks presence without copying a value, and `DigestDiffPage` selects
+  differences with the store policy and copies only values fitting the encoded
+  response. Existing `Store` implementations remain source-compatible. Wrappers
+  should forward this interface to keep the optimization.
+- Key and position B-tree indexes contain only key/position references. Every
+  committed Put, CAS, Apply, resync batch, recovery and purge updates both indexes
+  under the entry lock; failed persistence never publishes index changes.
+  Updating an entry costs O(log key count); each push page seeks in O(log key
+  count) and visits only the page candidates it encodes.
+- Anti-entropy takes a complete ordered metadata snapshot per peer, then splits
+  it into the same NET-8 complete intervals. It never copies stored values to
+  build a digest. Responders snapshot shallow immutable references only inside
+  the requested interval; policy comparison and encoding run after unlocking,
+  and only transmitted values are copied. No per-page full-store sorting occurs.
+  Policy callbacks must treat entries as immutable, as for merge comparison.
+  Returned metadata (including raw JSON) and response values belong to callers.
+- Per-round allocation is O(key metadata + encoded digest requests + transmitted
+  differences), rather than O(retained value bytes times digest/diff pages).
+  Metadata snapshots are still O(key count), and a full-space diff may scan all
+  keys; this change does not promise constant-memory digests or Merkle trees.
+  Large policy metadata and actual differing payloads still cost their encoded
+  size. Custom stores using the fallback retain their previous memory costs.
+- `TestReplicationMemoryCeiling` exercises two replicas with 7,500 x 28 KiB values
+  plus 200,000 small keys, two peer exchanges per round and push pages. With a
+  soft Go memory limit it asserts sampled peak `HeapInuse` <= 2.5 times the
+  combined retained value bytes (1,076,200,000 bytes) and allocation <= 1.5 GiB
+  per round. Benchmarks compare 28/56 KiB values and 1k–200k push tails; see
+  [NET-11 measurements](../../docs/replication-memory-net11.md) for commands,
+  before/after results and measurement limits.
 
 **Protocol upgrade:** NET-8 raises `StateProtocolVersion` from 1.0 to **2.0**.
 New/old majors reject each other (HTTP 426 for requests; response validation

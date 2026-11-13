@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/btree"
 )
 
 // MemoryStoreConfig configures an in-memory state replica.
@@ -44,11 +45,13 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 }
 
 type storeCore struct {
-	nodeID  string
-	policy  MergePolicy
-	entries map[string]Entry
-	clock   localClock
-	hlc     *hlcClock
+	nodeID     string
+	policy     MergePolicy
+	entries    map[string]Entry
+	byKey      *btree.BTreeG[entryRef]
+	byPosition *btree.BTreeG[entryRef]
+	clock      localClock
+	hlc        *hlcClock
 	// ready reports whether this replica can serve local reads and resume a
 	// consumer position. Recovery runs to completion before a store constructor
 	// returns, so a published store starts ready; a lifecycle owner clears it when
@@ -100,6 +103,8 @@ func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, ret
 		nodeID:        nodeID,
 		policy:        normalizePolicy(policy),
 		entries:       make(map[string]Entry),
+		byKey:         newKeyIndex(),
+		byPosition:    newPositionIndex(),
 		hlc:           newHLCClock(physical),
 		observers:     make(map[uint64]func(Entry)),
 		retention:     retention,
@@ -144,7 +149,7 @@ func (s *storeCore) put(ctx context.Context, key string, mutation Mutation, pers
 		}
 	}
 	s.mu.Lock()
-	s.entries[key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return copyEntry(entry), nil
@@ -188,7 +193,7 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 			return Entry{}, false, err
 		}
 	}
-	s.entries[key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return copyEntry(entry), true, nil
@@ -212,7 +217,7 @@ func (s *storeCore) ListEntries(ctx context.Context) ([]Entry, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return filterAndSortEntries(s.entries, 0, 0), nil
+	return s.positionEntriesLocked(0, 0), nil
 }
 
 // ChangesSince returns entries with local position greater than since.
@@ -222,7 +227,7 @@ func (s *storeCore) ChangesSince(ctx context.Context, since uint64, limit int) (
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return filterAndSortEntries(s.entries, since, limit), nil
+	return s.positionEntriesLocked(since, limit), nil
 }
 
 // Apply merges a remote entry. It preserves the original ChangeID and assigns a
@@ -280,7 +285,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 			return false, err
 		}
 	}
-	s.entries[entry.Key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return true, nil
@@ -350,7 +355,7 @@ func (s *storeCore) restoreEntry(entry Entry) error {
 	defer s.mu.Unlock()
 	existing, found := s.entries[entry.Key]
 	if !found || s.policy.CompareEntries(entry, existing) > 0 {
-		s.entries[entry.Key] = copyEntry(entry)
+		s.setEntryLocked(copyEntry(entry))
 	}
 	s.clock.SetAtLeast(maxUint64(entry.Position, entry.ChangeID.Counter))
 	s.hlc.Restore(entry.Version.HLC)
@@ -393,22 +398,15 @@ func (s *storeCore) notify(entry Entry) {
 	}
 }
 
-func filterAndSortEntries(entries map[string]Entry, since uint64, limit int) []Entry {
-	result := make([]Entry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Position > since {
-			result = append(result, copyEntry(entry))
+func (s *storeCore) positionEntriesLocked(since uint64, limit int) []Entry {
+	result := make([]Entry, 0)
+	s.byPosition.AscendGreaterOrEqual(entryRef{position: since}, func(ref entryRef) bool {
+		if ref.position <= since {
+			return true
 		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Position != result[j].Position {
-			return result[i].Position < result[j].Position
-		}
-		return result[i].Key < result[j].Key
+		result = append(result, copyEntry(s.entries[ref.key]))
+		return limit <= 0 || len(result) < limit
 	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
 	return result
 }
 

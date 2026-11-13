@@ -741,7 +741,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	s.storeCore.commitMu.Lock()
 	defer s.storeCore.commitMu.Unlock()
 	s.storeCore.mu.RLock()
-	entries := filterAndSortEntries(s.storeCore.entries, 0, 0)
+	entries := s.storeCore.positionEntriesLocked(0, 0)
 	horizon := s.storeCore.horizon
 	floor := s.storeCore.floor
 	adopted := s.storeCore.adopted

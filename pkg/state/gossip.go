@@ -303,7 +303,7 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 			continue
 		}
 		// Each peer gets a fresh, range-complete digest; no cursor survives a round.
-		digest, err := g.LocalDigest(ctx)
+		digest, err := g.localDigestEntries(ctx)
 		if err != nil {
 			return err
 		}
@@ -476,13 +476,13 @@ func (e *PullEntryTooLargeError) Error() string {
 // docs/state-tombstone-gc.md "Invariant: each round covers all keys at every peer" before
 // sampling, sharding or truncating it.
 func (g *GossipEngine) LocalDigest(ctx context.Context) (map[string]DigestRecord, error) {
-	entries, err := g.store.ListEntries(ctx)
+	entries, err := g.localDigestEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	digest := make(map[string]DigestRecord, len(entries))
 	for _, entry := range entries {
-		digest[entry.Key] = newDigestRecord(entry, g.policy)
+		digest[entry.Key] = entry.Record
 	}
 	return digest, nil
 }
@@ -914,7 +914,13 @@ func (g *GossipEngine) checkRequesterHoldsCollected(ctx context.Context, local T
 		if record.Deleted || record.Version.HLC.Compare(local) > 0 {
 			continue
 		}
-		_, found, err := g.store.Get(ctx, key)
+		var found bool
+		var err error
+		if reader, ok := g.store.(ReplicationReadStore); ok {
+			found, err = reader.HasKey(ctx, key)
+		} else {
+			_, found, err = g.store.Get(ctx, key)
+		}
 		if err != nil {
 			return err
 		}
