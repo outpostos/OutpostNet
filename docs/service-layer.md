@@ -138,6 +138,7 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 
 - 每个新连接：`Directory.Instances` → `Select`（先过滤后排序，见 `pkg/service/directory.go`）→ 依次尝试。本节点候选直拨 `127.0.0.1:<port>`；远端候选经 `TunnelManager.OpenConfirmedPeerStream`（拨号方或接受方连接均可，见 §7）。单次尝试上限 3s。
 - **判定点**：远端候选以“确认字节”为准。开流时流头 `NameLen` 置 bit 14，提供方 `tunnel.Server` 在拨通本地后端后先回 1 字节（`0` 已连接 / `1` 无路由 / `2` 后端拨号失败），之后才开始转发；带确认的流不走中继兜底。入口在 `OpenStream` 返回前不读取应用连接的任何字节，所以确认前的任何失败都换下一个候选，确认后的失败只关闭连接，不重发。
+- 被拒绝的流（无路由、后端拨号失败或流头读取失败）会完整结束收发两方向、释放 QUIC 流额度；同一对等连接在后端恢复后仍可开新流。
 - 无候选时立即关闭连接并计数：`no_candidate`（目录新鲜但无可用实例）、`all_unreachable`（有候选但都失败）、`directory_stale`（无可用实例且目录未同步或已断线）。目录 stale 时仍照常选择，成功计入 `ResolvedFromStale` 并记日志。计数见 `Host.LogicalStats`；观测事实 `ServiceAccessChanged` 的 backend 为实际选中的节点与地址（本地为 `127.0.0.1:<port>`，远端为 `<node_id>/<service>`），`no_candidate` / `directory_stale` 记为 `NO_BACKEND`，`all_unreachable` 记为 `UNREACHABLE`。实例 ID 与尝试次数只进日志，不在观测契约中。
 - 兼容：只有逻辑入口使用确认；旧版提供方不认识 bit 14，会把流当成超长名称关闭，入口记为不可达并换下一个候选。逻辑服务要求承载节点与消费节点都升级。`name@node` 与静态入口不变。
 
