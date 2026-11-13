@@ -179,7 +179,7 @@ The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports
 | `protocol` | `tcp` only for imports and exports; `udp` is rejected (UDP over the QUIC tunnel is not implemented) |
 | `relays` | Rejected (relay forwarding stays on `outpostnet-agent`) |
 | `peers[]` | `{node_id, addr}` seed for the peer directory at startup; later changes via `PUT /v1/peers`. `node_id` must be unique and differ from this node's `node_id`; `addr` must be `host:port` (port 1-65535) |
-| `mesh.gateway_url` | Local OutpostMesh REST base URL (`http(s)://host:port`). Enables the service directory; required when any import is a logical service |
+| `mesh.gateway_url` | Local OutpostMesh REST base URL (`http(s)://host:port`). Enables the service directory and directory-driven exports (this node's registrations become export routes; a static export of the same name wins); required when any import is a logical service |
 | `mesh.directory_cache_dir` | Directory for the cold-start cache `service-directory.json`; empty disables the cache |
 | `management.socket_path` | Default `/run/outpostnet/service.sock` |
 | `health_addr` | Default `:8083` (`/healthz`, `/readyz`) |

@@ -43,6 +43,13 @@ type Host struct {
 
 	directory *meshdirectory.Directory
 	logical   map[string]*service.LogicalOpener // by logical service name
+
+	// Export routes: static exports (h.exports) merged with directory
+	// exports (dirRoutes), static winning; routes is what the tunnel
+	// servers currently hold. See direxports.go.
+	routes         map[string]string
+	dirRoutes      map[string]string
+	conflictWarned map[string]time.Time
 }
 
 // New creates a host for a validated Service config.
@@ -50,7 +57,11 @@ func New(cfg *service.Config, logger *slog.Logger) *Host {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Host{cfg: cfg, logger: logger.With("component", "outpostnet-service", "node_id", cfg.NodeID)}
+	return &Host{
+		cfg:            cfg,
+		logger:         logger.With("component", "outpostnet-service", "node_id", cfg.NodeID),
+		conflictWarned: map[string]time.Time{},
+	}
 }
 
 // Run starts the host and blocks until ctx is cancelled.
@@ -200,11 +211,23 @@ func (h *Host) Run(ctx context.Context) error {
 	h.mu.Lock()
 	h.tunnels = tm
 	h.exports = exports
+	h.routes = map[string]string{}
+	for _, e := range exports {
+		h.routes[e.Name] = e.LocalAddr
+	}
 	h.entries = entries
 	h.directory = svcDir
 	h.logical = logical
 	h.ready = true
 	h.mu.Unlock()
+
+	// Directory-driven exports (ADR-0003 D4); stopped before the directory.
+	if svcDir != nil {
+		expCtx, cancelExp := context.WithCancel(ctx)
+		expDone := make(chan struct{})
+		go func() { defer close(expDone); h.runDirectoryExports(expCtx, svcDir) }()
+		defer func() { cancelExp(); <-expDone }()
+	}
 	h.logger.Info("service host ready", "exports", len(exports), "entries", len(entries), "peers", len(h.cfg.Peers))
 
 	<-ctx.Done()
@@ -261,38 +284,18 @@ func (h *Host) Ready() bool {
 	return h.ready
 }
 
-// ApplyExports moves this node's exports to next on every tunnel server
-// (add / re-point / remove). Established streams keep their backend.
+// ApplyExports moves this node's static exports to next (add / re-point /
+// remove) on every tunnel server and reports the routes that changed. A
+// static export also overrides a directory export of the same name.
+// Established streams keep their backend.
 func (h *Host) ApplyExports(next []agentconfig.ExportConfig) service.ExportChanges {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	next = append([]agentconfig.ExportConfig(nil), next...)
-	var ch service.ExportChanges
-	if h.tunnels != nil {
-		// Every server routes the same export set, so their change reports
-		// agree; dedup by name to keep the merged report stable anyway.
-		seen := make(map[string]struct{})
-		add := func(dst *[]string, names []string) {
-			for _, name := range names {
-				if _, ok := seen[name]; ok {
-					continue
-				}
-				seen[name] = struct{}{}
-				*dst = append(*dst, name)
-			}
-		}
-		for _, srv := range h.tunnels.Servers() {
-			part := service.ApplyExports(srv, h.exports, next)
-			add(&ch.Added, part.Added)
-			add(&ch.Updated, part.Updated)
-			add(&ch.Removed, part.Removed)
-		}
+	h.exports = append([]agentconfig.ExportConfig(nil), next...)
+	if h.routes == nil {
+		return service.ExportChanges{}
 	}
-	h.exports = next
-	if len(ch.Added)+len(ch.Updated)+len(ch.Removed) > 0 {
-		h.logger.Info("exports applied", "added", ch.Added, "updated", ch.Updated, "removed", ch.Removed)
-	}
-	return ch
+	return h.syncRoutesLocked()
 }
 
 // WatchConfig polls path with the existing agent ConfigWatcher (using the
