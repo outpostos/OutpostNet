@@ -205,3 +205,41 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
   `observation endpoint unavailable; continuing without observation API ... address already in use`。
 - 干净检出：`git clone` 本分支到临时目录，使用全新 `GOMODCACHE`（经 SSH 拉取私有 OutpostRange），
   `go build ./...` 与核心包测试通过，go.mod 无 `replace`。
+
+## 11. Reliable delivery metrics (NET-10)
+
+`pkg/delivery` exposes `DeliveryStatus()` in the same host-owned manner as
+`pkg/state.ReplicationStatus`. It remains independent of the Range module.
+`internal/observation.Reporter.UpdateDelivery(statuses...)` maps these local
+facts into the existing **109 `MetricSample`** event body; it adds no proto
+fields or exporter. A host embedding delivery calls this on its observation
+sampling tick with its Inbox and Outbox snapshots. Net agent/service do not
+construct delivery boxes, so they do not emit invented delivery facts. External
+embedding hosts (including Mesh) own the equivalent mapping in their observation
+producer; their runtime wiring is outside NET-10.
+
+Every sample has `peer_node_id` and `box` (`inbox`/`outbox`) labels. Source node,
+component, time and sequence come from the existing event log. No message ID,
+mailbox, payload, endpoint address, token or error text becomes a metric label.
+
+| Metric | Local fact |
+| --- | --- |
+| `delivery_pending_envelopes`, `delivery_pending_bytes` | Durable pending envelopes and JSON-encoded bytes |
+| `delivery_pending_receipts`, `delivery_pending_receipt_bytes` | Receipts waiting for confirmation and encoded bytes |
+| `delivery_oldest_pending_seconds` | Oldest known enqueue age, including receipts; zero when queue empty; omitted when pending legacy entries have no known timestamp |
+| `delivery_send_success_total`, `delivery_send_failure_total` | Actual batch attempts; full or invalid/failed responses count as failures; skipped backoff polls do not count |
+| `delivery_unknown_peer_total` | Destination missing from existing membership/identity mapping |
+| `delivery_duplicate_total` | Receiver deduplication hits |
+| `delivery_expired_total` | Expired arrivals plus locally committed expiry transitions |
+| `delivery_rejected_total` | Invalid envelope/receipt admission results and committed Outbox rejections |
+| `delivery_inbox_full_total`, `delivery_outbox_full_total` | Receiver admission refusals / local Send quota refusals |
+
+Queue gauges survive box recovery; counters describe this process and reset on
+reopen. Samples use the existing bounded, nonblocking timeline and its gap/slow
+subscriber behavior. The current observation Snapshot contract has no generic
+metric field: these samples are events, emitted on each host sampling tick,
+not added to snapshot fields 15–20. Range must derive metric projections from
+the timeline. `TestDeliveryMetricSamplesUseLocalFacts` verifies the real box
+status → MetricSample mapping and secret-free proto JSON. Delivery HTTP tests
+capture error/log redaction, including echoed tokens, credential-bearing peer
+URLs, malformed responses, client failures and redirects.

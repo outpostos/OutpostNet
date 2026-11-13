@@ -44,9 +44,11 @@ func (b *box) send(ctx context.Context, dest string, batch Batch) (BatchResult, 
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if !failed {
+			b.counters(dest).SendSuccess++
 			delete(b.retries, dest)
 			return
 		}
+		b.counters(dest).SendFailure++
 		delay := backoff.delay * 2
 		if delay < b.cfg.RetryMin {
 			delay = b.cfg.RetryMin
@@ -61,32 +63,14 @@ func (b *box) send(ctx context.Context, dest string, batch Batch) (BatchResult, 
 	}
 	r, err := b.cfg.Transport.Send(ctx, dest, batch)
 	if err != nil {
+		if errors.Is(err, ErrUnknownPeer) {
+			b.mu.Lock()
+			b.counters(dest).UnknownPeer++
+			b.mu.Unlock()
+		}
 		return BatchResult{}, err
 	}
-	validate := func(request []MessageID, result []Result) bool {
-		if len(request) != len(result) {
-			return false
-		}
-		for i, id := range request {
-			if result[i].MessageID != id {
-				return false
-			}
-			switch result[i].Code {
-			case Accepted, Duplicate, RejectedExpired, RejectedInvalid, Full:
-			default:
-				return false
-			}
-		}
-		return true
-	}
-	var ids, receipts []MessageID
-	for _, e := range batch.Envelopes {
-		ids = append(ids, e.MessageID)
-	}
-	for _, r := range batch.Receipts {
-		receipts = append(receipts, r.MessageID)
-	}
-	if !validate(ids, r.Envelopes) || !validate(receipts, r.Receipts) {
+	if !validBatchResult(batch, r) {
 		return BatchResult{}, errors.New("invalid delivery transport response")
 	}
 	failed = false
@@ -145,4 +129,30 @@ func (m *MemoryTransport) Send(ctx context.Context, dest string, b Batch) (Batch
 		}
 	}
 	return r, nil
+}
+func validBatchResult(batch Batch, r BatchResult) bool {
+	validate := func(request []MessageID, result []Result) bool {
+		if len(request) != len(result) {
+			return false
+		}
+		for i, id := range request {
+			if result[i].MessageID != id {
+				return false
+			}
+			switch result[i].Code {
+			case Accepted, Duplicate, RejectedExpired, RejectedInvalid, Full:
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	var ids, receipts []MessageID
+	for _, e := range batch.Envelopes {
+		ids = append(ids, e.MessageID)
+	}
+	for _, r := range batch.Receipts {
+		receipts = append(receipts, r.MessageID)
+	}
+	return validate(ids, r.Envelopes) && validate(receipts, r.Receipts)
 }

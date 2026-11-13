@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type logFile interface {
@@ -25,10 +26,11 @@ type logFile interface {
 }
 
 type entry struct {
-	Envelope       Envelope `json:"envelope"`
-	Status         Status   `json:"status"`
-	Acked          bool     `json:"acked,omitempty"`
-	ReceiptPending bool     `json:"receipt_pending,omitempty"`
+	QueuedAt       time.Time `json:"queued_at,omitzero"`
+	Envelope       Envelope  `json:"envelope"`
+	Status         Status    `json:"status"`
+	Acked          bool      `json:"acked,omitempty"`
+	ReceiptPending bool      `json:"receipt_pending,omitempty"`
 }
 type transaction struct {
 	Version    int         `json:"version"`
@@ -48,6 +50,7 @@ type manifest struct {
 // box serializes commits and publication under mu. No lock is held over a
 // transport call. Compaction shares the commit lock, so its snapshot is atomic.
 type box struct {
+	observed        map[string]*Counters
 	mu              sync.Mutex
 	flushMu         sync.Mutex
 	cfg             Config
@@ -264,6 +267,7 @@ func (b *box) commit(tx transaction) error {
 		}
 		return e
 	}
+	b.countExpiry(tx)
 	b.apply(tx)
 	b.offset += int64(len(data))
 	close(b.changed)

@@ -90,7 +90,7 @@ type BatchResult struct {
 // same length, order and IDs as the request. An error means no acknowledgement
 // may be inferred, even when the peer committed before the response was lost.
 // Implementations must authenticate peers and bind receipt ReceiverNodeID to
-// the authenticated peer. NET-9 supplies only an in-process implementation.
+// the authenticated peer. MemoryTransport and HTTPTransport are supplied.
 type Transport interface {
 	Send(context.Context, string, Batch) (BatchResult, error)
 }

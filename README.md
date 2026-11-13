@@ -190,7 +190,7 @@ also ships the Service layer's entry point:
 
 | Layer | What this repository provides |
 |-------|-------------------------------|
-| Net — communication and state primitives | QUIC tunnels and the peer directory (`pkg/tunnel`, `outpostnet-agent`); generic state replication primitives (`pkg/state`: durable store, gossip, tombstone GC, read-only replication status). OutpostMesh and OutpostLet embed `pkg/state`; this repository does not interpret their state |
+| Net — communication and state primitives | QUIC tunnels and the peer directory (`pkg/tunnel`, `outpostnet-agent`); generic state replication primitives (`pkg/state`: durable store, gossip, tombstone GC, read-only replication status), and durable direct-peer delivery (`pkg/delivery`: authenticated HTTP, Inbox/Outbox, deduplication, handoff receipts and local observation). OutpostMesh and OutpostLet embed `pkg/state`; this repository does not interpret their state |
 | Service — stable access | `outpostnet-service`: stable local entries for `<service>@<node_id>` ([docs](docs/service-layer.md)) |
 | Range — observation | `outpostnet-agent` and `outpostnet-service` expose loopback observation endpoints for OutpostRange ([docs](docs/observation.md)); upgrade Range before them |
 

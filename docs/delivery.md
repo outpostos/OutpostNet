@@ -1,12 +1,12 @@
-# Durable delivery (`pkg/delivery`, NET-9)
+# Durable delivery (`pkg/delivery`)
 
 Design: [ADR-0004 D3](https://github.com/outpostos/OutpostOS/blob/main/docs/adr/0004-paged-replication-and-reliable-delivery.md).
 
 This is an embeddable library for direct peer delivery, separate from `pkg/state`.
 It stores every accepted envelope rather than folding intermediate values into
-the latest state. It has no Mesh, Let, Service, Range or HTTP dependency. The host
-supplies an authenticated `Transport`. `MemoryTransport` connects real durable
-boxes in one process for tests; HTTP, peer resolution and metrics belong to NET-10.
+the latest state. It has no Mesh, Let, Service or Range dependency. The host supplies a
+`Transport`: `MemoryTransport` connects durable boxes for tests; `HTTPTransport`
+uses the host's existing replication membership and identity mapping.
 
 ## Contract
 
@@ -161,8 +161,133 @@ return inbox.Ack(ctx, delivery.MessageID)
 
 Delivery is at least once, with bounded deduplication. There is no global order,
 cross-envelope total order, exactly-once external action, business execution
-receipt, multi-hop store-and-forward, priority bandwidth reservation, or runtime
-HTTP integration in NET-9. Connected relay transport may carry a direct-peer
+receipt, multi-hop store-and-forward, priority bandwidth reservation, or automatic product
+wiring. Connected relay transport may carry a direct-peer
 exchange; the library itself never forwards via another node's durable queue.
 
 Acceptance evidence and reproducible commands: [NET-9 test report](delivery-test-report.md).
+
+## Embedding in a gateway process (NET-10)
+
+Reuse the authenticated state replication listener, `state.PeerProvider`, and
+its address-to-node identity mapping. `HTTPTransport` scans the current provider
+on each attempt; it does not discover nodes or add routes. Ambiguous mappings
+fail visibly. Unknown nodes return `ErrUnknownPeer`, increment the Outbox's
+unknown-peer and failure counters, and stay PENDING with exponential backoff.
+Address changes take effect at the next attempt. Supply concurrency-safe provider
+and identity callbacks; update them together from the host's existing directory.
+
+The host constructs the following alongside its existing state handler (error
+checks shown; `dataDir`, `nodeID`, `token`, `peers`, `peerIdentity`, and `mux` are
+host-owned configuration and dependencies):
+
+```go
+wire, err := delivery.NewHTTPTransport(delivery.HTTPTransportConfig{
+    NodeID: nodeID, AuthToken: token,
+    PeerProvider: peers, PeerIdentity: peerIdentity,
+    MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+})
+if err != nil { return err }
+outbox, err := delivery.NewOutbox(delivery.Config{
+    Dir: filepath.Join(dataDir, "delivery", "outbox"), NodeID: nodeID,
+    Transport: wire,
+})
+if err != nil { return err }
+inbox, err := delivery.NewInbox(delivery.Config{
+    Dir: filepath.Join(dataDir, "delivery", "inbox"), NodeID: nodeID,
+    Transport: wire,
+})
+if err != nil { _ = outbox.Close(); return err }
+handler, err := delivery.NewHTTPHandler(delivery.HTTPHandlerConfig{
+    NodeID: nodeID, AuthToken: token, Inbox: inbox, Outbox: outbox,
+    MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+})
+if err != nil { _ = inbox.Close(); _ = outbox.Close(); return err }
+mux.Handle(delivery.BatchPath, handler) // alongside /state/v1/push and /state/v1/pull
+```
+
+Use persistent, separate Inbox/Outbox directories; do not put these under a
+per-process temporary directory in production. Run both `Run(ctx, reportError)`
+loops in host-owned goroutines. On shutdown stop HTTP admission, cancel and join
+both loops, then close both boxes. Report errors through the host logger; repeated
+unknown/unreachable destinations are observable failures, never successful
+admission or message deletion. The HTTP client defaults to a 10-second timeout
+(and adds that default to a supplied client with no timeout), honors context
+cancellation, and refuses redirects. The host owns HTTP server timeouts and TLS.
+
+`go test -run '^ExampleHTTPTransport$' ./pkg/delivery` executes the complete
+bidirectional example: two independent durable nodes, HTTP acceptance,
+consumer Receive/Ack and receipts through the same endpoint. This is an embedding
+example; Mesh configuration and runtime wiring are a separate ticket.
+
+### HTTP wire and security boundary
+
+`POST /delivery/v1/batch` takes JSON:
+
+```json
+{"protocol_version":{"major":1,"minor":0},"source":"node-a","envelopes":[],"receipts":[]}
+```
+
+Envelope/receipt schemas are the public `Batch` types. Responses carry
+`protocol_version`, receiver `node_id`, and ordered `envelopes` / `receipts`
+results from `BatchResult`. Delivery protocol **1.0** is independent of state
+protocol 2.0. A mismatched request major returns 426; an incompatible response,
+wrong receiver node, malformed JSON, result ID/order/length or code rejects the
+whole acknowledgement. No payload is released on transport failure.
+
+Authentication matches the state HTTP boundary: required Bearer token,
+`X-Outpost-Node-ID` equal to request `source`, no self requests. Every envelope's
+source and every receipt's `receiver_node_id` must match that source. These
+checks run over the entire batch before any persistence. Wrong tokens return
+401; identity mismatches return 403. A handler can expose only Inbox or Outbox;
+a request needing an absent box returns 503. Persistence failures return 500
+with a generic message, never an acknowledgement. A mixed batch may commit one
+box before the other fails; resending is safe because both paths deduplicate.
+
+As with state replication, a shared token authenticates membership, and node
+identity is self-declared: any token holder can claim a different node ID. This
+does not implement per-node credentials or cross-group authorization. Reuse the
+host's TLS/protected listener; plain HTTP does not provide confidentiality.
+Errors never include remote response bodies, bearer tokens or complete peer
+URLs. HTTP client errors use the same credential redaction utility as state.
+The library adds no per-request logger; default Run logging receives those
+sanitized errors.
+
+### Byte budgets
+
+Both HTTP configurations default request and response caps to 1 MiB. These
+include the protocol/source/receiver wrapper. The transport splits a Batch into
+pages bounded by both the exact encoded request and the largest legal response;
+this also pages receipt batches. `MaxBatchBytes` continues to bound one box's
+Flush batch, independently of the HTTP caps. Choose HTTP caps large enough for
+`MaxEnvelopeBytes` plus the encoded wrapper (including escaped node IDs), and
+for at least one result. There is no limit negotiation; declare the smallest
+peer caps on the transport. A single item that cannot fit fails visibly and
+stays PENDING. Oversized envelopes are refused earlier by Send.
+
+The handler reads at most its request cap before returning 413, including
+chunked bodies and trailing whitespace. Before persistence it also reserves
+the worst-case result size; an unrepresentable response returns 413. The client
+bounds all response bodies. If a later page fails, the box retains the entire
+Flush batch; retries of earlier committed pages return duplicate. HTTP success
+means durable acceptance only; Ack and HANDED_OFF retain their separate meaning.
+
+### Local observation
+
+`inbox.DeliveryStatus()` / `outbox.DeliveryStatus()` return copied, sorted
+per-peer facts without network calls, maintenance or credentials. Outbox peers
+are destinations; Inbox peers are envelope sources (receipt destinations).
+Pending counts/bytes include encoded envelopes, with separate receipt counts
+and bytes. Queue age uses persisted enqueue time, survives recovery and
+compaction, and clamps backward clock jumps to zero. Pre-NET-10 records lack an
+enqueue timestamp: their age is unknown (zero timestamp), not reconstructed
+from expiry. Gauges reflect stored records until Collect/Flush maintenance.
+
+Counters reset on reopen. Send success/failure counts actual Flush batch
+attempts, not skipped backoff polls; `full` counts as a failed attempt. Unknown
+peer counts resolution failures. Receiver counters count duplicate, expired,
+invalid and full admission results, including retries; Outbox also counts receipt
+admission results and committed rejections. Local committed expiry
+also increments expiry. Outbox full counts Send refusals. Counters do not claim
+business execution or network-wide delivery. See [observation.md](observation.md)
+for mapping these facts to the existing Range MetricSample event stream.

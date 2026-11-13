@@ -41,8 +41,9 @@ func (o *Outbox) Send(ctx context.Context, e Envelope) (MessageID, error) {
 	if err := e.valid(o.cfg, now); err != nil {
 		return MessageID{}, err
 	}
-	v := entry{Envelope: e, Status: Pending}
+	v := entry{Envelope: e, Status: Pending, QueuedAt: now}
 	if o.usage()+entryCharge(v) > o.cfg.QuotaBytes {
+		o.counters(e.DestinationNodeID).OutboxFull++
 		return MessageID{}, ErrOutboxFull
 	}
 	if err := o.commit(transaction{Upserts: []entry{v}, MessageSeq: e.MessageID.Seq}); err != nil {
@@ -112,6 +113,17 @@ func (o *Outbox) AcceptReceipts(ctx context.Context, receipts []Receipt) ([]Resu
 	if len(up) > 0 {
 		if err := o.commit(transaction{Upserts: up}); err != nil {
 			return nil, err
+		}
+	}
+	for i, r := range results {
+		c := o.counters(receipts[i].ReceiverNodeID)
+		switch r.Code {
+		case Duplicate:
+			c.Duplicate++
+		case RejectedExpired:
+			c.Expired++
+		case RejectedInvalid:
+			c.Rejected++
 		}
 	}
 	return results, nil
