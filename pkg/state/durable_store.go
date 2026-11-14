@@ -86,6 +86,9 @@ type DurableStoreConfig struct {
 	// Remote Apply and recovery preserve larger legacy entries.
 	MaxEntryBytes int64
 	PhysicalClock PhysicalClock
+	// TimeReference supplies HLC, admission/horizon guards and conservative retention.
+	// Configure it instead of PhysicalClock; share one reference across host stores.
+	TimeReference *TimeReference
 	// TombstoneRetention enables tombstone GC; see MemoryStoreConfig. Zero (the
 	// default) keeps every tombstone.
 	TombstoneRetention time.Duration
@@ -200,7 +203,14 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention, cfg.MaxEntryBytes)
+	if cfg.TimeReference != nil && cfg.PhysicalClock != nil {
+		return nil, fmt.Errorf("configure TimeReference or PhysicalClock, not both")
+	}
+	physical := cfg.PhysicalClock
+	if cfg.TimeReference != nil {
+		physical = cfg.TimeReference
+	}
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, physical, cfg.TombstoneRetention, cfg.MaxEntryBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -20,7 +20,7 @@ func (e *DigestEntryTooLargeError) Error() string {
 }
 
 func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest []KeyDigest) error {
-	pager, ok := g.syncer.(SnapshotSyncer)
+	_, ok := g.syncer.(SnapshotSyncer)
 	if !ok {
 		return fmt.Errorf("digest paging requires a syncer implementing SnapshotSyncer")
 	}
@@ -39,6 +39,7 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 			return err
 		}
 		req := PullRequest{
+			TimeSample:      g.timeSample(),
 			ProtocolVersion: StateProtocolVersion, PolicyID: g.policy.ID(),
 			SourceNodeID: g.nodeID, GCHorizon: g.localHorizon(),
 			StartKey: &start, MaxBytes: defaultMaxResponseBytes,
@@ -47,6 +48,7 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 		// Reserve the largest local boundary/cursor and horizon, including metadata
 		// used by the transport. Every actual request is checked again before send.
 		budget := req
+		budget.TimeSample = TimeSample{SentPhysicalMS: math.MinInt64, TimeQuality: TimeUnsynced}
 		budget.EndKey = longest
 		budget.AfterKey = longest
 		budget.MaxBytes = math.MaxInt64
@@ -91,7 +93,7 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 			if int64(len(encoded)) > g.maxDigestBytes {
 				return &DigestEntryTooLargeError{Key: req.AfterKey, Bytes: int64(len(encoded)), MaxBytes: g.maxDigestBytes}
 			}
-			resp, err := pager.PullSnapshot(ctx, addr, req)
+			resp, err := g.pullExchange(ctx, addr, req)
 			if err != nil {
 				return err
 			}

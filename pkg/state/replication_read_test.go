@@ -103,6 +103,8 @@ func TestReplicationReadsPreservePolicyAndOwnership(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					// Compare replicated content independently of the two send times.
+					a.TimeSample, b.TimeSample = TimeSample{}, TimeSample{}
 					aj, _ := json.Marshal(a)
 					bj, _ := json.Marshal(b)
 					if string(aj) != string(bj) {

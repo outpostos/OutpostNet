@@ -8,7 +8,8 @@ import (
 )
 
 // NodeClockStatus reports process-local observations, never inferred time quality.
-// A writer is suspect after any ahead entry (including one within the valve).
+// With known time, a writer is suspect after any ahead entry (including one
+// within the valve). Unknown-time refusals are counted without assigning blame.
 // NodeID is the writer ID or the peer identity/address for a refused horizon.
 // Counters and sticky suspect flags reset when the store/engine is recreated.
 type NodeClockStatus struct {
@@ -17,11 +18,15 @@ type NodeClockStatus struct {
 	AheadEntries    uint64
 	RefusedEntries  uint64
 	RefusedHorizons uint64
+	// Time fields describe this node only; empty quality means no source observer.
+	TimeQuality        TimeQuality
+	TimeUnknown        bool
+	UsingPeerReference bool
 }
 
 // TimeReferenceMS supplies the same reference used by HLC offset checks. A
 // custom Store can implement this method; otherwise the engine uses system time.
-// Peer-derived references and time quality are introduced by V2-NET-1b.
+// A configured TimeReference also supplies the independent retention clock.
 func (s *storeCore) TimeReferenceMS() int64 { return s.hlc.physical.NowMS() }
 
 func checkFutureTimestamp(ts Timestamp, now int64) error {
@@ -39,6 +44,7 @@ func (s *storeCore) observeClockEntry(e Entry, refused bool) {
 	if !refused && e.Version.HLC.WallMS <= s.TimeReferenceMS() {
 		return
 	}
+	suspect := !s.timeUnknown()
 	s.mu.Lock()
 	if s.clockStatus == nil {
 		s.clockStatus = make(map[string]NodeClockStatus)
@@ -46,7 +52,7 @@ func (s *storeCore) observeClockEntry(e Entry, refused bool) {
 	status := s.clockStatus[e.Version.WriterNodeID]
 	wasSuspect := status.ClockSuspect
 	status.NodeID = e.Version.WriterNodeID
-	status.ClockSuspect = true
+	status.ClockSuspect = status.ClockSuspect || suspect
 	if refused {
 		status.RefusedEntries++
 	} else {
@@ -54,7 +60,7 @@ func (s *storeCore) observeClockEntry(e Entry, refused bool) {
 	}
 	s.clockStatus[status.NodeID] = status
 	s.mu.Unlock()
-	if !wasSuspect {
+	if suspect && !wasSuspect {
 		slog.Warn("state: clock_suspect writer", "writer", status.NodeID, "refused", refused)
 	}
 }
@@ -63,8 +69,19 @@ func (s *storeCore) observeClockEntry(e Entry, refused bool) {
 func (s *storeCore) ClockStatus() []NodeClockStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := make([]NodeClockStatus, 0, len(s.clockStatus))
+	result := make([]NodeClockStatus, 0, len(s.clockStatus)+1)
+	local := s.clockStatus[s.nodeID]
+	if ref := s.TimeReference(); ref != nil {
+		timeStatus := ref.TimeStatus()
+		local.NodeID, local.TimeQuality = s.nodeID, timeStatus.Quality
+		local.TimeUnknown, local.UsingPeerReference = timeStatus.TimeUnknown, timeStatus.UsingPeerReference
+		local.ClockSuspect = local.ClockSuspect || timeStatus.ClockSuspect
+		result = append(result, local)
+	}
 	for _, status := range s.clockStatus {
+		if status.NodeID == s.nodeID && local.TimeQuality != "" {
+			continue
+		}
 		result = append(result, status)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].NodeID < result[j].NodeID })
@@ -87,11 +104,11 @@ func (g *GossipEngine) checkPeerHorizon(peer string, horizon Timestamp) error {
 		}
 		status := g.clockPeers[peer]
 		status.NodeID = peer
-		status.ClockSuspect = true
+		status.ClockSuspect = status.ClockSuspect || !g.timeUnknown()
 		status.RefusedHorizons++
 		g.clockPeers[peer] = status
 		g.mu.Unlock()
-		slog.Warn("state: clock_suspect peer horizon", "peer", peer, "err", err)
+		slog.Warn("state: refused peer horizon", "peer", peer, "clock_suspect", status.ClockSuspect, "err", err)
 		return fmt.Errorf("refuse GC horizon from %s: %w", peer, err)
 	}
 	return nil
@@ -120,4 +137,30 @@ func (g *GossipEngine) ClockStatus() []NodeClockStatus {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].NodeID < result[j].NodeID })
 	return result
+}
+
+func (s *storeCore) retentionNowMS() int64 {
+	if ref, ok := s.hlc.physical.(*TimeReference); ok {
+		return ref.RetentionMS()
+	}
+	return s.TimeReferenceMS()
+}
+
+// TimeReference returns the configured reference, or nil for legacy physical clocks.
+func (s *storeCore) TimeReference() *TimeReference {
+	ref, _ := s.hlc.physical.(*TimeReference)
+	return ref
+}
+
+func (s *storeCore) timeUnknown() bool {
+	if ref := s.TimeReference(); ref != nil {
+		return ref.TimeStatus().TimeUnknown
+	}
+	return false
+}
+func (g *GossipEngine) timeUnknown() bool {
+	if ref := g.timeReference(); ref != nil {
+		return ref.TimeStatus().TimeUnknown
+	}
+	return false
 }

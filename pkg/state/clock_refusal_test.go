@@ -400,7 +400,7 @@ func TestPeerHorizonGuardOnAllResponses(t *testing.T) {
 				if strings.Contains(r.URL.Path, "push") {
 					if strings.HasPrefix(path, "snapshot") {
 						w.WriteHeader(http.StatusGone)
-						_ = json.NewEncoder(w).Encode(map[string]any{"error": "resync", "gc_horizon": Timestamp{WallMS: clock.now}})
+						_ = json.NewEncoder(w).Encode(resyncRequiredBody{ProtocolVersion: StateProtocolVersion, PolicyID: store.Policy().ID(), Error: "resync", GCHorizon: Timestamp{WallMS: clock.now}})
 					} else {
 						_ = json.NewEncoder(w).Encode(PushResponse{ProtocolVersion: StateProtocolVersion, PolicyID: store.Policy().ID(), GCHorizon: &future})
 					}

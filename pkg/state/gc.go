@@ -51,6 +51,8 @@ func (e *BeyondGCHorizonError) Error() string {
 // because the requester's GC horizon is lower than the peer's. The requester
 // must take a snapshot resync from that peer.
 type ResyncRequiredError struct {
+	NodeID string
+	TimeSample
 	Peer    string
 	Horizon Timestamp
 }
@@ -194,9 +196,10 @@ func (s *storeCore) collectTombstones(ctx context.Context, safePosition uint64, 
 	defer s.commitMu.Unlock()
 
 	now := s.TimeReferenceMS()
+	retentionNow := s.retentionNowMS()
 	cutoff := int64(math.MinInt64)
-	if now >= math.MinInt64+s.retention.Milliseconds() {
-		cutoff = now - s.retention.Milliseconds()
+	if retentionNow >= math.MinInt64+s.retention.Milliseconds() {
+		cutoff = retentionNow - s.retention.Milliseconds()
 	}
 	s.mu.RLock()
 	set := purgeSet{Horizon: s.horizon, Floor: s.floor}

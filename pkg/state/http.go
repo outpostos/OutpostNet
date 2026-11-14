@@ -93,6 +93,9 @@ func (s *HTTPSyncer) MaxRequestBytes() int64 { return s.maxRequestBytes }
 // Push sends entries to a remote peer.
 func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.TimeQuality == "" {
+		req.TimeSample = TimeSample{SentPhysicalMS: SystemPhysicalClock{}.NowMS(), TimeQuality: TimeUnsynced}
+	}
 	if req.PolicyID == "" {
 		req.PolicyID = s.policyID
 	}
@@ -153,6 +156,9 @@ func (s *HTTPSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequ
 
 func (s *HTTPSyncer) pull(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.TimeQuality == "" {
+		req.TimeSample = TimeSample{SentPhysicalMS: SystemPhysicalClock{}.NowMS(), TimeQuality: TimeUnsynced}
+	}
 	if req.PolicyID == "" {
 		req.PolicyID = s.policyID
 	}
@@ -203,7 +209,13 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if resp.StatusCode == http.StatusGone {
 		var gone resyncRequiredBody
 		if err := json.Unmarshal(body, &gone); err == nil && !gone.GCHorizon.isZero() {
-			return &ResyncRequiredError{Peer: redactedPeerURL(addr), Horizon: gone.GCHorizon}
+			if err := validateProtocolResponse(shown, "410", gone.ProtocolVersion); err != nil {
+				return err
+			}
+			if err := validatePolicyResponse(shown, "410", s.policyID, gone.PolicyID); err != nil {
+				return err
+			}
+			return &ResyncRequiredError{NodeID: gone.NodeID, TimeSample: gone.TimeSample, Peer: redactedPeerURL(addr), Horizon: gone.GCHorizon}
 		}
 	}
 	if resp.StatusCode >= 300 {
@@ -307,7 +319,7 @@ func (h *httpHandler) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.engine.HandlePush(r.Context(), req)
 	if err != nil {
-		if writeResyncRequired(w, err) {
+		if h.writeResyncRequired(w, err) {
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -339,7 +351,7 @@ func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.engine.HandlePullResponse(r.Context(), req)
 	if err != nil {
-		if writeResyncRequired(w, err) {
+		if h.writeResyncRequired(w, err) {
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -350,18 +362,22 @@ func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
 
 // resyncRequiredBody is the 410 Gone body for ResyncRequiredError.
 type resyncRequiredBody struct {
-	Error     string    `json:"error"`
-	GCHorizon Timestamp `json:"gc_horizon"`
+	NodeID string `json:"node_id"`
+	TimeSample
+	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	PolicyID        string          `json:"policy_id"`
+	Error           string          `json:"error"`
+	GCHorizon       Timestamp       `json:"gc_horizon"`
 }
 
 // writeResyncRequired maps ResyncRequiredError to 410 Gone: the history needed
 // for an incremental exchange has been collected.
-func writeResyncRequired(w http.ResponseWriter, err error) bool {
+func (h *httpHandler) writeResyncRequired(w http.ResponseWriter, err error) bool {
 	var resync *ResyncRequiredError
 	if !errors.As(err, &resync) {
 		return false
 	}
-	writeJSON(w, http.StatusGone, resyncRequiredBody{Error: resync.Error(), GCHorizon: resync.Horizon})
+	writeJSON(w, http.StatusGone, resyncRequiredBody{NodeID: h.nodeID, TimeSample: h.engine.timeSample(), ProtocolVersion: StateProtocolVersion, PolicyID: h.engine.policy.ID(), Error: resync.Error(), GCHorizon: resync.Horizon})
 	return true
 }
 

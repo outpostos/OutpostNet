@@ -139,7 +139,9 @@ Replication memory and ordered reads (NET-11):
   [NET-11 measurements](../../docs/replication-memory-net11.md) for commands,
   before/after results and measurement limits.
 
-**Protocol upgrade:** NET-8 raises `StateProtocolVersion` from 1.0 to **2.0**.
+**Protocol upgrade:** V2-NET-1b raises `StateProtocolVersion` to **3.0**
+(handshake time samples); NET-8 previously raised 1.0 to 2.0. See
+[time reference](../../docs/time-reference.md) for host wiring and trust limits.
 New/old majors reject each other (HTTP 426 for requests; response validation
 also rejects an old peer). Mixed clusters are unsupported. Stop all hosts
 embedding `pkg/state`, upgrade their pinned Net dependency and restart the
@@ -344,6 +346,7 @@ Clock refusal safety (V2-NET-1a, ADR-0006 D3/D4):
   `clock_suspect`: per-writer refusal/ahead counts and per-peer horizon refusal
   counts. They are process-local observations, reset on recreation. Hosts map
   these facts into their observation stream; this change adds no Range dependency.
-- Peer-derived time references/quality and the separate retention clock are
-  V2-NET-1b; local future-HLC cleanup is V2-NET-1c. Protocol 2.0 is unchanged in
-  this ticket. See [GC compatibility and acceptance evidence](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).
+- V2-NET-1b adds time quality, bounded handshake samples, a shared host reference,
+  and conservative retention, raising the state protocol to **3.0**. See
+  [time reference configuration and acceptance](../../docs/time-reference.md).
+  Local future-HLC cleanup remains V2-NET-1c. See [GC compatibility and acceptance evidence](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).

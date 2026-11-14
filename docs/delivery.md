@@ -110,6 +110,7 @@ network calls. Run polls at `RetryMin`; it has no hidden goroutine of its own.
 | `ClockSkew` | 0 | Nonnegative arrival tolerance and metadata retention extension |
 | `RetryMin` / `RetryMax` | 100 ms / 30 s | Per-destination exponential backoff bounds |
 | `Clock` | `time.Now` | Injectable clock, safe for concurrent calls |
+| `TimeReference` | unset | Shared Net reference (`Now`); use instead of `Clock`, see [time reference](time-reference.md) |
 
 Quota charges reserve enough metadata for Ack/receipt transitions even with
 empty payloads. Outbox fullness returns `ErrOutboxFull` without accepting or
@@ -156,12 +157,13 @@ restoring stale backups, or power-loss behavior beyond filesystem guarantees.
 
 The consumer's processed-ID record and business changes must commit in its own
 transaction. This library cannot atomically commit a separate business database.
-For example (pseudocode; keep processed IDs for your business retry horizon):
+For example (pseudocode; `reference` is the shared Net time reference; keep
+processed IDs for your business retry horizon):
 
 ```go
 delivery, err := inbox.Receive(ctx, "commands")
 if err != nil { return err }
-if !time.Now().Before(delivery.ExpiryTime) {
+if !reference.Now().Before(delivery.ExpiryTime) {
     return inbox.Ack(ctx, delivery.MessageID) // discard stale work explicitly
 }
 err = database.Transaction(func(tx Tx) error {
@@ -250,7 +252,7 @@ example; Mesh configuration and runtime wiring are a separate ticket.
 Envelope/receipt schemas are the public `Batch` types. Responses carry
 `protocol_version`, receiver `node_id`, and ordered `envelopes` / `receipts`
 results from `BatchResult`. Delivery protocol **1.0** is independent of state
-protocol 2.0. A mismatched request major returns 426; an incompatible response,
+protocol 3.0. A mismatched request major returns 426; an incompatible response,
 wrong receiver node, malformed JSON, result ID/order/length or code rejects the
 whole acknowledgement. No payload is released on transport failure.
 
