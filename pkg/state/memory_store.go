@@ -65,8 +65,9 @@ type storeCore struct {
 	// which peer-blind collection is refused.
 	replicated atomic.Bool
 	// horizon and floor are guarded by mu. See GCHorizon and GCFloor.
-	horizon Timestamp
-	floor   uint64
+	clockStatus map[string]NodeClockStatus
+	horizon     Timestamp
+	floor       uint64
 	// adopted is the highest peer horizon adopted through a snapshot resync. A
 	// requester below it is not vouched for (removals done elsewhere). Guarded by
 	// mu.
@@ -252,6 +253,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 	if _, err := s.hlc.Update(incoming.Version.HLC); err != nil {
 		var offsetErr *ClockOffsetError
 		if errors.As(err, &offsetErr) {
+			s.observeClockEntry(incoming, true)
 			slog.Warn("state: remote HLC exceeds max clock offset",
 				"key", incoming.Key,
 				"peer", incoming.Version.WriterNodeID,
@@ -262,6 +264,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 		return false, fmt.Errorf("reject remote HLC for key %q from %q: %w", incoming.Key, incoming.Version.WriterNodeID, err)
 	}
 
+	s.observeClockEntry(incoming, false)
 	s.mu.Lock()
 	existing, found := s.entries[incoming.Key]
 	if found && s.policy.CompareEntries(incoming, existing) <= 0 {

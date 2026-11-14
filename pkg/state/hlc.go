@@ -95,13 +95,8 @@ func (c *hlcClock) Update(remote Timestamp) (Timestamp, error) {
 	defer c.mu.Unlock()
 
 	pt := c.physical.NowMS()
-	if offset := remote.WallMS - pt; offset > MaxClockOffsetMS {
-		return c.last, &ClockOffsetError{
-			RemoteWallMS:   remote.WallMS,
-			PhysicalNowMS:  pt,
-			OffsetMS:       offset,
-			MaxClockOffset: MaxClockOffsetMS,
-		}
+	if err := checkFutureTimestamp(remote, pt); err != nil {
+		return c.last, err
 	}
 
 	local := c.last

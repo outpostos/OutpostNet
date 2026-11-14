@@ -119,8 +119,10 @@ type DurableStore struct {
 	logFile      durableLog
 	lockFile     *os.File
 	peerProgress map[string]uint64
-	// peerNodes maps a peer address to the node ID that last acknowledged a push
-	// there. Guarded by mu, like peerProgress.
+	// peerRefused tracks unresolved refusals in the same records as progress.
+	peerRefused map[string][]refusedPosition
+	// peerNodes maps an address to the node that answered its latest push.
+	// Both maps are guarded by mu, like peerProgress.
 	peerNodes     map[string]string
 	preAppendHook func(durableRecord) error
 	wrapLog       func(durableLog) durableLog
@@ -163,7 +165,8 @@ type durableRecord struct {
 	Peer     string              `json:"peer,omitempty"`
 	Position uint64              `json:"position,omitempty"`
 	// PeerNodeID is the node ID that answered at Peer (peer_progress records).
-	PeerNodeID string `json:"peer_node_id,omitempty"`
+	PeerNodeID string             `json:"peer_node_id,omitempty"`
+	Refused    *[]refusedPosition `json:"refused_positions,omitempty"`
 	// Purge fields: the horizon and floor after the purge and the exact entry
 	// identities it removed.
 	Horizon *Timestamp     `json:"horizon,omitempty"`
@@ -222,6 +225,7 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		lockFile:      lockFile,
 		peerProgress:  make(map[string]uint64),
 		peerNodes:     make(map[string]string),
+		peerRefused:   make(map[string][]refusedPosition),
 		preAppendHook: cfg.preAppendHook,
 		wrapLog:       cfg.wrapLog,
 
@@ -317,7 +321,7 @@ func (s *DurableStore) SavePeerProgress(ctx context.Context, peer string, positi
 	if strings.TrimSpace(peer) == "" {
 		return fmt.Errorf("state peer progress peer is required")
 	}
-	return s.appendPeerProgress(peer, "", position)
+	return s.appendPeerProgress(peer, "", position, nil)
 }
 
 func (s *DurableStore) openManifest() error {
@@ -500,6 +504,14 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 			s.peerProgress[record.Peer] = record.Position
 		}
 		s.setPeerNodeLocked(record.Peer, record.PeerNodeID)
+		if record.Refused != nil {
+			for _, r := range *record.Refused {
+				if r.Position == 0 || strings.TrimSpace(r.Key) == "" {
+					return fmt.Errorf("invalid refused position in peer progress")
+				}
+			}
+			s.peerRefused[record.Peer] = append([]refusedPosition(nil), (*record.Refused)...)
+		}
 		return nil
 	case durableRecordSnapshot:
 		s.clock.SetAtLeast(record.Counter)
@@ -549,17 +561,21 @@ func (s *DurableStore) appendPurge(set purgeSet) error {
 	}, func() {})
 }
 
-func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64) error {
+func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64, refused *[]refusedPosition) error {
 	return s.appendRecord(durableRecord{
 		Type:       durableRecordPeerProgress,
 		Peer:       peer,
 		Position:   position,
 		PeerNodeID: nodeID,
+		Refused:    refused,
 	}, func() {
 		if position > s.peerProgress[peer] {
 			s.peerProgress[peer] = position
 		}
 		s.setPeerNodeLocked(peer, nodeID)
+		if refused != nil {
+			s.peerRefused[peer] = append([]refusedPosition(nil), (*refused)...)
+		}
 	})
 }
 
@@ -578,14 +594,17 @@ func (s *DurableStore) setPeerNodeLocked(peer, nodeID string) {
 
 // savePeerAck durably records an acknowledged push position together with the
 // node ID that answered at peer.
-func (s *DurableStore) savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error {
+func (s *DurableStore) savePeerAck(ctx context.Context, peer, nodeID string, position uint64, refused []refusedPosition) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(peer) == "" {
 		return fmt.Errorf("state peer progress peer is required")
 	}
-	return s.appendPeerProgress(peer, nodeID, position)
+	if refused == nil {
+		refused = []refusedPosition{}
+	}
+	return s.appendPeerProgress(peer, nodeID, position, &refused)
 }
 
 // peersAnsweringAs returns the peer addresses whose latest acknowledged push
@@ -778,7 +797,8 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	}
 	sort.Strings(peers)
 	for _, peer := range peers {
-		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer], PeerNodeID: s.peerNodes[peer]})
+		refused := append([]refusedPosition{}, s.peerRefused[peer]...)
+		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer], PeerNodeID: s.peerNodes[peer], Refused: &refused})
 	}
 	sequence := s.nextSeq
 	for index := range records {
@@ -911,4 +931,13 @@ func syncDir(dir string) error {
 	syncErr := handle.Sync()
 	closeErr := handle.Close()
 	return errors.Join(syncErr, closeErr)
+}
+
+func (s *DurableStore) peerRefusals(ctx context.Context, peer string) ([]refusedPosition, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]refusedPosition(nil), s.peerRefused[peer]...), nil
 }

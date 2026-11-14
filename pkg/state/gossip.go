@@ -48,11 +48,14 @@ type GossipEngine struct {
 	maxPushBytes         int64
 	maxPushPagesPerRound int
 
+	progressMu sync.Mutex // serializes acknowledgement/refusal read-modify-write
 	mu         sync.Mutex
 	peerStates map[string]*peerState
+	clockPeers map[string]NodeClockStatus
 }
 
 type peerState struct {
+	refused              []refusedPosition
 	lastPushPosition     uint64
 	oversizedPushEntries uint64
 	// nodeID is the node that answered the latest acknowledged push here.
@@ -201,6 +204,13 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 		started := time.Now()
 		startPosition := g.store.CurrentPosition()
 		caughtUp, err := g.pushTo(ctx, addr, startPosition, now)
+		if err == nil {
+			refused, readErr := g.peerRefusals(ctx, addr)
+			if readErr != nil {
+				err = &localStoreError{err: readErr}
+			}
+			caughtUp = caughtUp && len(refused) == 0
+		}
 		g.recordPushRound(addr, started, caughtUp)
 		if err != nil {
 			var local *localStoreError
@@ -271,8 +281,13 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 			}
 			return false, g.recordPeerFailure(addr, "push", err, now)
 		}
+		if resp != nil {
+			if err := g.checkPeerHorizon(addr, timestampValue(resp.GCHorizon)); err != nil {
+				return false, g.recordPeerFailure(addr, "push", err, now)
+			}
+		}
 		pushed := g.pushSuccessPosition(addr, since, changes, resp)
-		if err := g.recordPushSuccess(ctx, addr, pushed, resp); err != nil {
+		if err := g.recordPushSuccess(ctx, addr, pushed, changes, resp); err != nil {
 			return false, g.recordPeerFailure(addr, "push-progress", err, now)
 		}
 		if hasBeyondHorizonRejection(resp) {
@@ -332,6 +347,9 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
 		return nil, err
 	}
+	if err := g.checkPeerHorizon(req.SourceNodeID, timestampValue(req.GCHorizon)); err != nil {
+		return nil, err
+	}
 	horizon := g.storeHorizon()
 	if err := g.checkRequesterHorizon(ctx, horizon, req.GCHorizon, req.SourceNodeID); err != nil {
 		return nil, err
@@ -386,6 +404,9 @@ func (g *GossipEngine) HandlePull(ctx context.Context, req PullRequest) ([]Entry
 // served: they are how a lagging requester pages through our snapshot during
 // resync.
 func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) (*PullResponse, error) {
+	if err := g.checkPeerHorizon(req.SourceNodeID, timestampValue(req.GCHorizon)); err != nil {
+		return nil, err
+	}
 	if err := validatePolicyID(g.policy, req.PolicyID); err != nil {
 		return nil, err
 	}
@@ -503,6 +524,9 @@ func (g *GossipEngine) peerLastPushPosition(ctx context.Context, addr string) (u
 		if err != nil {
 			return 0, err
 		}
+		g.mu.Lock()
+		position = maxUint64(position, g.peerStateLocked(addr).lastPushPosition)
+		g.mu.Unlock()
 		return position, nil
 	}
 	g.mu.Lock()
@@ -510,30 +534,24 @@ func (g *GossipEngine) peerLastPushPosition(ctx context.Context, addr string) (u
 	return g.peerStateLocked(addr).lastPushPosition, nil
 }
 
-func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushed uint64, resp *PushResponse) error {
+func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushed uint64, changes []Entry, resp *PushResponse) error {
+	g.progressMu.Lock()
+	defer g.progressMu.Unlock()
+	refused, err := g.peerRefusals(ctx, addr)
+	if err != nil {
+		return err
+	}
+	refused = updateRefusals(refused, changes, resp)
 	var nodeID string
 	if resp != nil {
 		nodeID = resp.NodeID
 	}
-	if acks, ok := g.store.(peerAckStore); ok {
-		if err := acks.savePeerAck(ctx, addr, nodeID, pushed); err != nil {
-			return err
-		}
-	} else if progress, ok := g.store.(PeerProgressStore); ok {
-		if err := progress.SavePeerProgress(ctx, addr, pushed); err != nil {
-			return err
-		}
+	if err := g.savePushAck(ctx, addr, nodeID, pushed, refused); err != nil {
+		return err
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
-	if pushed > state.lastPushPosition {
-		state.lastPushPosition = pushed
-	}
-	// The node that answered this push replaces any earlier one; a response
-	// without node_id (a 03b node, or another node that took over the address)
-	// clears the mapping, so that address no longer vouches for anyone.
-	state.nodeID = nodeID
 	state.failures = 0
 	state.nextAttempt = time.Time{}
 	state.lastSuccess = time.Now()
@@ -624,7 +642,7 @@ func (g *GossipEngine) pushSuccessPosition(peer string, since uint64, changes []
 	}
 	firstTransient := uint64(0)
 	for _, rejection := range resp.Rejections {
-		if !rejection.Transient {
+		if !rejection.Transient || rejection.Reason == rejectionReasonClockOffset {
 			continue
 		}
 		if rejectedPosition, ok := positionForKey(changes, rejection.Key); ok && (firstTransient == 0 || rejectedPosition < firstTransient) {
@@ -658,7 +676,7 @@ func rejectionFromApplyError(entry Entry, err error) (PushRejection, bool) {
 	return PushRejection{
 		Key:         entry.Key,
 		Reason:      rejectionReasonClockOffset,
-		Transient:   true,
+		Transient:   false,
 		OffsetMS:    offsetErr.OffsetMS,
 		MaxOffsetMS: offsetErr.MaxClockOffset,
 	}, true
@@ -717,7 +735,7 @@ func (g *GossipEngine) CollectTombstones(ctx context.Context) (TombstoneGCResult
 	}
 	var safe uint64
 	for index, addr := range peers {
-		position, err := g.peerLastPushPosition(ctx, addr)
+		position, err := g.peerSafePosition(ctx, addr)
 		if err != nil {
 			return TombstoneGCResult{}, err
 		}
@@ -750,6 +768,9 @@ func (g *GossipEngine) maintain(ctx context.Context) {
 // across pages, not the entries.
 func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon Timestamp) error {
 	shown := redactedPeerURL(addr)
+	if err := g.checkPeerHorizon(addr, knownHorizon); err != nil {
+		return err
+	}
 	gs, ok := g.store.(gcStore)
 	if !ok {
 		return fmt.Errorf("peer %s requires snapshot resync: %w", shown, ErrTombstoneGCUnsupported)
@@ -775,6 +796,9 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		})
 		if err != nil {
 			return fmt.Errorf("pull resync snapshot page %d from %s: %w", page, shown, err)
+		}
+		if err := g.checkPeerHorizon(addr, timestampValue(resp.GCHorizon)); err != nil {
+			return err
 		}
 		if page == 0 {
 			// The first page's horizon was read before any snapshot entry, so it is
@@ -869,7 +893,7 @@ func (g *GossipEngine) requesterVouched(ctx context.Context, requesterHorizon Ti
 		return false, nil
 	}
 	for _, addr := range g.peersAnsweringAs(requesterID) {
-		acknowledged, err := g.peerLastPushPosition(ctx, addr)
+		acknowledged, err := g.peerSafePosition(ctx, addr)
 		if err != nil {
 			return false, err
 		}
@@ -948,6 +972,11 @@ func (g *GossipEngine) applyDigestPage(ctx context.Context, addr string, entries
 	var beyondHorizon int
 	for _, entry := range entries {
 		if _, err := g.store.Apply(ctx, entry); err != nil {
+			var offset *ClockOffsetError
+			if errors.As(err, &offset) {
+				// A bad writer must not stop replication from its forwarders.
+				continue
+			}
 			var beyond *BeyondGCHorizonError
 			if errors.As(err, &beyond) {
 				// The peer lags behind our GC horizon. Refusing its stale entry is

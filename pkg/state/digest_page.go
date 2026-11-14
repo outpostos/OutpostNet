@@ -95,6 +95,9 @@ func (g *GossipEngine) pullDigestRound(ctx context.Context, addr string, digest 
 			if err != nil {
 				return err
 			}
+			if err := g.checkPeerHorizon(addr, timestampValue(resp.GCHorizon)); err != nil {
+				return err
+			}
 			if err := validateDigestResponse(req, resp); err != nil {
 				return err
 			}
@@ -132,6 +135,9 @@ func (g *GossipEngine) handleDigestResponse(ctx context.Context, req PullRequest
 		if !digestKeyInRange(key, req) {
 			return nil, fmt.Errorf("digest key %q outside declared interval", key)
 		}
+	}
+	if err := g.confirmDigestRefusals(ctx, req.SourceNodeID, req.Digest); err != nil {
+		return nil, err
 	}
 	if err := g.checkRequesterHorizon(ctx, horizon, req.GCHorizon, req.SourceNodeID); err != nil {
 		return nil, err
