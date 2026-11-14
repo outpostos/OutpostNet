@@ -154,7 +154,7 @@ Reproduce from the repository root:
 go test -race -count=1 ./pkg/state ./pkg/delivery -run '^TestTimeReference'
 go build ./...
 go vet ./...
-TMPDIR=/tmp go test -race -count=1 ./...
+TMPDIR=/tmp go test -p 1 -race -count=1 ./...
 GOOS=linux GOARCH=amd64 make build-agent
 make fmt
 git diff --check
@@ -167,3 +167,11 @@ year in the future; the unknown-time slice blamed the only peer; aliases initial
 established a false majority; permanent rejection initially pinned GC; the overflow
 slice initially accepted a wrapping timestamp. Each corresponding test passes
 after its implementation slice. No Mesh contract changes or generated files occur.
+
+On shared machines, `-p 1` serializes packages while retaining the complete race
+suite. Initial parallel runs encountered timing-sensitive existing tests:
+`TestProcessCrashBoundaries` (Mac child output contained trailing test-harness
+text after JSON), `TestStreamRecoversAfterEarlyReturns` (one QUIC dial timeout),
+and `TestColdStartFromCache` (Linux cache fixture expired before its assertion).
+Isolated rechecks passed; the crash test also passed repeated checks on the
+unchanged main baseline. These tests and their product code are unchanged here.
