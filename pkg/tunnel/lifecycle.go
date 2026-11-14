@@ -223,7 +223,13 @@ func (mc *ManagedClient) monitor(ctx context.Context) {
 		mc.mu.RUnlock()
 
 		if conn == nil {
-			return
+			// UpdateServerAddr clears the connection. It can run before this
+			// monitor starts or between iterations; that still requires a redial.
+			if ctx.Err() != nil {
+				return
+			}
+			mc.reconnect(ctx)
+			continue
 		}
 
 		// Wait for connection to close (context done on the connection).

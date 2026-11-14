@@ -8,7 +8,7 @@ Service stable access, observed by Range). Responsibilities in this repository:
 
 | Area | Component | Responsibility |
 |------|-----------|----------------|
-| Net: communication | `pkg/tunnel`, `outpostnet-agent` (`internal/agent`) | QUIC connections, token auth, stream headers, reconnect and address change, relay, peer directory (`PUT/GET /v1/peers`) |
+| Net: communication | `pkg/tunnel`, `outpostnet-agent` (`internal/agent`) | QUIC connections, group mutual TLS / legacy token auth, stream headers, reconnect and address change, relay, peer directory (`PUT/GET /v1/peers`) |
 | Net: state primitives | `pkg/state` (library) | Opaque-entry replication: `Store` (memory or durable), `GossipEngine` push/pull and anti-entropy, tombstone GC with GC horizon and resync, compaction, `ReplicationStatus`. Consumers (OutpostMesh, OutpostLet) embed it and own the meaning of their keys; see [pkg/state/README.md](../pkg/state/README.md) and [state-tombstone-gc.md](state-tombstone-gc.md) |
 | Net: reliable delivery | `pkg/delivery` (library) | Durable direct-peer Outbox/Inbox, bounded deduplication, expiry, quotas and optional consumer handoff receipts. Separate from state replication; in-memory and authenticated HTTP transports, host-owned peer resolution, read-only delivery status and observation metric mapping. See [delivery.md](delivery.md) |
 | Service | `outpostnet-service` (`pkg/service`, `internal/servicehost`) | Stable local entries for `<service>@<node_id>` on top of the Net host; see [service-layer.md](service-layer.md) |
@@ -141,7 +141,7 @@ Imports can use `service: <name>@<node_id>` to bind a stable local `listen_addr`
 | One binary, two roles | Simplifies deployment, reduces cognitive overhead (like frp but simpler) |
 | QUIC as tunnel protocol | Native multiplexing, built-in TLS, resilient under mobile/unstable networks |
 | Configuration persistence | Edge nodes have unreliable networks; agent auto-recovers tunnels on restart |
-| Token auth instead of certificates | Lowers deployment barrier, no PKI infrastructure to manage |
+| Offline node certificates | Group mutual TLS and certificate-bound identities per ADR-0008; [configuration and legacy compatibility](node-certificates.md) |
 
 ---
 
