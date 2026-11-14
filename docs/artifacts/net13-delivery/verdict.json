@@ -1,0 +1,14 @@
+{
+  "pass": true,
+  "errors": [],
+  "sent": 50000,
+  "processed": 47502,
+  "missing": [],
+  "expired_deliveries": [],
+  "unexplained_duplicates": [],
+  "states": {
+    "DELIVERED": 17,
+    "HANDED_OFF": 47500,
+    "EXPIRED": 2483
+  }
+}

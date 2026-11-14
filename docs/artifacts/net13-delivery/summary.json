@@ -1,0 +1,37 @@
+{
+  "implementation": "134d4e4",
+  "range_tooling": "1275b0c",
+  "sent": 50000,
+  "consumer_processed_records": 47502,
+  "unique_processed": 47500,
+  "crash_window_duplicates": 2,
+  "successful_consumer_acks": 47500,
+  "states": {
+    "DELIVERED": 17,
+    "HANDED_OFF": 47500,
+    "EXPIRED": 2483
+  },
+  "kill_counts": {
+    "sender": 1,
+    "receiver": 1,
+    "consumer": 5
+  },
+  "inbox_full_observations": [
+    {
+      "full_count": 361,
+      "pending": 1205
+    }
+  ],
+  "partition_seconds": 38.30742859840393,
+  "drain_seconds_after_partition": 220.25196027755737,
+  "total_trial_seconds": 375.4484179019928,
+  "consumer_interval_seconds": 264.5189299583435,
+  "consumer_unique_envelopes_per_second": 179.57126927543638,
+  "post_partition_processed": 43908,
+  "unexpired_not_processed": 0,
+  "expired_deliveries": 0,
+  "unexplained_duplicates": 0,
+  "passed": true,
+  "binary_sha256": "d9b8fcf1a550e07ca894fdd2eba52d09118e8b5d0c7c5b2935c60b6fefcb7d76",
+  "unexpired_sends": 47500
+}

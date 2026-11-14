@@ -53,6 +53,24 @@ transaction completes, the consumer calls `Ack(ctx, id)`. Ack durably removes
 the payload while retaining dedup metadata. A crash before Ack redelivers; a
 crash after successful Ack does not. Ack is idempotent while metadata exists.
 
+Inbox ready entries have a per-mailbox balanced index ordered by priority then
+source sequence. Receive and lease release take O(log n); the index skips expired
+subtrees without walking their records. Acked dedup records do not participate.
+The outbox has an ordered send index per destination; pending receipts and expiry
+maintenance have separate indexes. Indexes rebuild from the existing version-1
+journal on restart; leases remain process-local. Flush builds exact byte-bounded
+pages with one encoding per selected envelope/receipt rather than re-encoding a
+growing batch. Metadata collection and compaction keep their existing semantics.
+
+Concurrent Acks share transactions of at most 256 requests. A solitary Ack has
+no batching timer. Each caller waits for the group fsync before success; cancelled
+requests waiting for their turn return cancellation without writing. Once a commit
+starts, cancellation cannot cause a premature return. The journal commit mutex
+still spans write/fsync/publication to preserve rollback and compaction ordering;
+Ack work under that mutex is bounded by the group size. Admission, reads and
+other commits can wait for that sync. Send retains its synchronous durable commit;
+Inbox Accept already commits all new entries of its batch in one fsync.
+
 With `WantHandoffReceipt`, Ack also atomically queues a durable receipt. Inbox
 `Flush`/`Run` sends receipts back through the same `Transport`; Outbox persists
 `HANDED_OFF`. Receipt response loss and restarts are safe. A receipt may arrive
@@ -165,7 +183,8 @@ receipt, multi-hop store-and-forward, priority bandwidth reservation, or automat
 wiring. Connected relay transport may carry a direct-peer
 exchange; the library itself never forwards via another node's durable queue.
 
-Acceptance evidence and reproducible commands: [NET-9 test report](delivery-test-report.md).
+Acceptance evidence and reproducible commands: [NET-9 test report](delivery-test-report.md)
+and [NET-13 throughput and VM evidence](delivery-throughput-net13.md).
 
 ## Embedding in a gateway process (NET-10)
 

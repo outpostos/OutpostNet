@@ -82,11 +82,9 @@ func (in *Inbox) Receive(ctx context.Context, mailbox string) (Envelope, error) 
 			in.mu.Unlock()
 			return Envelope{}, err
 		}
-		all := ordered(in.entries, func(e entry) bool {
-			return !e.Acked && in.cfg.Clock().Before(e.Envelope.ExpiryTime) && e.Envelope.Mailbox == mailbox && !in.leased[e.Envelope.MessageID]
-		})
-		if len(all) > 0 {
-			e := clone(all[0].Envelope)
+		if node := firstLive(in.mailboxes[mailbox], in.cfg.Clock()); node != nil {
+			e := clone(node.value.Envelope)
+			in.mailboxes[mailbox] = removeReady(in.mailboxes[mailbox], node.value)
 			in.leased[e.MessageID] = true
 			in.mu.Unlock()
 			return e, nil
@@ -109,34 +107,16 @@ func (in *Inbox) Nack(id MessageID) error {
 	if _, ok := in.entries[id]; !ok {
 		return ErrNotFound
 	}
-	delete(in.leased, id)
+	if in.leased[id] {
+		delete(in.leased, id)
+		e := in.entries[id]
+		if !e.Acked && in.cfg.Clock().Before(e.Envelope.ExpiryTime) {
+			key := e.Envelope.Mailbox
+			in.mailboxes[key] = insertReady(in.mailboxes[key], e)
+		}
+	}
 	close(in.changed)
 	in.changed = make(chan struct{})
-	return nil
-}
-func (in *Inbox) Ack(ctx context.Context, id MessageID) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if err := in.writable(); err != nil {
-		return err
-	}
-	e, ok := in.entries[id]
-	if !ok {
-		return ErrNotFound
-	}
-	if e.Acked {
-		return nil
-	}
-	e.Acked = true
-	e.Envelope.Payload = nil
-	e.ReceiptPending = e.Envelope.WantHandoffReceipt
-	if err := in.commit(transaction{Upserts: []entry{e}}); err != nil {
-		return err
-	}
-	delete(in.leased, id)
 	return nil
 }
 func (in *Inbox) Flush(ctx context.Context) error {
@@ -150,17 +130,14 @@ func (in *Inbox) Flush(ctx context.Context) error {
 		in.mu.Unlock()
 		return err
 	}
-	all := ordered(in.entries, func(e entry) bool { return e.ReceiptPending })
-	in.mu.Unlock()
 	batches := make(map[string]Batch)
-	for _, e := range all {
-		dest := e.Envelope.MessageID.SourceNodeID
-		b := batches[dest]
-		candidate := Batch{Receipts: append(append([]Receipt(nil), b.Receipts...), Receipt{e.Envelope.MessageID, in.cfg.NodeID})}
-		if encodedSize(candidate) <= in.cfg.MaxBatchBytes {
-			batches[dest] = candidate
+	for dest, q := range in.receipts {
+		batch := in.page(q, true)
+		if len(batch.Receipts) > 0 {
+			batches[dest] = batch
 		}
 	}
+	in.mu.Unlock()
 	var errs []error
 	for _, dest := range destinations(batches) {
 		batch := batches[dest]
