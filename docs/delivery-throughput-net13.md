@@ -114,3 +114,73 @@ drain deadline. The consumer durably records processed IDs before Ack. The
 small consumer delays during crash injection and the zero-delay final consumer
 are the committed Range settings. Product Net/Mesh/Let services and range-agent
 continue running throughout; node3 supplies the existing logical-service path.
+
+## Final VM result (implementation `134d4e4`)
+
+**Pass.** The committed Range judge accepts the complete, retained per-message
+records. [Summary](artifacts/net13-delivery/summary.json),
+[verdict](artifacts/net13-delivery/verdict.json), and
+[hash manifest](artifacts/net13-delivery/manifest.json) accompany gzip-compressed
+successful-Send, consumer, sender-status and fault JSONL in
+[`artifacts/net13-delivery/`](artifacts/net13-delivery/).
+
+- 50,000 successful Sends; all **47,500 unexpired Sends** processed and Acked,
+  with sender state HANDED_OFF. No missing unexpired IDs.
+- Zero expired deliveries; 47,502 processing records contain exactly two
+  duplicates, both accepted by the judge's recorded crash-window checks.
+- 47,500 HANDED_OFF / 2,483 EXPIRED / 17 DELIVERED. The 17 are short-expiry
+  messages durably received before expiry, then expired without handoff;
+  DELIVERED correctly describes durable reception rather than processing.
+- One sender SIGKILL, one receiver SIGKILL, five consumer SIGKILLs; observed
+  inbox-full count 361 with 1,205 sender-pending envelopes. The scoped partition
+  lasted 38.307 seconds, including remote command completion.
+- Final capture and judgment completed **220.252 seconds after partition
+  clearance**, versus the unchanged 1,800-second budget and 900-second target.
+  The entire trial took 375.448 seconds, including initial Send admission and
+  faults. Consumer handoff averaged **179.57 unique envelopes/s** across its
+  264.519-second interval, including crash delays and the partition.
+
+Replay exact hashes and the unchanged Range judge locally:
+
+```sh
+PYTHONPATH="$RANGE/tools/phase2" python3 docs/artifacts/net13-delivery/replay.py
+```
+
+Only outpost-node1 (.119), outpost-node2 (.155) and outpost-node3 (.218) were
+accessed. Existing product services and agents stayed active. Test units were
+stopped, the dedicated installed test binary removed, and the scoped firewall
+rule cleared; normal qdiscs and all five service states are recorded in
+[restoration.json](artifacts/net13-delivery/restoration.json).
+A fresh 120-second logical-service probe passes **600/600** connections, all
+through node3: [probe summary](artifacts/net13-delivery/restoration-summary.json)
+and [individual connections](artifacts/net13-delivery/restoration-clients.jsonl).
+Both exploratory and final delivery stores remain on the VMs for inspection;
+historical RANGE-2 stores were not changed. The final binary hash is in the
+summary. Existing Mesh/Let dependency pins are unchanged: their upgrade and the
+complete RANGE-2 run-9 acceptance remain separate work.
+
+## Acceptance mapping and gates
+
+| NET-13 criterion | Evidence |
+| --- | --- |
+| 1. 50k pending + 50k retained; cost within 3x; CI budget; envelopes/s | Scaling table above: 1.08x per-envelope cost; clock/allocation budgets in `TestInboxDrainWorkBudget`, expired-prefix and Flush allocation regressions |
+| 2. Existing durability/crash/edge/stress race suites, concurrent group crash | Full `pkg/delivery` race suite passes; `TestConcurrentAcksShareDurableCommit`, `TestConcurrentAcksCrashMidGroup`; existing actual SIGKILL, faulted-file and 10k-restart suites enabled |
+| 3. VM 50k Range tooling, all faults, timely unexpired handoff, no expired delivery, restore | Complete raw records, hashes, passing replay above; 220.252 s after partition, 179.57 handoffs/s; service restoration evidence |
+| 4. Local/CI gates and docs | Commands below; `delivery.md` documents indexes, batching, lock and durability boundary; hosted checks attached to the PR |
+
+```sh
+make fmt
+git diff --exit-code
+go build ./...
+make vet
+TMPDIR=/tmp GOFLAGS=-p=1 go test -race -count=1 -timeout=30m ./...
+GOOS=linux GOARCH=amd64 make build-agent
+```
+
+Mac build, vet, format and Linux cross-build pass. The complete Mac race run
+passes delivery (222.741 s), state (158.250 s) and every other package except
+an existing QUIC loopback handshake timeout in `TestMultiplexNoHOLBlocking`.
+The unchanged tunnel package then passes its complete race rerun (14.970 s).
+Linux validation runs the CI-equivalent commands on the same implementation,
+including the entire repository race suite; its result is recorded with the PR.
+No tunnel code or test deadlines were changed.

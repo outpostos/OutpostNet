@@ -1,0 +1,13 @@
+{
+  "requests": 600,
+  "successful": 600,
+  "nodes": {
+    "node3": 600
+  },
+  "first": "2026-11-14T21:07:57.355682435Z",
+  "last": "2026-11-14T21:09:57.159922515Z",
+  "product_and_agent_service_checks": 15,
+  "active_service_checks": 15,
+  "remaining_delivery_test_units": 0,
+  "remaining_delivery_partition_rules": 0
+}

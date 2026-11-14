@@ -1,0 +1,23 @@
+[
+  {
+    "node": "outpost-node1",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n",
+    "firewall": "-P OUTPUT ACCEPT\n-A OUTPUT -m comment --comment \"kube-router netpol - VEAAIY32XVBHCSCY\" -j KUBE-ROUTER-OUTPUT\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes load balancer firewall\" -j KUBE-PROXY-FIREWALL\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes service portals\" -j KUBE-SERVICES\n-A OUTPUT -j KUBE-FIREWALL\n-A OUTPUT -m comment --comment \"KUBE-ROUTER rule to explicitly ACCEPT traffic that comply to network policies\" -m mark --mark 0x20000/0x20000 -j ACCEPT\n",
+    "test_units": "UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\nTo show all installed unit files use 'systemctl list-unit-files'.\n"
+  },
+  {
+    "node": "outpost-node2",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n",
+    "firewall": "-P OUTPUT ACCEPT\n-A OUTPUT -m comment --comment \"kube-router netpol - VEAAIY32XVBHCSCY\" -j KUBE-ROUTER-OUTPUT\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes load balancer firewall\" -j KUBE-PROXY-FIREWALL\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes service portals\" -j KUBE-SERVICES\n-A OUTPUT -j KUBE-FIREWALL\n-A OUTPUT -m comment --comment \"KUBE-ROUTER rule to explicitly ACCEPT traffic that comply to network policies\" -m mark --mark 0x20000/0x20000 -j ACCEPT\n",
+    "test_units": "UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\nTo show all installed unit files use 'systemctl list-unit-files'.\n"
+  },
+  {
+    "node": "outpost-node3",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n",
+    "firewall": "-P OUTPUT ACCEPT\n-A OUTPUT -m comment --comment \"kube-router netpol - VEAAIY32XVBHCSCY\" -j KUBE-ROUTER-OUTPUT\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes load balancer firewall\" -j KUBE-PROXY-FIREWALL\n-A OUTPUT -m conntrack --ctstate NEW -m comment --comment \"kubernetes service portals\" -j KUBE-SERVICES\n-A OUTPUT -j KUBE-FIREWALL\n-A OUTPUT -m comment --comment \"KUBE-ROUTER rule to explicitly ACCEPT traffic that comply to network policies\" -m mark --mark 0x20000/0x20000 -j ACCEPT\n",
+    "test_units": "UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\nTo show all installed unit files use 'systemctl list-unit-files'.\n"
+  }
+]
