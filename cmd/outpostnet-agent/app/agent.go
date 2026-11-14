@@ -52,7 +52,7 @@ func NewAgentCommand() *cobra.Command {
 	cmd.Flags().StringVar(&observationAddr, "observation-addr", DefaultObservationAddr,
 		"Loopback address of the OutpostRange observation API (component OUTPOSTNET, requires node_id); empty disables it. "+
 			"Observation failures are logged and never stop the agent")
-	cmd.AddCommand(newVersionCommand())
+	cmd.AddCommand(newVersionCommand(), newCertificateCommand())
 
 	return cmd
 }
