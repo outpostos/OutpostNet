@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 )
 
 // Tombstone GC and horizon resync. The design and its trade-offs are described
@@ -127,8 +128,8 @@ type gcStore interface {
 type snapshotPageResult struct {
 	// Applied entries changed local state.
 	Applied int
-	// Refused entries are values for keys this store collected (absent, at or
-	// below the local horizon).
+	// Refused entries exceed the clock safety valve or are values for keys
+	// this store collected (absent, at or below the local horizon).
 	Refused int
 }
 
@@ -137,7 +138,7 @@ type snapshotPageResult struct {
 // implements it; GossipEngine uses it to vouch for lower-horizon requesters
 // across restarts.
 type peerAckStore interface {
-	savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error
+	savePeerAck(ctx context.Context, peer, nodeID string, position uint64, refused []refusedPosition) error
 	peersAnsweringAs(nodeID string) []string
 }
 
@@ -192,7 +193,11 @@ func (s *storeCore) collectTombstones(ctx context.Context, safePosition uint64, 
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
 
-	cutoff := s.hlc.physical.NowMS() - s.retention.Milliseconds()
+	now := s.TimeReferenceMS()
+	cutoff := int64(math.MinInt64)
+	if now >= math.MinInt64+s.retention.Milliseconds() {
+		cutoff = now - s.retention.Milliseconds()
+	}
 	s.mu.RLock()
 	set := purgeSet{Horizon: s.horizon, Floor: s.floor}
 	var blocked int
@@ -200,7 +205,7 @@ func (s *storeCore) collectTombstones(ctx context.Context, safePosition uint64, 
 		if !entry.Deleted || entry.Version.HLC.WallMS > cutoff {
 			continue
 		}
-		if gated && entry.Position > safePosition {
+		if checkFutureTimestamp(entry.Version.HLC, now) != nil || (gated && entry.Position > safePosition) {
 			blocked++
 			continue
 		}
@@ -266,6 +271,9 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	}
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
+	if err := checkFutureTimestamp(peerHorizon, s.TimeReferenceMS()); err != nil {
+		return result, err
+	}
 	s.mu.RLock()
 	set := purgeSet{Horizon: maxTimestamp(s.horizon, peerHorizon), Floor: s.floor}
 	horizonChanged := set.Horizon != s.horizon
@@ -321,8 +329,9 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 // accepted entry of the page together: DurableStore writes them as one record
 // with one fsync instead of one per entry, and the page becomes visible only
 // after that record is durable. A page is all or nothing: an entry that fails
-// validation or the HLC offset check aborts the page before anything is
-// written, and a crash mid-write leaves an unterminated record that recovery
+// validation aborts the page before anything is written. Clock-ahead entries
+// are refused individually; all remaining accepted entries commit atomically.
+// A crash mid-write leaves an unterminated record that recovery
 // discards.
 func (s *storeCore) applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error) {
 	var result snapshotPageResult
@@ -332,20 +341,29 @@ func (s *storeCore) applySnapshotPage(ctx context.Context, page []Entry) (snapsh
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
 
+	eligible := make([]Entry, 0, len(page))
 	for _, incoming := range page {
 		if err := s.policy.ValidateApply(incoming); err != nil {
 			return result, fmt.Errorf("validate snapshot entry %q: %w", incoming.Key, err)
 		}
 		if _, err := s.hlc.Update(incoming.Version.HLC); err != nil {
+			var offset *ClockOffsetError
+			if errors.As(err, &offset) {
+				result.Refused++
+				s.observeClockEntry(incoming, true)
+				continue
+			}
 			return result, fmt.Errorf("reject remote HLC for key %q from %q: %w", incoming.Key, incoming.Version.WriterNodeID, err)
 		}
+		s.observeClockEntry(incoming, false)
+		eligible = append(eligible, incoming)
 	}
 	// commitMu excludes every other mutation, so the decisions taken under the
 	// read lock still hold when the batch is installed.
 	accepted := make([]Entry, 0, len(page))
 	pending := make(map[string]int, len(page))
 	s.mu.RLock()
-	for _, incoming := range page {
+	for _, incoming := range eligible {
 		existing, found := s.entries[incoming.Key]
 		if index, ok := pending[incoming.Key]; ok {
 			existing, found = accepted[index], true

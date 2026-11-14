@@ -36,19 +36,20 @@ A tombstone `t` is collected only when all of the following hold:
 1. **Retention**: `t.Version.HLC.WallMS <= physicalNow - TombstoneRetention`.
    `TombstoneRetention == 0` (the default) disables GC entirely.
 2. **Peer acknowledgement** (replicated stores only, via
-   `GossipEngine.CollectTombstones`): `t.Position <= min(push progress of every
-   peer currently returned by the PeerProvider)`. This is the acknowledged
-   position only; the push-round fields of `ReplicationStatus`
-   (`OutboundRoundCaughtUp`, `OutboundRoundTime`, ticket 10-D1) never gate
-   collection. Push progress only advances
-   after the peer answered the push (durably for `DurableStore`). This gate is
-   an efficiency guard, not a proof that the peer holds `t`: every entry that is
-   not rejected as *transient* advances the cursor, including non-transient
-   rejections (for example a `ValidateApply` failure or `beyond_gc_horizon`).
-   Safety does not depend on it; it comes from retention plus the GC horizon
-   below.
-3. **Local-only stores** (no engine): `Store.CollectTombstones` uses the
-   retention condition alone.
+   `GossipEngine.CollectTombstones`): `t.Position` must lie in every configured
+   peer's **non-refused prefix**. ADR-0006 D4 uses the minimum of push progress
+   and the lowest refused position as the boundary. Since positions here use
+   inclusive `<=` comparisons, the refused boundary itself is excluded:
+   `GCConfirmedPosition = min(push progress, lowest refused position - 1)`.
+   With no refusal, this is the push progress. The gate is safety-critical when
+   cursors skip clock refusals; push-round status fields never gate collection.
+   Non-refused means accepted, already superseded, or covered by the receiver's
+   horizon (`beyond_gc_horizon` still triggers resync). Other explicit refusals
+   remain in the set until acceptance is confirmed.
+3. **Collection cap**: a tombstone more than `MaxClockOffsetMS` ahead of the
+   store's time reference cannot be collected, independently of acknowledgement.
+4. **Local-only stores** (no engine): `Store.CollectTombstones` uses retention
+   and the collection cap.
 
 The `PeerProvider` of a replicated store must return the **configured
 membership** of the keyspace, not the set of peers that are currently alive or
@@ -103,11 +104,17 @@ exact identities removed) is committed before the entries leave memory.
   committed together (ticket 03d, 03b F4): `DurableStore` writes them as one
   `batch` record with one fsync, so a resync costs one fsync per page plus one
   for the purge instead of one per entry (522 entries: 523 fsyncs before, 4
-  after). A page is all or nothing: an entry that fails validation or the HLC
-  offset check aborts the page before anything is written, the page becomes
-  visible only after its record is durable, a failed write is rolled back, and
+  after). Validation failures abort before anything is written; clock-offset
+  refusals skip only that entry. The remaining accepted entries become visible
+  atomically after their record is durable, a failed write is rolled back, and
   a crash in the middle of the record leaves an unterminated line that recovery
   discards, so a cold start sees whole pages only.
+  Every peer horizon (request, response, 410 and every snapshot page) is checked
+  against the same time reference used by HLC admission. A horizon beyond the
+  five-minute valve is refused and the peer is marked `clock_suspect`; no purge
+  or HLC advance uses it. The final purge repeats the guard. All snapshot keys
+  enter `held` **before** application, including refused entries, so a refused
+  future version cannot cause deletion of a valid older local version.
   Then it atomically (one `purge` record) removes every local entry whose HLC is
   `<= peer horizon` and whose key the peer does not have, and adopts the peer
   horizon, raising its HLC to at least that horizon (the same as replaying the
@@ -155,10 +162,11 @@ answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
 `SourceNodeID`) with 410 for a lower horizon only when `H_Q < H_R` and `Q` is not
 *vouched*. `Q` is vouched when both hold:
 
-* **Acknowledged every own removal**: `R`'s push progress towards the address
-  that answered as node `Q` is `>= F_R`. Every tombstone `R` collected has a
-  local position `<= F_R`, so a push `Q` answered carried it (or `Q` already had
-  a newer entry, or its own horizon covered it). `R` learns which node answers
+* **Acknowledged every own removal**: `R`'s **non-refused prefix** towards the
+  address that answered as node `Q` is `>= F_R`. Every tombstone `R` collected
+  has a local position `<= F_R`, so `Q` non-refusedly answered it (accepted it,
+  already held a newer entry, or its own horizon covered it). Raw push progress
+  alone cannot establish this after cursor skipping. `R` learns which node answers
   at an address from the optional `node_id` of the push response and keeps it
   next to the push progress (`DurableStore` persists it in the `peer_progress`
   record). A requester `R` never pushed to, or whose responses carry no
@@ -299,8 +307,8 @@ with a 03b node keep the resync churn.
 | Ack gate only | Only against peers in the current PeerProvider list; unknown, removed or restored-from-backup nodes can still resurrect | No: one dead peer blocks GC forever | none |
 | Retention + horizon + forced resync | At every node whose horizon covers the deleted value: refused from every peer, listed or not, on push, pull and resync. A node still holding the value is forced to resync once it pushes it or offers it in a digest to such a node | Yes | a peer lagging longer than retention loses its own unreplicated writes older than the horizon, explicitly |
 
-Chosen: **both, with retention + horizon as the safety mechanism and the ack
-gate as an efficiency guard.** The horizon is what makes resurrection impossible
+Chosen: **retention + guarded horizon + the non-refused acknowledgement gate.**
+The gate is safety-critical for clock refusals (ADR-0006 D4). The horizon is what makes resurrection impossible
 at a collecting node; the ack gate avoids pushing healthy-but-slow listed peers
 into full resyncs. A peer that is permanently gone blocks GC until it is removed
 from the PeerProvider (an explicit membership decision); when it returns, the
@@ -330,6 +338,93 @@ Residual risks (documented, not hidden):
   page, and that value's HLC is above the horizon read with the first page). It
   is removed at the next refused exchange with that peer (the next `410` or
   `beyond_gc_horizon`), not immediately.
+
+## ADR-0006 D3/D4: clock refusal compatibility (V2-NET-1a)
+
+Push, digest pages and resync snapshot pages refuse entries more than five
+minutes ahead individually. The other entries still apply, digest rounds finish,
+and the forwarding peer gets no backoff for these entry refusals. Push advances
+past a `clock_offset` refusal, including one carrying the former transient flag.
+Each fresh complete anti-entropy round reoffers missing/newer keys until accepted
+or superseded. Ordinary transfer, validation and persistence failures still fail
+an exchange. Snapshot batching remains atomic for the entries eligible to apply.
+
+Each peer has a **set** of refused local positions, with key and write identity.
+`peer_progress` persists the set atomically with its cursor and answering node ID;
+compaction preserves it. An accepted push of that key at the same or a later local
+position clears the older refusals. A later peer digest confirms the exact refused
+write, or confirms that it holds the current replacement (using `MergePolicy`).
+An absent key never clears a refusal. Without enough evidence the gate stays
+conservative. Old log records lacking the field preserve any recorded set;
+an explicit empty array clears it. Existing directories remain readable. A downgrade must not reuse a cursor with
+unresolved refusals: older binaries ignore the set and can collect past it.
+Resolve the refusals before downgrading, or rebuild the stopped replica from
+healthy peers; merely compacting does not remove this restriction.
+Custom `PeerProgressStore` wrappers that do not forward the built-in refusal
+persistence checkpoint only the safe prefix; the engine's in-memory cursor skips,
+and a restart replays from that prefix rather than forgetting unresolved refusals.
+
+The compatibility argument is the ADR's reasoning, backed by the tests below:
+
+1. Retention remains unchanged in this ticket, using the injected physical clock.
+   V2-NET-1b supplies peer-derived references and the separate retention clock
+   `min(local physical, reference)`. The independent collection cap is active now.
+2. Collection and vouching use the same non-refused prefix, restoring the premise
+   that every covered tombstone was non-refusedly acknowledged. A refused position
+   itself is never covered. A future tombstone refused by a healthy member blocks
+   its holder's GC even when the holder keeps its clock one year ahead.
+3. The lower-horizon 410, complete-interval digest check, and per-entry
+   `beyond_gc_horizon` resync mechanisms remain active. Digests still describe all
+   **local** keys: incoming refusals never truncate them or invalidate their round.
+4. Snapshot `held` includes refused keys, preserving older local values. A guarded
+   peer horizon cannot delete or advance the HLC based on a future horizon, even
+   from a legacy directory that already recorded one. Earlier valid snapshot pages
+   may remain ordinary merges if a later horizon is refused; no final purge runs.
+5. A partitioned refusing member remains in configured membership. Its tombstone
+   stays at the holder, and the member's stale live value cannot displace it. If
+   the future timestamp never becomes admissible, the healthy member retaining its
+   valid value is intentional. Explicit membership removal retains the existing
+   horizon/resync semantics and their documented limits.
+6. Local clock reset/cleanup (ADR D5) belongs to V2-NET-1c. This ticket neither
+   rewrites old entries nor repairs an already future local durable horizon.
+
+`ReplicationStatus.Clocks` / `GossipEngine.ClockStatus()` expose per-writer
+`RefusedEntries`, within-valve `AheadEntries`, and peer `RefusedHorizons`, with
+sticky `ClockSuspect` flags; warnings also name `clock_suspect`. Counters describe
+this store/engine process and reset on recreation. Hosts own observation-event
+mapping; this library still has no Range dependency or new wire fields. Peer
+status exposes `RefusedPositions`, `LowestRefusedPosition`, and
+`GCConfirmedPosition`; `AcknowledgedPosition` remains the push cursor. Outstanding
+refusals suppress outbound caught-up claims, including round caught-up claims.
+`TimeReferenceMS()` on built-in stores reads the same injected physical clock as
+HLC admission. Custom stores may expose that method too; otherwise guards use
+system time. No time-quality inference or handshake samples are added here.
+
+### V2-NET-1a acceptance evidence
+
+All commands run from the repository root. Tests use real stores, authenticated
+HTTP peers, injected physical clocks and durable log failures on one machine;
+this is not a VM deployment or power-loss claim.
+
+| ADR-0006 criterion | Automated evidence |
+| --- | --- |
+| 1: three apply paths, healthy entries continue, no voided round/backoff, writer counters | `TestClockAheadDigestRoundKeepsHealthyEntries`, `TestClockAheadSnapshotKeepsHeldOlderValue`, `TestClockAheadPushSkipsAndGatesGC`, `TestRefusedTombstonePartitionBeyondRetention` |
+| 2: snapshot refuses K but preserves its older local value | `TestClockAheadSnapshotKeepsHeldOlderValue` (memory + durable, forced 410 over HTTP) |
+| 4: +1 year, no unsafe collection, healthy horizon/HLC/data protected | `TestClockAheadPushSkipsAndGatesGC`, `TestFutureHorizonCannotDeleteOrAdvanceHealthyReplica`, `TestPeerHorizonGuardOnAllRequests`, `TestPeerHorizonGuardOnAllResponses`, `TestClockAheadTombstoneCollectionCap` |
+| 5: refused delete and partition beyond retention | `TestRefusedTombstonePartitionBeyondRetention` (memory + durable) |
+| 6: complete 03b resurrection/refusal suite with future entry on each path | `TestClockAhead03bResurrectionSuite` (three apply paths, digest budgets default/512/680 bytes) |
+| Cursor skip ships with GC gate, durable set and vouching | `TestRefusalSetReleasesOnlyAcceptedKeys`, `TestRefusedPositionCannotVouchPastGCFloor`, `TestRefusalAndCursorCommitTogetherOnDiskFailure`, restart/compaction checks in `TestClockAheadPushSkipsAndGatesGC` |
+
+Reproduce focused checks:
+
+```sh
+go test -race -count=1 ./pkg/state -run 'TestClockAhead|TestFutureHorizon|TestPeerHorizon|TestRefus'
+```
+
+Red→green: before implementation the digest test failed the round and charged
+backoff; the snapshot test aborted its page; the push test left its cursor at
+zero; the future-horizon test deleted `healthy-only` and adopted a horizon one
+year ahead. Each test passed after its corresponding implementation slice.
 
 ## Compaction (`DurableStore`)
 

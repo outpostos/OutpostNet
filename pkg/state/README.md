@@ -31,7 +31,8 @@ Push paging and write limits (NET-7):
   and saving progress after each page. `MaxPushPagesPerRound` defaults to 16
   per peer; remaining pages wait for the next round so other peers get a turn.
   A transport or progress-save failure resumes from the last saved position.
-  A transient rejection stops at the confirmed prefix; a 410 or a
+  A transient rejection stops at the confirmed prefix; `clock_offset` refusals
+  are skipped and tracked separately for GC/vouching (ADR-0006 D3/D4). A 410 or a
   `beyond_gc_horizon` rejection still triggers snapshot resync.
 - A capped round only reports `OutboundRoundCaughtUp` when acknowledgements
   cover the position read at its start (or there is nothing left to replicate).
@@ -91,7 +92,9 @@ Digest anti-entropy paging (NET-8, ADR-0004 D2):
 - A failed transfer, invalid continuation, apply error or 410/resync abandons
   the round; the next attempt starts from the first interval with a fresh
   digest. Already applied pages are ordinary merges; `LastPullTime` advances
-  only after every interval finishes. Resync alone never counts as a pull.
+  only after every interval finishes. Clock-ahead entries are per-entry
+  refusals and do not fail the round or back off their forwarding peer.
+  Resync alone never counts as a pull.
 - A single digest record/envelope that cannot fit fails explicitly with
   `DigestEntryTooLargeError`; a diff entry that cannot fit fails with
   `PullEntryTooLargeError`. No oversized request is sent. A remote continuation
@@ -238,7 +241,7 @@ Replication status (`GossipEngine.ReplicationStatus`):
   `OutboundRoundTime` is the start of the latest caught-up round, kept after
   later failures: its age shows how fresh the claim is and, while the flag is
   false, since when the peer has been behind. Neither field gates tombstone GC
-  (that still uses the acknowledged position only), and `CaughtUp` remains
+  (that uses the non-refused acknowledgement prefix), and `CaughtUp` remains
   `OutboundCaughtUp && InboundCaughtUp`.
 - Reading the push-round fact: with no local writes a partitioned peer has
   nothing to be pushed, so `OutboundCaughtUp` and therefore
@@ -319,3 +322,28 @@ Boundaries:
   `/metadata/v1` (protocol v3) adapter lives in OutpostLet
   (`pkg/services/metadata/legacy_wire.go`, ticket 04) together with its removal
   condition; this package only speaks `/state/v1`.
+
+Clock refusal safety (V2-NET-1a, ADR-0006 D3/D4):
+
+- All three incoming paths (push, digest, resync snapshot) count and skip entries
+  beyond the five-minute HLC safety valve. Snapshot keys are held before apply;
+  accepted entries still commit as one atomic batch. Within-valve ahead entries
+  remain eligible and are marked. No forwarding peer backoff is charged for an
+  entry refusal. Missing/newer keys are reoffered by every anti-entropy round.
+- Push cursors pass clock refusals. Per-peer refused-position sets persist with
+  durable progress and survive compaction. GC and vouching use the prefix before
+  the earliest unresolved refusal; accepting that write or a replacement releases
+  it. `ReplicationStatus.Peers` reports the raw `AcknowledgedPosition`,
+  `RefusedPositions`, `LowestRefusedPosition` and safe `GCConfirmedPosition`.
+  Outstanding refusals suppress outbound caught-up/round caught-up claims.
+- Every incoming peer GC horizon is guarded against the same physical reference
+  as HLC admission, including requests, responses, 410s and all snapshot pages;
+  a future horizon is never used to purge or raise HLC. Collection also excludes
+  tombstones beyond that reference plus the safety valve.
+- `ReplicationStatus.Clocks`, store/engine `ClockStatus()` and warnings expose
+  `clock_suspect`: per-writer refusal/ahead counts and per-peer horizon refusal
+  counts. They are process-local observations, reset on recreation. Hosts map
+  these facts into their observation stream; this change adds no Range dependency.
+- Peer-derived time references/quality and the separate retention clock are
+  V2-NET-1b; local future-HLC cleanup is V2-NET-1c. Protocol 2.0 is unchanged in
+  this ticket. See [GC compatibility and acceptance evidence](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).
