@@ -66,6 +66,12 @@ type box struct {
 	changed         chan struct{}
 	retries         map[string]retry
 	usedBytes       int64
+	ready, receipts map[string]*entryQueue
+	mailboxes       map[string]*readyNode
+	expiries        *entryQueue
+	ackMu           sync.Mutex
+	acks            []ackRequest
+	ackRunning      bool
 }
 
 func openBox(cfg Config, kind string) (_ *box, err error) {
@@ -130,6 +136,7 @@ func openBox(cfg Config, kind string) (_ *box, err error) {
 	if cfg.wrapLog != nil {
 		b.file = cfg.wrapLog(b.file)
 	}
+	b.resetIndexes()
 	if err = b.recover(); err != nil {
 		return nil, err
 	}
@@ -208,16 +215,20 @@ func (b *box) apply(tx transaction) {
 	if tx.Snapshot {
 		b.entries = make(map[MessageID]entry)
 		b.usedBytes = 0
+		b.resetIndexes()
 	}
 	for _, e := range tx.Upserts {
 		if previous, ok := b.entries[e.Envelope.MessageID]; ok {
+			b.unindex(previous)
 			b.usedBytes -= entryCharge(previous)
 		}
 		b.entries[e.Envelope.MessageID] = e
 		b.usedBytes += entryCharge(e)
+		b.index(e)
 	}
 	for _, id := range tx.Deletes {
 		if previous, ok := b.entries[id]; ok {
+			b.unindex(previous)
 			b.usedBytes -= entryCharge(previous)
 		}
 		delete(b.entries, id)

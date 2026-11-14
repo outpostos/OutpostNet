@@ -136,19 +136,7 @@ func ordered(entries map[MessageID]entry, keep func(entry) bool) []entry {
 			all = append(all, e)
 		}
 	}
-	sort.Slice(all, func(i, j int) bool {
-		a, b := all[i].Envelope, all[j].Envelope
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
-		}
-		if a.MessageID.Seq != b.MessageID.Seq {
-			return a.MessageID.Seq < b.MessageID.Seq
-		}
-		if a.MessageID.SourceNodeID != b.MessageID.SourceNodeID {
-			return a.MessageID.SourceNodeID < b.MessageID.SourceNodeID
-		}
-		return a.MessageID.SourceIncarnation < b.MessageID.SourceIncarnation
-	})
+	sort.Slice(all, func(i, j int) bool { return before(all[i], all[j]) })
 	return all
 }
 
@@ -165,23 +153,14 @@ func (o *Outbox) Flush(ctx context.Context) error {
 		o.mu.Unlock()
 		return err
 	}
-	all := ordered(o.entries, func(e entry) bool { return e.Status == Pending })
-	o.mu.Unlock()
 	batches := make(map[string]Batch)
-	filled := make(map[string]bool)
-	for _, e := range all {
-		dest := e.Envelope.DestinationNodeID
-		if filled[dest] {
-			continue
-		}
-		b := batches[dest]
-		candidate := Batch{Envelopes: append(append([]Envelope(nil), b.Envelopes...), clone(e.Envelope))}
-		if encodedSize(candidate) <= o.cfg.MaxBatchBytes {
-			batches[dest] = candidate
-		} else {
-			filled[dest] = true
+	for dest, q := range o.ready {
+		batch := o.page(q, false)
+		if len(batch.Envelopes) > 0 {
+			batches[dest] = batch
 		}
 	}
+	o.mu.Unlock()
 	var errs []error
 	for _, dest := range destinations(batches) {
 		batch := batches[dest]

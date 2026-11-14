@@ -2,20 +2,28 @@ package delivery
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// This scaling test keeps real journal writes but omits fsync latency. Real
+// fsync, failed sync, rollback and SIGKILL guarantees have separate tests.
+type workBudgetFile struct{ logFile }
+
+func (f workBudgetFile) Sync() error { return nil }
+
 // Count clock reads at the public Receive boundary: scanning retained entries
 // spends the budget on the very first receive, independent of machine speed.
 func TestInboxDrainWorkBudget(t *testing.T) {
 	for _, n := range []int{5000, 50000} {
-		t.Run(time.Duration(n).String(), func(t *testing.T) {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			now := time.Now()
 			var reads atomic.Int64
-			in := mustIn(t, Config{Dir: t.TempDir(), NodeID: "b", QuotaBytes: 256 << 20, Clock: func() time.Time { reads.Add(1); return now }})
+			in := mustIn(t, Config{Dir: t.TempDir(), NodeID: "b", QuotaBytes: 256 << 20, wrapLog: func(f logFile) logFile { return workBudgetFile{f} }, Clock: func() time.Time { reads.Add(1); return now }})
 			// A compatible persisted snapshot models already retained dedup records.
 			up := make([]entry, 0, 2*n)
 			for i := 0; i < 2*n; i++ {
@@ -31,6 +39,8 @@ func TestInboxDrainWorkBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			reads.Store(0)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
 			started := time.Now()
 			for i := 0; i < n; i++ {
 				e, err := in.Receive(context.Background(), "m")
@@ -47,7 +57,13 @@ func TestInboxDrainWorkBudget(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t.Logf("%d envelopes: %.0f envelopes/s", n, float64(n)/time.Since(started).Seconds())
+			elapsed := time.Since(started)
+			runtime.ReadMemStats(&after)
+			allocated := after.TotalAlloc - before.TotalAlloc
+			if allocated > uint64(n)*65536 {
+				t.Fatalf("drain allocated %d bytes per envelope", allocated/uint64(n))
+			}
+			t.Logf("%d envelopes: %.0f envelopes/s, %d bytes/envelope", n, float64(n)/elapsed.Seconds(), allocated/uint64(n))
 		})
 	}
 }
@@ -141,4 +157,84 @@ func BenchmarkReceiveBacklog(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestReceiveSkipsExpiredBacklogWithinBudget(t *testing.T) {
+	now := time.Now()
+	clock := now
+	in := mustIn(t, Config{Dir: t.TempDir(), NodeID: "b", QuotaBytes: 256 << 20, Clock: func() time.Time { return clock }})
+	up := make([]entry, 50001)
+	for i := range up {
+		e := external(now, uint64(i+1))
+		if i < 50000 {
+			e.ExpiryTime = now.Add(time.Minute)
+		}
+		up[i] = entry{Envelope: e, Status: Pending}
+	}
+	if err := in.commit(transaction{Upserts: up}); err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(2 * time.Minute)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	e, err := in.Receive(context.Background(), "m")
+	runtime.ReadMemStats(&after)
+	if err != nil || e.MessageID.Seq != 50001 {
+		t.Fatalf("%v %v", e.MessageID, err)
+	}
+	if used := after.TotalAlloc - before.TotalAlloc; used > 65536 {
+		t.Fatalf("Receive walked expired backlog: %d allocated bytes", used)
+	}
+}
+
+func TestReadyOrderAcrossMailboxesNackAndRestart(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	cfg := Config{Dir: t.TempDir(), NodeID: "b"}
+	in := mustIn(t, cfg)
+	var envelopes []Envelope
+	// Reverse admission order and mixed priorities exercise both tree rotations
+	// and removal of internal nodes; mailbox queues must remain independent.
+	for i := 199; i >= 0; i-- {
+		e := external(now, uint64(i+1))
+		e.Priority = Priority(i % 4)
+		if i%2 == 0 {
+			e.Mailbox = "other"
+		}
+		envelopes = append(envelopes, e)
+	}
+	if _, err := in.Accept(ctx, envelopes); err != nil {
+		t.Fatal(err)
+	}
+	first, err := in.Receive(ctx, "other")
+	if err != nil || first.MessageID.Seq != 1 {
+		t.Fatalf("%v %v", first.MessageID, err)
+	}
+	if err = in.Nack(first.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	if err = in.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	in = mustIn(t, cfg)
+	for _, mailbox := range []string{"m", "other"} {
+		for priority := P0; priority <= P3; priority++ {
+			for seq := uint64(1); seq <= 200; seq++ {
+				if Priority((seq-1)%4) != priority || ((seq-1)%2 == 0) != (mailbox == "other") {
+					continue
+				}
+				e, err := in.Receive(ctx, mailbox)
+				if err != nil || e.MessageID.Seq != seq {
+					t.Fatalf("mailbox=%s priority=%d want=%d got=%v err=%v", mailbox, priority, seq, e.MessageID, err)
+				}
+				if err = in.Ack(ctx, e.MessageID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	noDelivery(t, in)
 }

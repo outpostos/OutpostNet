@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"log/slog"
@@ -20,7 +21,16 @@ func (b *box) Collect(ctx context.Context) error {
 	}
 	now := b.cfg.Clock()
 	tx := transaction{}
-	for id, e := range b.entries {
+	var due []entry
+	for b.expiries.Len() > 0 && !now.Before(b.collectAt(b.expiries.items[0])) {
+		due = append(due, heap.Pop(b.expiries).(entry))
+	}
+	// Restore before commit so a failed append leaves every index unchanged.
+	for _, e := range due {
+		heap.Push(b.expiries, e)
+	}
+	for _, e := range due {
+		id := e.Envelope.MessageID
 		if now.Before(e.Envelope.ExpiryTime) {
 			continue
 		}
