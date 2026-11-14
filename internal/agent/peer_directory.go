@@ -187,6 +187,10 @@ func (ms *ManagementServer) Start(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/peers", ms.handlePeers(ctx))
+	mux.HandleFunc("GET /v1/security", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ms.directory.tunnels.SecurityStatus())
+	})
 	ms.server = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 	"github.com/quic-go/quic-go"
 )
 
@@ -212,8 +213,8 @@ func (s *Server) Close() error {
 func (s *Server) handleConnection(ctx context.Context, conn *quic.Conn) {
 	s.logger.Info("accepted connection", "remote", conn.RemoteAddr())
 
-	// If token auth is configured, authenticate before processing service streams.
-	if s.cfg.Token != "" {
+	// Authenticate the connection before processing or routing any service stream.
+	if s.cfg.Token != "" || s.cfg.Identity != nil {
 		peerID, err := s.authenticateConn(ctx, conn)
 		if err != nil {
 			s.logger.Warn("authentication failed", "remote", conn.RemoteAddr(), "error", err)
@@ -337,6 +338,22 @@ func (s *Server) authenticateConn(ctx context.Context, conn *quic.Conn) (string,
 	if token != s.cfg.Token {
 		stream.Write([]byte{authFail}) //nolint:errcheck — best-effort, connection closes anyway
 		return "", fmt.Errorf("token mismatch")
+	}
+
+	// In certificate mode validate the compatibility claim before acknowledging
+	// or registering any channel. Authorization uses only the verified leaf.
+	if s.cfg.Identity != nil {
+		claimed, err := readPeerHello(stream)
+		peerID, certErr := tlsutil.NodeID(conn.ConnectionState().TLS.PeerCertificates[0])
+		if err != nil || certErr != nil || claimed != peerID {
+			s.cfg.Identity.RejectClaim()
+			stream.Write([]byte{authFail})
+			return "", fmt.Errorf("certificate/handshake node_id mismatch")
+		}
+		if _, err := stream.Write([]byte{authOK}); err != nil {
+			return "", err
+		}
+		return peerID, nil
 	}
 
 	if _, err := stream.Write([]byte{authOK}); err != nil {

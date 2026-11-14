@@ -102,6 +102,9 @@ make build              # all five components (agent, service, server, sidecar, 
 
 ## Quick Start
 
+The standalone examples below use legacy token authentication. For authenticated node
+identities, configure [group certificates and mutual TLS](docs/node-certificates.md) on both peers.
+
 ### Standalone Mode (Host-to-Host)
 
 **Step 1:** Export a service on Host A:
@@ -175,7 +178,7 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 |---------|-------------|
 | TCP & UDP | TCP across nodes over the QUIC tunnel; UDP only node-local via server + sidecar (cross-node UDP not implemented) |
 | QUIC Tunnel | Encrypted transport with TLS 1.3 and multiplexed streams |
-| Token Auth | Shared-secret authentication between agents, no PKI needed |
+| Node authentication | Offline group CA certificates, mutual TLS, certificate-bound node IDs and same-group service authorization ([setup](docs/node-certificates.md)); legacy token mode remains available |
 | Auto-Reconnect | Exponential backoff with config persistence for offline recovery |
 | K8s Controller | Annotation-driven service exposure with sidecar auto-injection |
 | Peer Directory | Named-node addressing with stable local listen addresses |
@@ -212,6 +215,7 @@ own repositories and report their own replication status.
 ## Documentation
 
 - [Quick Start Guide](docs/quickstart.md)
+- [Node certificates and mutual TLS](docs/node-certificates.md)
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
 - [Service Layer (outpostnet-service)](docs/service-layer.md)

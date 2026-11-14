@@ -145,6 +145,9 @@ type MetricsConfig struct {
 
 // TLSConfig configures TLS for tunnel connections.
 type TLSConfig struct {
+	// CAFile enables strict node mutual TLS using this local group CA bundle.
+	CAFile string `yaml:"ca_file"`
+
 	// CertFile is the path to the TLS certificate.
 	CertFile string `yaml:"cert_file"`
 
@@ -214,6 +217,13 @@ func applyDefaults(cfg *Config) {
 
 // ValidateConfig checks that the config is well-formed.
 func ValidateConfig(cfg *Config) error {
+	if (cfg.TLS.CertFile == "") != (cfg.TLS.KeyFile == "") {
+		return fmt.Errorf("tls.cert_file and tls.key_file must be configured together")
+	}
+	if cfg.TLS.CAFile != "" && (cfg.NodeID == "" || cfg.TLS.CertFile == "" || cfg.TLS.Insecure) {
+		return fmt.Errorf("tls.ca_file requires node_id, cert_file and key_file, and forbids tls.insecure")
+	}
+
 	for i, t := range cfg.Tunnels {
 		switch strings.ToLower(t.Role) {
 		case "server":

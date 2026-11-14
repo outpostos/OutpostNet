@@ -31,6 +31,7 @@ type TunnelManager struct {
 	logger  *slog.Logger
 	metrics *Metrics
 
+	identity        *tlsutil.Identity
 	mu              sync.Mutex
 	servers         []*tunnel.Server
 	clients         []*tunnel.ManagedClient
@@ -193,6 +194,19 @@ func (tm *TunnelManager) setupRelay() {
 }
 
 func (tm *TunnelManager) buildTLSConfig() (*tls.Config, error) {
+	if tm.cfg.TLS.CAFile != "" {
+		if tm.cfg.TLS.Insecure {
+			return nil, fmt.Errorf("tls.insecure cannot be combined with group certificates")
+		}
+		id, err := tlsutil.LoadIdentity(tm.cfg.TLS.CertFile, tm.cfg.TLS.KeyFile, tm.cfg.TLS.CAFile, tm.cfg.NodeID, tm.logger)
+		if err != nil {
+			return nil, err
+		}
+		tm.mu.Lock()
+		tm.identity = id
+		tm.mu.Unlock()
+		return id.TLSConfig(true), nil
+	}
 	var cert tls.Certificate
 	var err error
 
@@ -216,6 +230,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 		ListenAddr: tc.ListenAddr,
 		TLS:        tlsCfg,
 		Token:      tm.cfg.Auth.Token,
+		Identity:   tm.identity,
 	}, srvLogger)
 
 	// Register all exports as routes on this server (Service export table).
@@ -270,12 +285,21 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 }
 
 func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel.ManagedClient {
+	return tm.makeManagedClient(remoteAddr, remoteName, "")
+}
+func (tm *TunnelManager) newPeerManagedClient(remoteAddr, nodeID string) *tunnel.ManagedClient {
+	return tm.makeManagedClient(remoteAddr, nodeID, nodeID)
+}
+func (tm *TunnelManager) makeManagedClient(remoteAddr, remoteName, expectedID string) *tunnel.ManagedClient {
+	id := tm.identity
 	return tunnel.NewManagedClient(tunnel.ManagedClientConfig{
 		ClientConfig: tunnel.ClientConfig{
-			ServerAddr: remoteAddr,
-			TLS:        tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
-			Token:      tm.cfg.Auth.Token,
-			NodeID:     tm.cfg.NodeID,
+			ServerAddr:     remoteAddr,
+			TLS:            tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
+			Token:          tm.cfg.Auth.Token,
+			NodeID:         tm.cfg.NodeID,
+			Identity:       id,
+			ExpectedPeerID: expectedID,
 		},
 		InitialReconnectDelay: 1 * time.Second,
 		MaxReconnectDelay:     30 * time.Second,
@@ -463,7 +487,7 @@ func (tm *TunnelManager) AddOrUpdatePeerClient(ctx context.Context, nodeID, addr
 		return err
 	}
 
-	mc := tm.newManagedClient(addr, nodeID)
+	mc := tm.newPeerManagedClient(addr, nodeID)
 	tm.clients = append(tm.clients, mc)
 	tm.clientsByNode[nodeID] = mc
 	tm.mu.Unlock()
@@ -546,4 +570,21 @@ func (tm *TunnelManager) Clients() []*tunnel.ManagedClient {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.clients
+}
+
+// SecurityStatus returns process-lifetime certificate and claim counters.
+type SecurityStatus struct {
+	CertificateAuth bool `json:"certificate_auth"`
+	tlsutil.SecurityStats
+}
+
+func (tm *TunnelManager) SecurityStatus() SecurityStatus {
+	tm.mu.Lock()
+	id := tm.identity
+	tm.mu.Unlock()
+	stats := tlsutil.SecurityStats{}
+	if id != nil {
+		stats = id.Stats()
+	}
+	return SecurityStatus{id != nil, stats}
 }

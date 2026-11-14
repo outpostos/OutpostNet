@@ -126,9 +126,15 @@ The directory is kept in memory only: after an agent restart it is empty until t
 
 #### `tls`
 
+`ca_file` enables certificate authentication on both agents and service hosts.
+See [node certificates](node-certificates.md) for offline provisioning, upgrade steps,
+validation semantics and `GET /v1/security` counters.
+
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cert_file` | string | — | TLS certificate path |
+| `ca_file` | string | — | Local group CA PEM bundle; enables strict node mutual TLS; requires node_id, cert/key, and insecure=false |
+| `cert_file` | string | — | TLS certificate path (node URI SAN in certificate mode) |
 | `key_file` | string | — | TLS private key path |
 | `insecure` | bool | `false` | Skip certificate verification (development only) |
 
