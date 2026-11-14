@@ -29,7 +29,7 @@ func TestTimeReferenceDeliveryAdmissionExpiryAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 32_537_000_000, TimeQuality: state.TimeSynced}, 0)
+	ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 31_537_000_000, TimeQuality: state.TimeSynced}, 0)
 	in, err := delivery.NewInbox(delivery.Config{Dir: inDir, NodeID: "receiver", TimeReference: ref})
 	if err != nil {
 		t.Fatal(err)

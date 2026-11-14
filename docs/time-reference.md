@@ -138,7 +138,7 @@ acceptance (those are separate tickets).
 | ADR-0006 / issue criterion | Automated evidence |
 | --- | --- |
 | 3: one-year-behind node completes forced 410 resync; horizon bounded | `TestTimeReferenceBehindNodeCompletes410Resync` (memory and durable, real HTTP, new writes accepted by healthy peer, local-only self-suspicion) |
-| 7: system +1 year cannot collect a reference-young tombstone | `TestTimeReferenceDrivesHLCAndConservativeRetention` (both stores; no premature collection, collection after reference retention) |
+| 7: system +1 year cannot collect a reference-young tombstone | `TestTimeReferenceDrivesHLCAndConservativeRetention`, `TestTimeReferenceRetentionWaitsForSlowerSystemClock` (both stores; each direction delays collection) |
 | 9a: trusted A, ahead B; A does not self-suspect, B counted | `TestTimeReferenceSyncedReceiverBlamesAheadWriterOnly` (SYNCED and HOLDOVER) |
 | 9b: behind UNSYNCED A, SYNCED B; A self-suspects and converges | `TestTimeReferenceBehindNodeCompletes410Resync` |
 | 9c: two UNSYNCED nodes remain time unknown without blame | `TestTimeReferenceTwoUnsyncedPeersDoNotBlameEachOther` (also two addresses for the same peer) |

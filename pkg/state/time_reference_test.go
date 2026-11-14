@@ -28,14 +28,14 @@ func TestTimeReferenceSourceQualityAndPeerSelection(t *testing.T) {
 	if s := ref.TimeStatus(); s.Quality != state.TimeUnsynced || !s.TimeUnknown {
 		t.Fatalf("initial: %+v", s)
 	}
-	if !ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 32_537_000_000, TimeQuality: state.TimeSynced}, 0) {
+	if !ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 31_537_000_000, TimeQuality: state.TimeSynced}, 0) {
 		t.Fatal("sample refused")
 	}
-	if ref.NowMS() != 32_537_000_000 || !ref.TimeStatus().ClockSuspect {
+	if ref.NowMS() != 31_537_000_000 || !ref.TimeStatus().ClockSuspect {
 		t.Fatalf("reference not selected: %+v", ref.TimeStatus())
 	}
 	mono = mono.Add(time.Second)
-	if ref.NowMS() != 32_537_001_000 {
+	if ref.NowMS() != 31_537_001_000 {
 		t.Fatal("reference did not extrapolate monotonically")
 	}
 	if err := ref.UpdateSource(state.TimeSourceStatus{Synchronized: true, Uncertainty: time.Millisecond}); err != nil {
@@ -60,7 +60,7 @@ func TestTimeReferenceDrivesHLCAndConservativeRetention(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
 			ctx := context.Background()
-			system := int64(32_537_000_000)
+			system := int64(31_537_000_000)
 			mono := time.Unix(0, 0)
 			ref, err := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return system }), MonotonicNow: func() time.Time { return mono }})
 			if err != nil {
@@ -111,7 +111,7 @@ func TestTimeReferenceBehindNodeCompletes410Resync(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
 			ctx := context.Background()
-			now := int64(32_537_000_000)
+			now := int64(31_537_000_000)
 			healthyRef, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return now })})
 			if err := healthyRef.UpdateSource(state.TimeSourceStatus{Synchronized: true}); err != nil {
 				t.Fatal(err)
@@ -209,7 +209,7 @@ func referenceEngine(t *testing.T, id string, store state.Store, peers []string)
 
 func TestTimeReferenceTwoUnsyncedPeersDoNotBlameEachOther(t *testing.T) {
 	ctx := context.Background()
-	aheadRef, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 32_537_000_000 })})
+	aheadRef, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 31_537_000_000 })})
 	behindRef, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 1_000_000 })})
 	ahead := referenceStore(t, false, "ahead", aheadRef)
 	behind := referenceStore(t, false, "behind", behindRef)
@@ -332,7 +332,7 @@ func TestTimeReferenceSyncedReceiverBlamesAheadWriterOnly(t *testing.T) {
 
 func TestTimeReferenceSlowHTTPResponseCannotSupplyReference(t *testing.T) {
 	ctx := context.Background()
-	healthy, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 32_537_000_000 })})
+	healthy, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 31_537_000_000 })})
 	if err := healthy.UpdateSource(state.TimeSourceStatus{Synchronized: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestTimeReferenceRejectsOverflowAndAcceptsEpoch(t *testing.T) {
 
 func TestTimeReferenceWireMetadataAndProtocolUpgrade(t *testing.T) {
 	ctx := context.Background()
-	ref, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 32_537_000_000 })})
+	ref, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return 31_537_000_000 })})
 	s := referenceStore(t, false, "server", ref)
 	g := referenceEngine(t, "server", s, nil)
 	handler, err := state.NewHTTPHandler(state.HTTPHandlerConfig{NodeID: "server", Engine: g, AuthToken: "test-only"})
@@ -405,7 +405,7 @@ func TestTimeReferenceWireMetadataAndProtocolUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sample := range []state.TimeSample{pushed.TimeSample, pulled.TimeSample} {
-		if sample.SentPhysicalMS != 32_537_000_000 || sample.TimeQuality != state.TimeUnsynced {
+		if sample.SentPhysicalMS != 31_537_000_000 || sample.TimeQuality != state.TimeUnsynced {
 			t.Fatalf("response lacks physical sample: %+v", sample)
 		}
 	}
@@ -413,7 +413,7 @@ func TestTimeReferenceWireMetadataAndProtocolUpgrade(t *testing.T) {
 		t.Fatal("unbounded inbound request became a reference")
 	}
 	ref.ObservePeer("trusted", state.TimeSample{SentPhysicalMS: 1_000_000, TimeQuality: state.TimeSynced}, 0)
-	if sample := ref.Sample(); sample.SentPhysicalMS != 32_537_000_000 || sample.TimeQuality != state.TimeUnsynced {
+	if sample := ref.Sample(); sample.SentPhysicalMS != 31_537_000_000 || sample.TimeQuality != state.TimeUnsynced {
 		t.Fatalf("peer reference was advertised as physical time: %+v", sample)
 	}
 }
@@ -441,4 +441,29 @@ func TestTimeReferenceConcurrentHostUse(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestTimeReferenceRetentionWaitsForSlowerSystemClock(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			ctx := context.Background()
+			system := int64(1_000_000)
+			mono := time.Unix(0, 0)
+			ref, _ := state.NewTimeReference(state.TimeReferenceConfig{SystemClock: state.PhysicalClockFunc(func() int64 { return system }), MonotonicNow: func() time.Time { return mono }})
+			ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 31_537_000_000, TimeQuality: state.TimeSynced}, 0)
+			s := referenceStore(t, durable, "behind", ref)
+			if _, err := s.Delete(ctx, "retained"); err != nil {
+				t.Fatal(err)
+			}
+			mono = mono.Add(61 * time.Second)
+			ref.ObservePeer("healthy", state.TimeSample{SentPhysicalMS: 31_537_061_000, TimeQuality: state.TimeSynced}, 0)
+			if result, err := s.CollectTombstones(ctx); err != nil || result.Collected != 0 {
+				t.Fatalf("ignored slower system retention: %+v %v", result, err)
+			}
+			system = 31_537_061_000
+			if result, err := s.CollectTombstones(ctx); err != nil || result.Collected != 1 {
+				t.Fatalf("did not collect after both clocks passed retention: %+v %v", result, err)
+			}
+		})
+	}
 }
