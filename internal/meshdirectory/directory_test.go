@@ -36,7 +36,7 @@ func newSSEServer(t *testing.T, conns ...func(r *http.Request, send func(string)
 
 func (s *sseServer) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != streamPath || r.Header.Get("Accept") != "text/event-stream" ||
-		r.URL.Query().Get("filter.requiredComponents") != streamFilter {
+		r.URL.Query().Get("filter.entityIdPrefix") != streamFilter || r.URL.Query().Has("filter.requiredComponents") {
 		s.t.Errorf("unexpected request %s %s accept=%q", r.Method, r.URL, r.Header.Get("Accept"))
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -86,7 +86,7 @@ func entityJSON(id, svc, uid, health string, live bool, expiry time.Time, weight
 	if weight >= 0 {
 		w = fmt.Sprintf(`, "weight":%d`, weight)
 	}
-	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}%s}], "healthState":%q}}`,
+	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "originNodeId":"node-a", "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}%s}], "healthState":%q}}`,
 		id, live, expiry.UTC().Format(time.RFC3339Nano), svc, uid, w, health)
 }
 
@@ -341,7 +341,11 @@ func TestExpiryDropsInstanceAndNotifies(t *testing.T) {
 
 func writeCache(t *testing.T, path string, insts map[string]service.Instance) {
 	t.Helper()
-	d := &Directory{cfg: Config{CachePath: path, Now: time.Now, CacheInterval: time.Second}, entities: insts, synced: true, dirty: true}
+	records := map[string]registration{}
+	for id, in := range insts {
+		records[id] = registration{Instance: in, OriginNodeID: in.NodeID}
+	}
+	d := &Directory{cfg: Config{CachePath: path, Now: time.Now, CacheInterval: time.Second}, entities: records, synced: true, dirty: true}
 	d.logger = testLogger()
 	d.saveCacheIfDirty(true)
 	if _, err := os.Stat(path); err != nil {

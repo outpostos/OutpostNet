@@ -128,12 +128,12 @@ URI SAN 认证节点，握手声明必须匹配证书；同组允许服务流。
 
 ## 8. 逻辑服务目录（P1-NET-2，ADR-0003 D2）
 
-`internal/meshdirectory` 实现 `service.Directory`：订阅本节点 Mesh 网关 `GET /v1alpha1/entities:stream?filter.requiredComponents=ENTITY_COMPONENT_SERVICE_REGISTRATION`（SSE），用本地最小 JSON 结构体解码（**不**在 `go.mod` 引入 OutpostMesh，`gomod_test.go` 守护）。
+`internal/meshdirectory` 实现 `service.Directory`：订阅本节点 Mesh 网关 `GET /v1alpha1/entities:stream?filter.entityIdPrefix=urn:outpostos:`（SSE），用本地最小 JSON 结构体解码（**不**在 `go.mod` 引入 OutpostMesh，`gomod_test.go` 守护）。
 
 - 快照在 `SNAPSHOT_COMPLETE` 时原子替换；`DELTA` 按实体更新，`DELETED`/`EXPIRED`/`is_live=false` 移除（`EXPIRED` 事件中 `isLive` 仍为 true，按事件类型判断）。
 - 断线以 100ms 起、上限 5s 的指数退避重连并携带最后确认的 `resumeCursor`；游标不可用时 Mesh 回落为新快照，按首个快照处理。
-- 每个实例保留 `expiry_time`，本地每 250ms 剔除过期实例并通知订阅者，`Instances` 也不返回已过期实例。
-- 冷启动缓存 `<data-dir>/service-directory.json`：快照完成时与之后至多每 5s 写一次（临时文件 + fsync + rename）；启动时载入并标记 `Stale=true`，首个快照完成后清除；断线期间 `Stale=true`，缓存实例照常按 TTL 剔除；损坏的缓存告警后忽略。
+- V2-NET-2：同一 SSE 流按组件分派服务登记与节点租约。新式登记按本地单调钟上的租约序号前进、incarnation 匹配判定；过渡期旧式登记继续按 `expiry_time` 判定。详见 [租约目录说明与验证状态](v2-net2-directory-leases.md)。
+- 冷启动缓存 `<data-dir>/service-directory.json`：快照完成时与之后至多每 5s 写一次（临时文件 + fsync + rename）；启动时载入并标记 `Stale=true`，首个快照完成后清除；断线期间 `Stale=true`，缓存租约视为刚看到，最多再信任一个 `LeaseTTL`，旧式实例按 TTL 剔除；损坏的缓存告警后忽略。V2 缓存保存已校验的写者与 incarnation，拒绝缺少写者信息的 V1 缓存并等待新快照。
 - Mesh 的权重在端点上，实例取其首个 TCP 端点的权重。
 - 契约样本：`internal/meshdirectory/testdata/*.sse` 为真实网关（OutpostMesh f0ab178）录制的 SSE 输出；`-tags integration` 的 `TestRealMeshGateway` 对真实二进制验证（`OUTPOSTMESH_GATEWAY_BIN`）。
 - 本票只提供目录；入口与导出接入见 P1-NET-3 / P1-NET-4。
@@ -153,8 +153,8 @@ URI SAN 认证节点，握手声明必须匹配证书；同组允许服务流。
 配置 `mesh.gateway_url` 后，`outpostnet-service` 按目录自动维护本节点的导出路由（`internal/servicehost/direxports.go`），远端逻辑入口无需本节点写静态 `exports`：
 
 - 对目录中每个服务，取 `node_id == 本节点` 的实例，按 `service.Select` 的过滤与排序取首个，导出 `<service_name> → 127.0.0.1:<port>`。订阅目录变更即时对账，另每 1s 兜底对账一次。
-- 实例变为 `DRAINING`/`NOT_READY`、`is_live=false` 或 TTL 到期时路由移除；端口变化时路由原地改址，已建立的流保持原后端（路由只在开流时查找）。
+- 实例变为 `DRAINING`/`NOT_READY`、`is_live=false`、节点租约失效或旧式 TTL 到期时路由移除；端口变化时路由原地改址，已建立的流保持原后端（路由只在开流时查找）。
 - 与静态 `exports` 同名时静态生效，并按服务名每分钟至多告警一次；静态导出移除后目录导出接管，目录登记也消失后路由删除，不残留。
-- 目录 stale（Mesh 不可达）时继续使用最后的目录内容，实例照常按 TTL 到期移除。
+- 目录 stale（Mesh 不可达）时继续使用最后的目录内容，实例继续按节点租约或旧式 TTL 失效。
 - 路由表 = 静态导出 ∪ 目录导出（静态优先），`Host.ApplyExports` 与配置文件热更新只改静态部分；`Host.ExportRoutes` 返回当前生效的路由。
 
