@@ -33,6 +33,13 @@ type GossipConfig struct {
 }
 
 // GossipEngine exchanges state with peers through a Syncer.
+//
+// SyncOnce and AntiEntropyOnce may run concurrently with each other, the
+// handlers (HandlePush, HandlePull and HandlePullResponse), and ReplicationStatus.
+// Neither SyncOnce nor AntiEntropyOnce is reentrant: callers must serialize
+// calls to the same method. Run owns both round loops; do not call either
+// method or another Run while it is running. Injected stores, syncers, peer
+// providers and policy/clock callbacks must support concurrent use.
 type GossipEngine struct {
 	nodeID              string
 	store               Store
@@ -171,19 +178,32 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	}, nil
 }
 
-// Run starts periodic sync until ctx is canceled.
+// Run runs independent periodic push and pull loops until ctx is canceled.
+// A slow digest round does not block pushes. Maintenance follows pull rounds.
+// Run waits for both loops to finish before returning; Syncer calls must honor ctx.
 func (g *GossipEngine) Run(ctx context.Context) error {
 	pushTicker := time.NewTicker(g.interval)
 	defer pushTicker.Stop()
 	antiEntropyTicker := time.NewTicker(g.antiEntropyInterval)
 	defer antiEntropyTicker.Stop()
+	pushDone := make(chan struct{})
+	go func() {
+		defer close(pushDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-pushTicker.C:
+				_ = g.SyncOnce(ctx)
+			}
+		}
+	}()
+	defer func() { <-pushDone }()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-pushTicker.C:
-			_ = g.SyncOnce(ctx)
 		case <-antiEntropyTicker.C:
 			_ = g.AntiEntropyOnce(ctx)
 			g.maintain(ctx)
@@ -192,6 +212,8 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 }
 
 // SyncOnce performs one incremental push round.
+// It may overlap AntiEntropyOnce and handlers, but must not overlap another
+// SyncOnce call (including Run's push loop).
 func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 	var errs []error
 	now := time.Now()
@@ -312,6 +334,8 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 }
 
 // AntiEntropyOnce performs one digest pull round.
+// It may overlap SyncOnce and handlers, but must not overlap another
+// AntiEntropyOnce call (including Run's pull loop).
 func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 	var errs []error
 	now := time.Now()

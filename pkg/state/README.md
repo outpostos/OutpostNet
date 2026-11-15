@@ -18,6 +18,25 @@ Public consumer surface:
 - `GossipEngine.ReplicationStatus` for a read-only, concurrency-safe view of
   local readiness and per-peer exchange results (see below).
 
+Concurrency (NET-12):
+
+- On one `GossipEngine`, `SyncOnce` and `AntiEntropyOnce` may run concurrently
+  with each other, inbound handlers and `ReplicationStatus`. Each round method
+  is non-reentrant: serialize calls to the same method. Custom stores, syncers,
+  peer providers and policy/clock callbacks must support concurrent use.
+- `Run` owns one push loop and one pull loop. Do not overlap it with manual
+  rounds or another `Run`. Slow push and digest exchanges do not block the
+  other loop. Maintenance follows pull rounds; cancellation joins both loops,
+  so transports must honor their context.
+- Push owns the outbound cursor; digest rounds always start fresh. Backoff is
+  shared: a completed success clears it, while a later failure sets it again.
+  Error history survives successes. A pull that started before a concurrent
+  failure cannot claim inbound catch-up, even when it finishes afterwards.
+  Refusal sets and push progress remain one atomic GC/vouching checkpoint.
+- See [concurrency acceptance evidence](../../docs/state-concurrency-net12.md)
+  for HTTP race tests, forced 410 resync, clock/refusal recovery and limitations.
+  State protocol **3.0** and durable record format **1** are unchanged.
+
 Identity model:
 
 - `ChangeID` identifies the original write and is preserved when forwarded.
