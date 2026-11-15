@@ -24,6 +24,10 @@ type GossipConfig struct {
 	AntiEntropyInterval time.Duration
 	BackoffBase         time.Duration
 	BackoffMax          time.Duration
+	// Clock supplies emitted replication status timestamps (default time.Now).
+	// It must support concurrent calls; hosts can use TimeReference.Now.
+	// Scheduling, backoff, RTT and event ordering always use local monotonic time.
+	Clock func() time.Time
 	// MaxPushBytes bounds the encoded push request (default 768 KiB).
 	MaxPushBytes int64
 	// MaxDigestBytes bounds each encoded digest request (default 768 KiB).
@@ -50,6 +54,7 @@ type GossipEngine struct {
 	antiEntropyInterval time.Duration
 	backoffBase         time.Duration
 	backoffMax          time.Duration
+	clock               func() time.Time
 
 	maxDigestBytes       int64
 	maxPushBytes         int64
@@ -67,22 +72,34 @@ type peerState struct {
 	lastPushPosition     uint64
 	oversizedPushEntries uint64
 	// nodeID is the node that answered the latest acknowledged push here.
-	nodeID      string
-	failures    int
-	nextAttempt time.Time
+	nodeID          string
+	failures        int
+	nextAttempt     time.Time
+	nextAttemptTime time.Time // emitted deadline, in the status clock's time base
 
-	// Exchange results reported by ReplicationStatus. Times are the local
-	// clock; zero means "not in this process".
-	lastSuccess   time.Time // latest acknowledged push or fully applied pull
-	lastPull      time.Time // start of the latest fully applied pull
-	lastError     string    // redacted text of the latest failed exchange
-	lastErrorTime time.Time
+	// Exchange results reported by ReplicationStatus. Event ordering uses
+	// monotonic time independently of emitted wall times; zero means no event.
+	lastSuccess   time.Time  // latest acknowledged push or fully applied pull
+	lastPull      gossipTime // start of the latest fully applied pull
+	lastError     string     // redacted text of the latest failed exchange
+	lastErrorTime gossipTime
 	lastErrorOp   string
 	// Push rounds: the start of the latest round not skipped by backoff,
 	// whether it ended caught up, and the start of the latest round that did.
-	lastRound         time.Time
+	lastRound         gossipTime
 	lastRoundCaughtUp bool
-	lastCaughtUpRound time.Time
+	lastCaughtUpRound gossipTime
+}
+
+// gossipTime keeps the event's local ordering separate from its reported time.
+// A reference may step backwards or stay frozen without changing catch-up facts.
+type gossipTime struct {
+	monotonic time.Time
+	wall      time.Time
+}
+
+func (g *GossipEngine) timestamp() gossipTime {
+	return gossipTime{monotonic: time.Now(), wall: g.clock()}
 }
 
 // NewGossipEngine creates a replication engine. If Policy is provided it must
@@ -99,6 +116,9 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 	}
 	if cfg.PeerProvider == nil {
 		cfg.PeerProvider = NewStaticPeerProvider(nil)
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
 	}
 	storePolicy := cfg.Store.Policy()
 	if cfg.Policy != nil && !policiesCompatible(storePolicy, cfg.Policy) {
@@ -171,6 +191,7 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 		antiEntropyInterval:  antiEntropyInterval,
 		backoffBase:          backoffBase,
 		backoffMax:           backoffMax,
+		clock:                cfg.Clock,
 		peerStates:           make(map[string]*peerState),
 		maxPushBytes:         maxPushBytes,
 		maxDigestBytes:       maxDigestBytes,
@@ -224,7 +245,7 @@ func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 		}
 		// The round can only claim the local position read before it collects
 		// its changes; anything written later belongs to the next round.
-		started := time.Now()
+		started := g.timestamp()
 		startPosition := g.store.CurrentPosition()
 		caughtUp, err := g.pushTo(ctx, addr, startPosition, now)
 		if err == nil {
@@ -349,7 +370,7 @@ func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		started := time.Now()
+		started := g.timestamp()
 		err = g.pullDigestRound(ctx, addr, digest)
 		if err != nil {
 			var resync *ResyncRequiredError
@@ -584,7 +605,8 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	state := g.peerStateLocked(addr)
 	state.failures = 0
 	state.nextAttempt = time.Time{}
-	state.lastSuccess = time.Now()
+	state.nextAttemptTime = time.Time{}
+	state.lastSuccess = g.clock()
 	return nil
 }
 
@@ -597,21 +619,23 @@ func (g *GossipEngine) recordPeerSuccess(addr string) {
 	state := g.peerStateLocked(addr)
 	state.failures = 0
 	state.nextAttempt = time.Time{}
-	state.lastSuccess = time.Now()
+	state.nextAttemptTime = time.Time{}
+	state.lastSuccess = g.clock()
 }
 
-func (g *GossipEngine) recordPullSuccess(addr string, started time.Time) {
+func (g *GossipEngine) recordPullSuccess(addr string, started gossipTime) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
 	state.failures = 0
 	state.nextAttempt = time.Time{}
-	state.lastSuccess = time.Now()
+	state.nextAttemptTime = time.Time{}
+	state.lastSuccess = g.clock()
 	state.lastPull = started
 }
 
 // recordPushRound records the outcome of a push round that started at started.
-func (g *GossipEngine) recordPushRound(addr string, started time.Time, caughtUp bool) {
+func (g *GossipEngine) recordPushRound(addr string, started gossipTime, caughtUp bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
@@ -634,7 +658,10 @@ func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now 
 	backoff := saturatedBackoff(g.backoffBase, g.backoffMax, state.failures)
 	state.nextAttempt = now.Add(backoff)
 	state.lastError = message
-	state.lastErrorTime = time.Now()
+	state.lastErrorTime = g.timestamp()
+	// Preserve the round-start-anchored monotonic deadline. Only its emitted
+	// representation is translated into the status clock's time base.
+	state.nextAttemptTime = state.lastErrorTime.wall.Add(state.nextAttempt.Sub(state.lastErrorTime.monotonic))
 	state.lastErrorOp = operation
 	slog.Warn("state gossip: peer sync failed", "peer", redactedPeerURL(addr), "operation", operation, "err", message, "retryAt", state.nextAttempt)
 	return err

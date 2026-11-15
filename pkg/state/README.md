@@ -238,6 +238,12 @@ Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
 
 Replication status (`GossipEngine.ReplicationStatus`):
 
+- `GossipConfig.Clock` supplies emitted timestamps (default `time.Now`); hosts
+  using a shared reference set `Clock: reference.Now`. The callback must be safe
+  for concurrent use. Round starts, success/error times and the displayed retry
+  deadline follow that reference; scheduling, backoff, RTT and catch-up event
+  ordering retain local monotonic time. See [time reference](../../docs/time-reference.md#replication-status-timestamps-net-14)
+  for clock-step and retry-deadline semantics.
 - One `PeerReplicationStatus` per peer the `PeerProvider` currently returns:
   `AcknowledgedPosition` (persisted `PeerProgressStore` value when available),
   `OutboundCaughtUp` (`AcknowledgedPosition >= Local.CurrentPosition`, with the
