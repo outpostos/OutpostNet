@@ -3,16 +3,15 @@ package delivery
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/state"
+	"github.com/outpostos/OutpostNet/pkg/state/httpauth"
+	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 )
 
 const BatchPath = "/delivery/v1/batch"
@@ -36,6 +35,8 @@ type httpBatchResponse struct {
 // HTTPTransportConfig uses the same membership and address-to-node mapping as
 // state replication. Callbacks must be concurrency safe. No discovery is added.
 type HTTPTransportConfig struct {
+	AuthMode     httpauth.Mode
+	Identity     *tlsutil.Identity
 	NodeID       string
 	AuthToken    string
 	PeerProvider state.PeerProvider
@@ -46,6 +47,7 @@ type HTTPTransportConfig struct {
 	MaxResponseBytes int64
 }
 type HTTPTransport struct {
+	auth   *httpauth.Auth
 	cfg    HTTPTransportConfig
 	client *http.Client
 }
@@ -63,24 +65,23 @@ func httpLimits(request, response int64) (int64, int64, error) {
 	return request, response, nil
 }
 func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
-	if cfg.NodeID == "" || cfg.AuthToken == "" || cfg.PeerProvider == nil || cfg.PeerIdentity == nil {
-		return nil, errors.New("delivery HTTP requires node, token, peer provider and identity mapping")
+	if cfg.NodeID == "" || cfg.PeerProvider == nil || cfg.PeerIdentity == nil {
+		return nil, errors.New("delivery HTTP requires node, peer provider and identity mapping")
 	}
 	var err error
 	cfg.MaxRequestBytes, cfg.MaxResponseBytes, err = httpLimits(cfg.MaxRequestBytes, cfg.MaxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
-	client := http.Client{Timeout: 10 * time.Second}
-	if cfg.Client != nil {
-		client = *cfg.Client
-		if client.Timeout == 0 {
-			client.Timeout = 10 * time.Second
-		}
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
+	if err != nil {
+		return nil, err
 	}
-	// Never forward bearer credentials to a redirect target, including same-host redirects.
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &HTTPTransport{cfg: cfg, client: &client}, nil
+	client, err := auth.Client(cfg.Client)
+	if err != nil {
+		return nil, err
+	}
+	return &HTTPTransport{cfg: cfg, client: client, auth: auth}, nil
 }
 func (t *HTTPTransport) Send(ctx context.Context, dest string, batch Batch) (BatchResult, error) {
 	addr := ""
@@ -172,17 +173,18 @@ func (t *HTTPTransport) sendPage(ctx context.Context, dest, addr string, batch B
 	if int64(len(data)) > t.cfg.MaxRequestBytes {
 		return BatchResult{}, errors.New("delivery HTTP request exceeds byte limit")
 	}
-	url := addr
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
+	url, err := t.auth.PeerURL(addr, BatchPath)
+	if err != nil {
+		return BatchResult{}, err
 	}
-	url = strings.TrimRight(url, "/") + BatchPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return BatchResult{}, errors.New("delivery invalid peer address")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+t.cfg.AuthToken)
+	if err := t.auth.Prepare(req); err != nil {
+		return BatchResult{}, err
+	}
 	req.Header.Set("X-Outpost-Node-ID", t.cfg.NodeID)
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -207,6 +209,9 @@ func (t *HTTPTransport) sendPage(ctx context.Context, dest, addr string, batch B
 	if !result.ProtocolVersion.CompatibleWith(DeliveryProtocolVersion) {
 		return BatchResult{}, errors.New("delivery HTTP response protocol mismatch")
 	}
+	if err := t.auth.MatchResponse(resp, result.NodeID, dest); err != nil {
+		return BatchResult{}, err
+	}
 	if result.NodeID != dest {
 		return BatchResult{}, errors.New("delivery HTTP response node mismatch")
 	}
@@ -216,6 +221,8 @@ func (t *HTTPTransport) sendPage(ctx context.Context, dest, addr string, batch B
 // HTTPHandlerConfig mounts on the host's authenticated replication listener.
 // At least one box is required; both boxes must have NodeID as their identity.
 type HTTPHandlerConfig struct {
+	AuthMode         httpauth.Mode
+	Identity         *tlsutil.Identity
 	NodeID           string
 	AuthToken        string
 	Inbox            *Inbox
@@ -225,14 +232,18 @@ type HTTPHandlerConfig struct {
 }
 
 func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
-	if cfg.NodeID == "" || cfg.AuthToken == "" || (cfg.Inbox == nil && cfg.Outbox == nil) {
-		return nil, errors.New("delivery HTTP handler requires node, token and a box")
+	if cfg.NodeID == "" || (cfg.Inbox == nil && cfg.Outbox == nil) {
+		return nil, errors.New("delivery HTTP handler requires node and a box")
 	}
 	if (cfg.Inbox != nil && cfg.Inbox.cfg.NodeID != cfg.NodeID) || (cfg.Outbox != nil && cfg.Outbox.cfg.NodeID != cfg.NodeID) {
 		return nil, errors.New("delivery HTTP box node mismatch")
 	}
 	var err error
 	cfg.MaxRequestBytes, cfg.MaxResponseBytes, err = httpLimits(cfg.MaxRequestBytes, cfg.MaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
 	if err != nil {
 		return nil, err
 	}
@@ -249,9 +260,8 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 			fail(http.StatusMethodNotAllowed, "delivery requires POST")
 			return
 		}
-		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(auth), []byte(cfg.AuthToken)) != 1 {
-			fail(http.StatusUnauthorized, "delivery invalid bearer token")
+		if status := auth.Authorize(r); status != 0 {
+			fail(status, "delivery authentication rejected")
 			return
 		}
 		defer r.Body.Close()
@@ -274,18 +284,35 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 			fail(http.StatusUpgradeRequired, "delivery protocol mismatch")
 			return
 		}
+		if !auth.MatchSource(r, request.Source) {
+			fail(http.StatusForbidden, "delivery certificate source mismatch")
+			return
+		}
 		if request.Source == "" || request.Source != r.Header.Get("X-Outpost-Node-ID") || request.Source == cfg.NodeID {
+			auth.RejectClaim()
 			fail(http.StatusForbidden, "delivery source identity mismatch")
 			return
 		}
 		for _, e := range request.Envelopes {
+			if e.DestinationNodeID != cfg.NodeID {
+				auth.RejectClaim()
+				fail(http.StatusForbidden, "delivery destination identity mismatch")
+				return
+			}
 			if e.MessageID.SourceNodeID != request.Source {
+				auth.RejectClaim()
 				fail(http.StatusForbidden, "delivery envelope source mismatch")
 				return
 			}
 		}
 		for _, receipt := range request.Receipts {
+			if receipt.MessageID.SourceNodeID != cfg.NodeID {
+				auth.RejectClaim()
+				fail(http.StatusForbidden, "delivery receipt destination mismatch")
+				return
+			}
 			if receipt.ReceiverNodeID != request.Source {
+				auth.RejectClaim()
 				fail(http.StatusForbidden, "delivery receipt source mismatch")
 				return
 			}

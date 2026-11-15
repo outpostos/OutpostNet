@@ -53,8 +53,8 @@ An optional `auth.token`, if configured, must also match. Empty tokens work in
 certificate mode, including reverse streams. Without `tls.ca_file`, the existing
 legacy TLS/token behavior remains for standalone deployments; it does not provide
 node authentication. Upgrade both ends to certificate mode together. The HTTP
-replication/delivery `auth_mode` migration belongs to V2-NET-4 and is not implemented
-by this change.
+replication/delivery adapters have separate `AuthMode` configuration; see
+[HTTP node authentication (V2-NET-4)](http-node-auth.md) for setup and migration.
 
 ## Authentication and service authorization
 

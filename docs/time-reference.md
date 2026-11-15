@@ -91,11 +91,12 @@ traffic must also run its gossip loop. Custom `Syncer` / `SnapshotSyncer` adapte
 must preserve responder identity, samples and `ResyncRequiredError` metadata and
 must authenticate the exchange before returning them.
 
-This ticket retains the existing HTTP shared-token membership boundary; identity
-claims are not yet certificate-bound. V2-NET-4 adds replication/delivery mTLS and
-binds these identities to credentials. Per the architect's issue comment it may
-add its fields within protocol 3.0 if it lands before release. A peer falsely
-claiming good time can bias an `UNSYNCED` node; this is the ADR's accepted limit.
+In legacy HTTP `token` mode, responder identity remains self-declared.
+[V2-NET-4 certificate modes](http-node-auth.md) bind response and 410 identities
+to the authenticated server certificate before exposing time samples or horizons.
+State protocol remains 3.0 for the coordinated upgrade. A valid group peer falsely
+claiming good time can still bias an `UNSYNCED` node; this is the ADR's accepted
+limit.
 
 Stop all hosts embedding state in a keyspace, upgrade their pinned Net dependency,
 and restart the whole group. Mixed majors are rejected (requests: HTTP 426;

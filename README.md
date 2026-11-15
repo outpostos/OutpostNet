@@ -216,6 +216,7 @@ own repositories and report their own replication status.
 
 - [Quick Start Guide](docs/quickstart.md)
 - [Node certificates and mutual TLS](docs/node-certificates.md)
+- [Replication/delivery HTTP authentication modes](docs/http-node-auth.md)
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
 - [Service Layer (outpostnet-service)](docs/service-layer.md)
