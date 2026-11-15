@@ -114,6 +114,7 @@ TMPDIR=/tmp go test -race -count=1 ./pkg/state ./internal/agent ./internal/obser
   -run 'TestOSTimeSource|TestAgentOSTimeSourceStatus|TestTimeSourceObservation'
 go build ./...
 go vet ./...
+go mod tidy -diff
 TMPDIR=/tmp go test -p 1 -race -count=1 ./...
 GOOS=linux GOARCH=amd64 make build-agent
 GOOS=linux GOARCH=amd64 go build ./...
@@ -136,4 +137,8 @@ test-only fixture isolation change (`8ba19ef`) also passed the focused Linux rac
 suite, including the default subprocess runner and NET-14 regressions. Native Mac
 build/vet and the focused race suite passed. The initial complete Mac run hit a
 QUIC dial timeout in `TestRelayDirectAndRelay`; its isolated race rerun passed.
+That complete Mac run passed state (193.375s), delivery (248.122s) and tunnel
+(16.605s); no other package failed. The final module metadata promotes the
+already-pinned `golang.org/x/sys` to a direct dependency for the read-only syscall;
+no dependency version changes, and `go mod tidy -diff` is clean.
 The Linux gates ran on the development host, without changing any VM.
