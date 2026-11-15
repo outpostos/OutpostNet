@@ -9,7 +9,9 @@ Public consumer surface:
 - `Store` is the common seam implemented by `MemoryStore` and `DurableStore`.
 - `Put`, `Delete`, `Get`, `ListEntries`, and `Observe` for local state.
 - `CompareAndSet` for atomic conditional mutation by `EntryIdentity`.
-- `LocalStatus` reports local recovery readiness and current local position.
+- `LocalStatus` reports local recovery readiness, current local position and
+  committed resync purge counts/latest archive path (`Resync`). See
+  [resync loss archives and early warning](../../docs/resync-loss.md).
 - `CheckConsumerPosition` distinguishes resumable positions from positions that
   require a snapshot or resync. It is local-position scoped; it is not a global
   "all peers synced" claim.

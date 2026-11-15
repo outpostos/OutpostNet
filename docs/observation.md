@@ -135,6 +135,14 @@ belong to the event timeline, not Snapshot fields. No Range contract upgrade is
 needed. Public `TimeStatus.Source` and store/engine `TimeSource` provide the same
 source facts for embedding hosts; see [source mapping and tests](os-time-source.md).
 
+### Resync loss samples (NET-16)
+
+The shared `state.ReplicationMetrics(scope, status)` mapping and Net
+`Reporter.UpdateReplication` adapter use existing MetricSample events for purge
+counts, relative archive path, and pre-retention warnings. Embedded Mesh/Let
+replicas require producer wiring after upgrading Net; standalone Net processes
+have no replica to sample. See [resync loss operations](resync-loss.md).
+
 ## 5. 快照与“只发变化”
 
 - 观测状态由一个 `Reporter` 持有：每个键（Net：`peer_node_id` 或 `peer_address`；Service：`service_name`）一份
