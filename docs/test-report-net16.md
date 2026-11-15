@@ -14,6 +14,7 @@ No VMs were accessed; deployed D10 re-verification belongs to a later run.
 | Actual multi-process over-retention split/reunion | `TestResyncLossAcrossProcesses`: separate HTTP server process, real partition failure, default 80% warning before one-second retention, reunion after expiry; archive has exactly 2 local + 1 forwarded entries, byte-identical payloads/tombstone, no archive replay through subsequent anti-entropy. |
 | MetricSample event representation | `TestResyncLossMetricSamples`: existing event body, scope/writer/peer/local-origin labels, counters, relative latest path and warning; maps through `state.ReplicationMetrics` and Net reporter. |
 | GC compatibility argument and manual operator recovery | `docs/state-tombstone-gc.md` NET-16 section; `docs/resync-loss.md`. No purge predicate or wire change. |
+| Architect review: immediate write after the resync floor | `TestResyncPurgeImmediateWriteReachesReadersAndPeer` runs for memory and durable stores, checks the purge notice and immediate write, consumer positions below/at the floor, `ChangesSince(floor)`, byte-page push reads at the floor, actual authenticated HTTP push delivery and cursor acknowledgement. |
 | AC2: 03b resurrection suite and all existing GC tests unchanged | Included in full `go test -race -count=1 ./...`; existing GC test files are unchanged. |
 | AC3: local gates and CI | Commands below; GitHub check result recorded on the PR. |
 
@@ -25,6 +26,17 @@ state regression run caught a changing read-time duration in backoff status;
 recording elapsed time only on failure/warning transitions restored the existing
 status invariants without modifying those tests.
 
+Floor review red → green: a trial revert to `Next()` failed the existing
+`TestResyncArchiveFailureLeavesStoreUnchanged/purge-sync`: the rejected purge
+advanced `CurrentPosition` from 1 to 2. The implementation retains `Current()+1`
+as a reservation and consumes it in `applyPurgeLocked` after commit, under
+`commitMu`. A temporary removal of that `SetAtLeast(floor)` made the new
+immediate-write regression fail in **both** stores: the write received position
+2 at floor 2, and both incremental readers skipped it. Restoring the clock
+advance passes the regression and failure rollback checks. These temporary
+changes are not part of the implementation; the exact floor definition and
+locking argument are in `docs/state-tombstone-gc.md`.
+
 Reproduce from the repository root:
 
 ```sh
@@ -32,6 +44,7 @@ Reproduce from the repository root:
 export TMPDIR="${OUTPOST_TMPDIR:?set a short writable temporary directory}"
 export GOTOOLCHAIN=go1.25.0
 go test -race -count=1 ./pkg/state -run 'TestResyncArchive|TestResyncLoss|TestResyncWarning'
+go test -race -count=1 ./pkg/state -run '^TestResyncPurgeImmediateWriteReachesReadersAndPeer$'
 go test -race -count=1 ./internal/observation -run '^TestResyncLossMetricSamples$'
 go build ./...
 go vet ./...

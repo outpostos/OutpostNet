@@ -250,6 +250,7 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
 	s.floor = maxUint64(s.floor, set.Floor)
 	s.adopted = maxTimestamp(s.adopted, set.Adopted)
+	// Consume the committed floor before commitMu allows another local write.
 	s.clock.SetAtLeast(s.floor)
 	// Local writes must order after every removed or adopted entry; otherwise a
 	// store whose physical clock lags the horizon would issue writes at or below
@@ -317,6 +318,9 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 			return result, err
 		}
 		set.Resync = s.resyncSummary(archived, shownPeer, path)
+		// Reserve without consuming: a failed purgeHook must leave the position
+		// unchanged. On success applyPurgeLocked advances the clock to this floor
+		// before commitMu is released, so the next local write is strictly above it.
 		set.Floor = s.clock.Current() + 1
 	}
 	if s.purgeHook != nil {

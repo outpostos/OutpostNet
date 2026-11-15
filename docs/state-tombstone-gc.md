@@ -366,6 +366,22 @@ See [resync loss operations and evidence](resync-loss.md) for status, metric
 names, warning configuration, archive failure/retry semantics, and deliberate
 manual republishing. In-memory stores need `ArchiveDir` for durable evidence.
 
+The resync floor is an inclusive consumption boundary: a cursor below it must
+snapshot, while a cursor at it can resume with entries at strictly greater
+positions. `finishResync` reserves `Current()+1` for the purge record without
+advancing the clock. After that record commits, `applyPurgeLocked` calls
+`clock.SetAtLeast(floor)` while `commitMu` still excludes every mutation. The
+floor is therefore consumed before any subsequent local write calls `Next()`;
+that write receives a position strictly above the floor. Durable replay uses
+the same application path. Reserving the position this way also leaves
+`CurrentPosition` unchanged if the purge log fails; calling `Next()` before
+that failure would consume a position for a purge that never committed.
+
+`TestResyncPurgeImmediateWriteReachesReadersAndPeer` covers both stores: an
+immediate write after a resync purge reaches observers, `ChangesSince(floor)`,
+the byte-page reader used by push cursors at the floor, and the HTTP peer in
+the next push round, with its cursor acknowledging that write.
+
 ## ADR-0006 D3/D4: clock refusal compatibility (V2-NET-1a)
 
 Push, digest pages and resync snapshot pages refuse entries more than five
