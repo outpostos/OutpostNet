@@ -18,12 +18,15 @@ import (
 	"time"
 
 	observationv1alpha1 "github.com/outpostos/OutpostRange/gen/go/outpostrange/observation/v1alpha1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
 	// DefaultEventBufferSize is how many events the log retains for resume.
 	DefaultEventBufferSize = 4096
+	// DefaultEventBufferBytes caps encoded protobuf history as well as count.
+	DefaultEventBufferBytes = 4 << 20
 	// subscriberBuffer is how far a subscriber may lag before it is dropped.
 	subscriberBuffer = 1024
 	seqOrdinalBits   = 20
@@ -49,6 +52,7 @@ type EventLog struct {
 	lastSeq  uint64
 	events   []*observationv1alpha1.Event
 	capacity int
+	bytes    int
 	dropped  uint64
 	subs     map[uint64]chan *observationv1alpha1.Event
 	nextSub  uint64
@@ -95,12 +99,15 @@ func (l *EventLog) Append(event *observationv1alpha1.Event) *observationv1alpha1
 	event.Seq = &seq
 	event.NodeTime = timestamppb.New(l.now().UTC())
 
-	if len(l.events) == l.capacity {
+	l.events = append(l.events, event)
+	l.bytes += proto.Size(event)
+	for len(l.events) > 0 && (len(l.events) > l.capacity || l.bytes > DefaultEventBufferBytes) {
+		l.bytes -= proto.Size(l.events[0])
 		l.events[0] = nil
 		l.events = l.events[1:]
 		l.dropped++
 	}
-	l.events = append(l.events, event)
+
 	for id, ch := range l.subs {
 		select {
 		case ch <- event:
@@ -135,6 +142,9 @@ func (l *EventLog) Dropped() uint64 {
 func (l *EventLog) SubscribeAfter(afterSeq uint64) ([]*observationv1alpha1.Event, <-chan *observationv1alpha1.Event, func(), error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(l.events) == 0 && afterSeq >= l.epoch && afterSeq < l.lastSeq {
+		return nil, nil, nil, fmt.Errorf("%w: after_seq=%d latest_seq=%d", ErrEventGap, afterSeq, l.lastSeq)
+	}
 	if len(l.events) > 0 {
 		earliest := l.events[0].GetSeq()
 		if afterSeq >= l.epoch && afterSeq < earliest-1 {

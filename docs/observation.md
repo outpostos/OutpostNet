@@ -259,3 +259,15 @@ the timeline. `TestDeliveryMetricSamplesUseLocalFacts` verifies the real box
 status → MetricSample mapping and secret-free proto JSON. Delivery HTTP tests
 capture error/log redaction, including echoed tokens, credential-bearing peer
 URLs, malformed responses, client failures and redirects.
+
+## OBS-LOSS retention budget
+
+Net/Service retain at most 4,096 events and 4 MiB of protobuf-encoded events,
+whichever is reached first. Slow subscribers still cannot block product writes.
+The byte budget excludes Go object overhead and SSE/JSON encoding overhead.
+At 18 directory samples per second (nine counters and three metrics for each
+of three leases), the count budget covers about 227 seconds before other facts.
+Directory samples are coalesced on the one-second tick; lease/time quality and
+reliable-delivery samples already use periodic ticks. A cursor older than the
+retained window receives HTTP 410; skipped history must be marked incomplete
+by the Range agent (OutpostRange#63).
