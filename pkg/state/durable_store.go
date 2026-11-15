@@ -110,7 +110,9 @@ type DurableStoreConfig struct {
 
 	// compactionHook runs before each compaction step (compactStep*). Tests use it
 	// to inject step failures and to capture crash images of the directory.
-	compactionHook func(step string) error
+	compactionHook       func(step string) error
+	wrapResyncArchive    func(durableLog) durableLog
+	syncResyncArchiveDir func(string) error
 }
 
 // DurableStore is a file-backed Store. Each accepted local or remote state
@@ -160,10 +162,11 @@ type durableManifest struct {
 }
 
 type durableRecord struct {
-	FormatVersion int    `json:"format_version"`
-	Sequence      uint64 `json:"sequence"`
-	Type          string `json:"type"`
-	Entry         *Entry `json:"entry,omitempty"`
+	Resync        *ResyncStatus `json:"resync,omitempty"`
+	FormatVersion int           `json:"format_version"`
+	Sequence      uint64        `json:"sequence"`
+	Type          string        `json:"type"`
+	Entry         *Entry        `json:"entry,omitempty"`
 	// Batch holds the entries of a batch record with their local positions.
 	Batch    []durableBatchEntry `json:"batch,omitempty"`
 	Peer     string              `json:"peer,omitempty"`
@@ -247,6 +250,9 @@ func openDurableStore(cfg DurableStoreConfig, offlineReset bool) (*DurableStore,
 		compactionHook:       cfg.compactionHook,
 		compactionMinRecords: cfg.CompactionMinRecords,
 	}
+	core.archiveDir = cfg.Dir
+	core.wrapResyncArchive = cfg.wrapResyncArchive
+	core.syncResyncArchiveDir = cfg.syncResyncArchiveDir
 	core.purgeHook = store.appendPurge
 	core.batchHook = store.appendBatch
 	if _, err := os.Stat(filepath.Join(cfg.Dir, clockRebuildPending)); !errors.Is(err, os.ErrNotExist) {
@@ -553,6 +559,9 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		}
 		return nil
 	case durableRecordSnapshot:
+		if record.Resync != nil {
+			s.storeCore.resync = copyResyncStatus(*record.Resync)
+		}
 		s.clock.SetAtLeast(record.Counter)
 		s.hlc.Restore(timestampValue(record.HLC))
 		s.storeCore.mu.Lock()
@@ -561,7 +570,7 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		return nil
 	case durableRecordPurge:
 		s.storeCore.mu.Lock()
-		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed, Adopted: timestampValue(record.Adopted)})
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed, Adopted: timestampValue(record.Adopted), Resync: record.Resync})
 		s.storeCore.mu.Unlock()
 		return nil
 	default:
@@ -596,6 +605,7 @@ func (s *DurableStore) appendPurge(set purgeSet) error {
 		Horizon: timestampPtr(set.Horizon),
 		Floor:   set.Floor,
 		Removed: append([]removedEntry(nil), set.Removed...),
+		Resync:  set.Resync,
 		Adopted: timestampPtr(set.Adopted),
 	}, func() {})
 }
@@ -803,6 +813,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	horizon := s.storeCore.horizon
 	floor := s.storeCore.floor
 	adopted := s.storeCore.adopted
+	resync := copyResyncStatus(s.storeCore.resync)
 	s.storeCore.mu.RUnlock()
 	counter := s.clock.Current()
 	hlc := s.hlc.Current()
@@ -825,6 +836,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 		Horizon: timestampPtr(horizon),
 		Floor:   floor,
 		Adopted: timestampPtr(adopted),
+		Resync:  &resync,
 	})
 	for index := range entries {
 		entry := entries[index]

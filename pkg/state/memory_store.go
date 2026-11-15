@@ -14,8 +14,10 @@ import (
 
 // MemoryStoreConfig configures an in-memory state replica.
 type MemoryStoreConfig struct {
-	NodeID string
-	Policy MergePolicy
+	// ArchiveDir optionally retains resync purges on disk for an in-memory store.
+	ArchiveDir string
+	NodeID     string
+	Policy     MergePolicy
 	// MaxEntryBytes bounds a local entry's JSON encoding (default 512 KiB).
 	// Remote Apply and recovery preserve larger legacy entries.
 	MaxEntryBytes int64
@@ -51,17 +53,22 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	core.archiveDir = cfg.ArchiveDir
 	return &MemoryStore{storeCore: core}, nil
 }
 
 type storeCore struct {
-	nodeID     string
-	policy     MergePolicy
-	entries    map[string]Entry
-	byKey      *btree.BTreeG[entryRef]
-	byPosition *btree.BTreeG[entryRef]
-	clock      localClock
-	hlc        *hlcClock
+	archiveDir           string
+	wrapResyncArchive    func(durableLog) durableLog
+	syncResyncArchiveDir func(string) error
+	resync               ResyncStatus // guarded by mu
+	nodeID               string
+	policy               MergePolicy
+	entries              map[string]Entry
+	byKey                *btree.BTreeG[entryRef]
+	byPosition           *btree.BTreeG[entryRef]
+	clock                localClock
+	hlc                  *hlcClock
 	// ready reports whether this replica can serve local reads and resume a
 	// consumer position. Recovery runs to completion before a store constructor
 	// returns, so a published store starts ready; a lifecycle owner clears it when
@@ -310,7 +317,9 @@ func (s *storeCore) CurrentPosition() uint64 { return s.clock.Current() }
 // LocalStatus reports local recovery readiness and the latest local position.
 // Ready is false once the replica has stopped serving local state.
 func (s *storeCore) LocalStatus() LocalStatus {
-	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.CurrentPosition()}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.clock.Current(), Resync: copyResyncStatus(s.resync)}
 }
 
 // CheckConsumerPosition reports whether a stored consumer position can resume.

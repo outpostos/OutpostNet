@@ -13,6 +13,12 @@ import (
 // Timestamps use GossipConfig.Clock; catch-up ordering and backoff use local
 // monotonic time even if that clock steps backwards or stays frozen.
 type PeerReplicationStatus struct {
+	// UnreachableFor is monotonic elapsed outage time measured at the latest
+	// failure or warning transition; cleared on success. Reads do not advance it.
+	UnreachableFor             time.Duration
+	ResyncLossLimitApproaching bool
+	// ResyncLossWarnings counts outage warning transitions in this engine process.
+	ResyncLossWarnings uint64
 	// Peer is the address from the PeerProvider with any password redacted.
 	Peer string
 	// AcknowledgedPosition is the push cursor, which may pass refused entries.
@@ -119,23 +125,27 @@ func (g *GossipEngine) ReplicationStatus(ctx context.Context) (ReplicationStatus
 		g.mu.Unlock()
 
 		peer := PeerReplicationStatus{
-			Peer:                  redactedPeerURL(addr),
-			AcknowledgedPosition:  acknowledged,
-			RefusedPositions:      len(refused),
-			LowestRefusedPosition: lowest,
-			GCConfirmedPosition:   nonRefusedPosition(acknowledged, refused),
-			OversizedPushEntries:  state.oversizedPushEntries,
-			OutboundCaughtUp:      len(refused) == 0 && acknowledged >= status.Local.CurrentPosition,
-			LastPullTime:          state.lastPull.wall,
-			InboundCaughtUp:       !state.lastPull.monotonic.IsZero() && (state.lastErrorTime.monotonic.IsZero() || state.lastErrorTime.monotonic.Before(state.lastPull.monotonic)),
-			LastSuccessTime:       state.lastSuccess,
-			LastError:             state.lastError,
-			LastErrorTime:         state.lastErrorTime.wall,
-			LastErrorOperation:    state.lastErrorOp,
-			ConsecutiveFailures:   state.failures,
-			NextAttemptTime:       state.nextAttemptTime,
-			OutboundRoundTime:     state.lastCaughtUpRound.wall,
+			Peer:                       redactedPeerURL(addr),
+			ResyncLossLimitApproaching: state.resyncLossLimitApproaching,
+			ResyncLossWarnings:         state.resyncLossWarnings,
+			UnreachableFor:             state.unreachableFor,
+			AcknowledgedPosition:       acknowledged,
+			RefusedPositions:           len(refused),
+			LowestRefusedPosition:      lowest,
+			GCConfirmedPosition:        nonRefusedPosition(acknowledged, refused),
+			OversizedPushEntries:       state.oversizedPushEntries,
+			OutboundCaughtUp:           len(refused) == 0 && acknowledged >= status.Local.CurrentPosition,
+			LastPullTime:               state.lastPull.wall,
+			InboundCaughtUp:            !state.lastPull.monotonic.IsZero() && (state.lastErrorTime.monotonic.IsZero() || state.lastErrorTime.monotonic.Before(state.lastPull.monotonic)),
+			LastSuccessTime:            state.lastSuccess,
+			LastError:                  state.lastError,
+			LastErrorTime:              state.lastErrorTime.wall,
+			LastErrorOperation:         state.lastErrorOp,
+			ConsecutiveFailures:        state.failures,
+			NextAttemptTime:            state.nextAttemptTime,
+			OutboundRoundTime:          state.lastCaughtUpRound.wall,
 		}
+
 		roundCaughtUp := state.lastRoundCaughtUp && (state.lastErrorTime.monotonic.IsZero() || state.lastErrorTime.monotonic.Before(state.lastRound.monotonic))
 		peer.OutboundRoundCaughtUp = len(refused) == 0 && (peer.OutboundCaughtUp || roundCaughtUp)
 		peer.CaughtUp = peer.OutboundCaughtUp && peer.InboundCaughtUp

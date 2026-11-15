@@ -187,6 +187,7 @@ type Store interface {
 // LocalStatus reports whether the store has completed local recovery and the
 // latest node-local state position. It does not claim global convergence.
 type LocalStatus struct {
+	Resync          ResyncStatus
 	Ready           bool
 	CurrentPosition uint64
 }
