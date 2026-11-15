@@ -118,8 +118,8 @@ func (r reg) json() string {
 	if r.weight > 0 {
 		w = fmt.Sprintf(`, "weight":%d`, r.weight)
 	}
-	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":%q, "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":%d}%s}], "healthState":%q}}`,
-		r.id(), r.live, exp.UTC().Format(time.RFC3339Nano), r.service, r.uid, r.node, r.port, w, h)
+	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "originNodeId":%q, "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":%q, "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":%d}%s}], "healthState":%q}}`,
+		r.id(), r.live, exp.UTC().Format(time.RFC3339Nano), r.node, r.service, r.uid, r.node, r.port, w, h)
 }
 
 // register publishes (or replaces) a live registration.
