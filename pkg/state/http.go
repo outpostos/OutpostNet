@@ -295,7 +295,7 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Engine.nodeID != cfg.NodeID {
+	if auth.CertificateMode() && cfg.Engine.nodeID != cfg.NodeID {
 		return nil, fmt.Errorf("http state handler engine node mismatch")
 	}
 	limit := cfg.MaxRequestBytes
