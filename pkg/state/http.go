@@ -3,14 +3,15 @@ package state
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/outpostos/OutpostNet/pkg/state/httpauth"
+	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 )
 
 const (
@@ -27,10 +28,15 @@ const (
 
 // HTTPSyncerConfig configures HTTP peer calls.
 type HTTPSyncerConfig struct {
-	Client    *http.Client
-	NodeID    string
-	AuthToken string
-	PolicyID  string
+	// AuthMode defaults to token. Certificate modes require Identity.
+	AuthMode httpauth.Mode
+	Identity *tlsutil.Identity
+	// PeerIdentity optionally binds a response to the host directory node ID.
+	PeerIdentity func(address string) string
+	Client       *http.Client
+	NodeID       string
+	AuthToken    string
+	PolicyID     string
 	// MaxRequestBytes declares the peer request limit (default 1 MiB).
 	// Gossip validates MaxPushBytes against it at construction.
 	MaxRequestBytes  int64
@@ -39,6 +45,8 @@ type HTTPSyncerConfig struct {
 
 // HTTPSyncer implements Syncer over JSON/HTTP.
 type HTTPSyncer struct {
+	auth             *httpauth.Auth
+	peerIdentity     func(string) string
 	client           *http.Client
 	nodeID           string
 	authToken        string
@@ -52,8 +60,9 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("http syncer node id is required")
 	}
-	if cfg.AuthToken == "" {
-		return nil, fmt.Errorf("http syncer auth token is required")
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
+	if err != nil {
+		return nil, err
 	}
 	maxRequestBytes := cfg.MaxRequestBytes
 	if maxRequestBytes == 0 {
@@ -73,11 +82,13 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	if policyID == "" {
 		policyID = NewHLCLWWPolicy().ID()
 	}
-	client := cfg.Client
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+	client, err := auth.Client(cfg.Client)
+	if err != nil {
+		return nil, err
 	}
 	return &HTTPSyncer{
+		auth:             auth,
+		peerIdentity:     cfg.PeerIdentity,
 		client:           client,
 		nodeID:           cfg.NodeID,
 		authToken:        cfg.AuthToken,
@@ -183,7 +194,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if err != nil {
 		return fmt.Errorf("marshal %s %s request: %w", method, path, err)
 	}
-	url := buildPeerURL(addr, path)
+	url, err := s.auth.PeerURL(addr, path)
+	if err != nil {
+		return err
+	}
 	// Errors name the peer by its redacted URL and never repeat the bearer
 	// token, even if a peer echoes it back in an error body: callers log these
 	// errors and GossipEngine.ReplicationStatus reports them.
@@ -194,7 +208,9 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.authToken)
+	if err := s.auth.Prepare(req); err != nil {
+		return err
+	}
 	req.Header.Set("X-Outpost-Node-ID", s.nodeID)
 
 	resp, err := s.client.Do(req)
@@ -202,6 +218,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 		return fmt.Errorf("%s %s: %w", method, shown, err)
 	}
 	defer resp.Body.Close()
+	expected := ""
+	if s.peerIdentity != nil {
+		expected = s.peerIdentity(addr)
+	}
 	body, err := readLimitedResponseBody(resp, s.maxResponseBytes)
 	if err != nil {
 		return fmt.Errorf("read %s %s response: %w", method, shown, err)
@@ -209,6 +229,9 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if resp.StatusCode == http.StatusGone {
 		var gone resyncRequiredBody
 		if err := json.Unmarshal(body, &gone); err == nil && !gone.GCHorizon.isZero() {
+			if err := s.auth.MatchResponse(resp, gone.NodeID, expected); err != nil {
+				return err
+			}
 			if err := validateProtocolResponse(shown, "410", gone.ProtocolVersion); err != nil {
 				return err
 			}
@@ -221,7 +244,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if resp.StatusCode >= 300 {
 		// A peer may echo the request credentials: the bearer token or the
 		// password of the URL it was reached at.
-		text := strings.ReplaceAll(strings.TrimSpace(string(body)), s.authToken, redactedSecret)
+		text := strings.TrimSpace(string(body))
+		if s.authToken != "" {
+			text = strings.ReplaceAll(text, s.authToken, redactedSecret)
+		}
 		text = redactPeerError(addr, text)
 		return fmt.Errorf("%s %s: status %d: %s", method, shown, resp.StatusCode, text)
 	}
@@ -231,7 +257,13 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if err := json.Unmarshal(body, respBody); err != nil {
 		return fmt.Errorf("decode %s %s response: %w", method, shown, err)
 	}
-	return nil
+	var metadata struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return fmt.Errorf("decode response identity: %w", err)
+	}
+	return s.auth.MatchResponse(resp, metadata.NodeID, expected)
 }
 
 func buildPeerURL(addr, path string) string {
@@ -243,6 +275,8 @@ func buildPeerURL(addr, path string) string {
 
 // HTTPHandlerConfig configures HTTP replication endpoints.
 type HTTPHandlerConfig struct {
+	AuthMode        httpauth.Mode
+	Identity        *tlsutil.Identity
 	NodeID          string
 	Engine          *GossipEngine
 	AuthToken       string
@@ -257,8 +291,12 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	if cfg.Engine == nil {
 		return nil, fmt.Errorf("http state handler engine is required")
 	}
-	if cfg.AuthToken == "" {
-		return nil, fmt.Errorf("http state handler auth token is required")
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Engine.nodeID != cfg.NodeID {
+		return nil, fmt.Errorf("http state handler engine node mismatch")
 	}
 	limit := cfg.MaxRequestBytes
 	if limit == 0 {
@@ -274,9 +312,9 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 		return nil, err
 	}
 	h := &httpHandler{
+		auth:            auth,
 		nodeID:          cfg.NodeID,
 		engine:          cfg.Engine,
-		authToken:       cfg.AuthToken,
 		maxRequestBytes: limit,
 	}
 	mux := http.NewServeMux()
@@ -286,9 +324,9 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 }
 
 type httpHandler struct {
+	auth            *httpauth.Auth
 	nodeID          string
 	engine          *GossipEngine
-	authToken       string
 	maxRequestBytes int64
 }
 
@@ -386,27 +424,31 @@ func (h *httpHandler) preflight(w http.ResponseWriter, r *http.Request, method s
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Sprintf("method %s not allowed", r.Method))
 		return false
 	}
-	const prefix = "Bearer "
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, prefix) ||
-		subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(h.authToken)) != 1 {
-		writeJSONError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+	if status := h.auth.Authorize(r); status != 0 {
+		writeJSONError(w, status, "HTTP authentication rejected")
 		return false
 	}
 	return true
 }
 
 func (h *httpHandler) identityMatches(w http.ResponseWriter, r *http.Request, source string) bool {
+	if !h.auth.MatchSource(r, source) {
+		writeJSONError(w, http.StatusForbidden, "source certificate identity mismatch")
+		return false
+	}
 	header := r.Header.Get("X-Outpost-Node-ID")
 	if source == "" || header == "" {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusBadRequest, "source node identity is required")
 		return false
 	}
 	if source != header {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusForbidden, "source node identity does not match request header")
 		return false
 	}
 	if source == h.nodeID {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusForbidden, "self-replication request rejected")
 		return false
 	}
