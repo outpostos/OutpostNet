@@ -124,6 +124,7 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 	}
 	mgmt := agent.NewManagementServer(h.cfg.Management.SocketPath, dir, h.logger)
+	mgmt.HandleReadOnly("/v1/directory", h.handleDirectoryStatus)
 	if err := mgmt.Start(ctx); err != nil {
 		return fmt.Errorf("start management server: %w", err)
 	}
@@ -223,6 +224,12 @@ func (h *Host) Run(ctx context.Context) error {
 
 	// Directory-driven exports (ADR-0003 D4); stopped before the directory.
 	if svcDir != nil {
+		if obs != nil {
+			obsCtx, cancelObs := context.WithCancel(ctx)
+			obsDone := make(chan struct{})
+			go func() { defer close(obsDone); runDirectoryObservation(obsCtx, obs, svcDir) }()
+			defer func() { cancelObs(); <-obsDone }()
+		}
 		expCtx, cancelExp := context.WithCancel(ctx)
 		expDone := make(chan struct{})
 		go func() { defer close(expDone); h.runDirectoryExports(expCtx, svcDir) }()
