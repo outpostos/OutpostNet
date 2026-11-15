@@ -33,7 +33,9 @@ Three pieces of per-store state are added. They are persisted by
 
 A tombstone `t` is collected only when all of the following hold:
 
-1. **Retention**: `t.Version.HLC.WallMS <= physicalNow - TombstoneRetention`.
+1. **Retention**: `t.Version.HLC.WallMS <= min(systemNow, referenceNow) - TombstoneRetention`.
+   The [time reference](time-reference.md) is shared with HLC admission; legacy
+   physical-clock configurations use that clock for both.
    `TombstoneRetention == 0` (the default) disables GC entirely.
 2. **Peer acknowledgement** (replicated stores only, via
    `GossipEngine.CollectTombstones`): `t.Position` must lie in every configured
@@ -44,8 +46,8 @@ A tombstone `t` is collected only when all of the following hold:
    With no refusal, this is the push progress. The gate is safety-critical when
    cursors skip clock refusals; push-round status fields never gate collection.
    Non-refused means accepted, already superseded, or covered by the receiver's
-   horizon (`beyond_gc_horizon` still triggers resync). Other explicit refusals
-   remain in the set until acceptance is confirmed.
+   horizon (`beyond_gc_horizon` still triggers resync). `clock_offset` refusals remain
+   in the set until acceptance is confirmed. Other permanent reasons do not pin GC.
 3. **Collection cap**: a tombstone more than `MaxClockOffsetMS` ahead of the
    store's time reference cannot be collected, independently of acknowledgement.
 4. **Local-only stores** (no engine): `Store.CollectTombstones` uses retention
@@ -366,9 +368,9 @@ and a restart replays from that prefix rather than forgetting unresolved refusal
 
 The compatibility argument is the ADR's reasoning, backed by the tests below:
 
-1. Retention remains unchanged in this ticket, using the injected physical clock.
-   V2-NET-1b supplies peer-derived references and the separate retention clock
-   `min(local physical, reference)`. The independent collection cap is active now.
+1. V2-NET-1b adds the separate retention clock `min(local physical, reference)`.
+   Taking the earlier clock cannot make collection earlier than either clock
+   alone. The independent collection cap continues to use the HLC reference.
 2. Collection and vouching use the same non-refused prefix, restoring the premise
    that every covered tombstone was non-refusedly acknowledged. A refused position
    itself is never covered. A future tombstone refused by a healthy member blocks
@@ -392,13 +394,15 @@ The compatibility argument is the ADR's reasoning, backed by the tests below:
 `RefusedEntries`, within-valve `AheadEntries`, and peer `RefusedHorizons`, with
 sticky `ClockSuspect` flags; warnings also name `clock_suspect`. Counters describe
 this store/engine process and reset on recreation. Hosts own observation-event
-mapping; this library still has no Range dependency or new wire fields. Peer
+mapping; the library has no Range dependency. V2-NET-1a added no wire fields;
+V2-NET-1b adds the time samples described in [time-reference.md](time-reference.md). Peer
 status exposes `RefusedPositions`, `LowestRefusedPosition`, and
 `GCConfirmedPosition`; `AcknowledgedPosition` remains the push cursor. Outstanding
 refusals suppress outbound caught-up claims, including round caught-up claims.
 `TimeReferenceMS()` on built-in stores reads the same injected physical clock as
 HLC admission. Custom stores may expose that method too; otherwise guards use
-system time. No time-quality inference or handshake samples are added here.
+system time. V2-NET-1b supplies quality and handshake sampling through the
+configured `TimeReference`; the same reference feeds admission and horizon guards.
 
 ### V2-NET-1a acceptance evidence
 
@@ -589,3 +593,7 @@ snapshot header loses `adopted` and the `peer_progress` records lose
   its first exchange (rule "Not a zero horizon"), resyncs and records the peer
   horizon as adopted, which makes it apply the 03b comparison to every lower
   horizon until it collects on its own.
+
+V2-NET-1b adds protocol **3.0** time samples and responder identities, including
+410s, without changing the durable log format. See [time-reference.md](time-reference.md)
+for upgrade, clock wiring, trust limits and ADR-0006 acceptance 3/7/9 evidence.

@@ -48,10 +48,11 @@ type GossipEngine struct {
 	maxPushBytes         int64
 	maxPushPagesPerRound int
 
-	progressMu sync.Mutex // serializes acknowledgement/refusal read-modify-write
-	mu         sync.Mutex
-	peerStates map[string]*peerState
-	clockPeers map[string]NodeClockStatus
+	progressMu  sync.Mutex // serializes acknowledgement/refusal read-modify-write
+	mu          sync.Mutex
+	peerStates  map[string]*peerState
+	clockPeers  map[string]NodeClockStatus
+	timePeerIDs map[string]string // exchange address -> responding node identity
 }
 
 type peerState struct {
@@ -127,7 +128,7 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 		return nil, fmt.Errorf("gossip push limits must be positive")
 	}
 	// Reserve the largest horizon encoding, even when GC is currently off.
-	envelope, err := json.Marshal(PushRequest{ProtocolVersion: StateProtocolVersion, PolicyID: storePolicy.ID(), SourceNodeID: cfg.NodeID, GCHorizon: &Timestamp{WallMS: math.MinInt64, Logical: math.MaxUint16}, Entries: []Entry{}})
+	envelope, err := json.Marshal(PushRequest{TimeSample: TimeSample{SentPhysicalMS: math.MinInt64, TimeQuality: TimeUnsynced}, ProtocolVersion: StateProtocolVersion, PolicyID: storePolicy.ID(), SourceNodeID: cfg.NodeID, GCHorizon: &Timestamp{WallMS: math.MinInt64, Logical: math.MaxUint16}, Entries: []Entry{}})
 	if err != nil {
 		return nil, fmt.Errorf("encode push envelope: %w", err)
 	}
@@ -238,8 +239,10 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 		return false, redactPeerErr(addr, err)
 	}
 	for page := 0; page < g.maxPushPagesPerRound; page++ {
-		req := PushRequest{ProtocolVersion: StateProtocolVersion, PolicyID: g.policy.ID(), SourceNodeID: g.nodeID, GCHorizon: g.localHorizon(), Entries: []Entry{}}
-		envelope, err := json.Marshal(req)
+		req := PushRequest{TimeSample: g.timeSample(), ProtocolVersion: StateProtocolVersion, PolicyID: g.policy.ID(), SourceNodeID: g.nodeID, GCHorizon: g.localHorizon(), Entries: []Entry{}}
+		budget := req
+		budget.TimeSample = TimeSample{SentPhysicalMS: math.MinInt64, TimeQuality: TimeUnsynced}
+		envelope, err := json.Marshal(budget)
 		if err != nil {
 			return false, &localStoreError{err: err}
 		}
@@ -266,7 +269,7 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 			}
 		}
 		req.Entries = changes
-		resp, err := g.syncer.Push(ctx, addr, req)
+		resp, err := g.pushExchange(ctx, addr, req)
 		if err != nil {
 			var resync *ResyncRequiredError
 			if errors.As(err, &resync) {
@@ -378,6 +381,7 @@ func (g *GossipEngine) HandlePush(ctx context.Context, req PushRequest) (*PushRe
 		}
 	}
 	return &PushResponse{
+		TimeSample:      g.timeSample(),
 		ProtocolVersion: StateProtocolVersion,
 		PolicyID:        g.policy.ID(),
 		Accepted:        accepted,
@@ -414,6 +418,8 @@ func (g *GossipEngine) HandlePullResponse(ctx context.Context, req PullRequest) 
 	// returned state reflects.
 	horizon := g.storeHorizon()
 	resp := &PullResponse{
+		NodeID:          g.nodeID,
+		TimeSample:      g.timeSample(),
 		ProtocolVersion: StateProtocolVersion,
 		PolicyID:        g.policy.ID(),
 		GCHorizon:       timestampPtr(horizon),
@@ -775,7 +781,7 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 	if !ok {
 		return fmt.Errorf("peer %s requires snapshot resync: %w", shown, ErrTombstoneGCUnsupported)
 	}
-	snapshotter, ok := g.syncer.(SnapshotSyncer)
+	_, ok = g.syncer.(SnapshotSyncer)
 	if !ok {
 		return fmt.Errorf("peer %s requires snapshot resync, syncer cannot pull snapshots: %w", shown, ErrTombstoneGCUnsupported)
 	}
@@ -786,7 +792,7 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		applied, refused int
 	)
 	for page := 0; ; page++ {
-		resp, err := snapshotter.PullSnapshot(ctx, addr, PullRequest{
+		resp, err := g.pullExchange(ctx, addr, PullRequest{
 			ProtocolVersion: StateProtocolVersion,
 			PolicyID:        g.policy.ID(),
 			SourceNodeID:    g.nodeID,

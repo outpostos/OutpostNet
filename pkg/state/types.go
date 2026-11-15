@@ -15,8 +15,8 @@ type ProtocolVersion struct {
 	Minor int `json:"minor"`
 }
 
-// StateProtocolVersion requires range-aware digest paging (cluster-wide upgrade).
-var StateProtocolVersion = ProtocolVersion{Major: 2, Minor: 0}
+// StateProtocolVersion requires bounded handshake time samples (cluster-wide upgrade).
+var StateProtocolVersion = ProtocolVersion{Major: 3, Minor: 0}
 
 func (v ProtocolVersion) String() string {
 	return fmt.Sprintf("%d.%d", v.Major, v.Minor)
@@ -78,6 +78,7 @@ type Mutation struct {
 
 // PushRequest is a batch of entries pushed from one node to a peer.
 type PushRequest struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	SourceNodeID    string          `json:"source"`
@@ -88,6 +89,7 @@ type PushRequest struct {
 
 // PushResponse reports how many pushed entries changed receiver state.
 type PushResponse struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	Accepted        int             `json:"accepted"`
@@ -112,6 +114,7 @@ type PushRejection struct {
 
 // PullRequest asks for entries newer than a cursor or a digest.
 type PullRequest struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion         `json:"protocol_version"`
 	PolicyID        string                  `json:"policy_id"`
 	SourceNodeID    string                  `json:"source,omitempty"`
@@ -135,6 +138,9 @@ type PullRequest struct {
 
 // PullResponse is returned by the HTTP pull endpoint.
 type PullResponse struct {
+	// NodeID identifies the responder, so address aliases cannot count as two peers.
+	NodeID string `json:"node_id"`
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	Entries         []Entry         `json:"entries"`

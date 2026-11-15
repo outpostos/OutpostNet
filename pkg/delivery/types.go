@@ -116,9 +116,12 @@ type Config struct {
 	MaxExpiry        time.Duration
 	ClockSkew        time.Duration
 	Clock            func() time.Time
-	RetryMin         time.Duration
-	RetryMax         time.Duration
-	Transport        Transport
+	// TimeReference supplies the host's shared Net reference (for example
+	// *state.TimeReference). Configure it instead of Clock. No global clock exists.
+	TimeReference interface{ Now() time.Time }
+	RetryMin      time.Duration
+	RetryMax      time.Duration
+	Transport     Transport
 	// Filesystem fault seams, matching pkg/state's real-file wrapper pattern.
 	wrapLog     func(logFile) logFile
 	compactHook func(string) error
@@ -139,6 +142,12 @@ func (c Config) defaults() (Config, error) {
 	}
 	if c.MaxExpiry == 0 {
 		c.MaxExpiry = 72 * time.Hour
+	}
+	if c.TimeReference != nil {
+		if c.Clock != nil {
+			return c, errors.New("configure TimeReference or Clock, not both")
+		}
+		c.Clock = c.TimeReference.Now
 	}
 	if c.Clock == nil {
 		c.Clock = time.Now

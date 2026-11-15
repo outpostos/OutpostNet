@@ -46,7 +46,7 @@ func updateRefusals(previous []refusedPosition, changes []Entry, resp *PushRespo
 	rejected := make(map[string]bool)
 	if resp != nil {
 		for _, r := range resp.Rejections {
-			if r.Reason != RejectionReasonBeyondGCHorizon {
+			if r.Reason == rejectionReasonClockOffset {
 				rejected[r.Key] = true
 			}
 		}
