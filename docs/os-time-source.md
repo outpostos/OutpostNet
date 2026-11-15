@@ -126,3 +126,14 @@ cancellation test then caught probes continuing after cancellation; malformed
 source tests caught lowercase local mode being trusted and startup without a
 timesync sample being misclassified as a parser error. All pass after their fixes.
 No gossip algorithms, protocol version, durable format or Mesh contracts change.
+
+Native Linux validation on e5box passed on a fresh archive of rebased product
+commit `aeee927`: `go build ./...`, `go vet ./...`, the complete
+`GOMAXPROCS=2 GOTMPDIR=/dev/shm TMPDIR=/dev/shm go test -race -count=1 -timeout=30m ./...`
+(state 124.502s, delivery 134.780s, tunnel 15.038s), and
+`GOOS=linux GOARCH=amd64 make build-agent`. No tests were excluded. The subsequent
+test-only fixture isolation change (`8ba19ef`) also passed the focused Linux race
+suite, including the default subprocess runner and NET-14 regressions. Native Mac
+build/vet and the focused race suite passed. The initial complete Mac run hit a
+QUIC dial timeout in `TestRelayDirectAndRelay`; its isolated race rerun passed.
+The Linux gates ran on the development host, without changing any VM.
