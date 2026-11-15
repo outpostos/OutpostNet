@@ -22,6 +22,7 @@ type NodeClockStatus struct {
 	TimeQuality        TimeQuality
 	TimeUnknown        bool
 	UsingPeerReference bool
+	TimeSource         TimeSourceStatus
 }
 
 // TimeReferenceMS supplies the same reference used by HLC offset checks. A
@@ -78,6 +79,7 @@ func (s *storeCore) ClockStatus() []NodeClockStatus {
 		timeStatus := ref.TimeStatus()
 		local.NodeID, local.TimeQuality = s.nodeID, timeStatus.Quality
 		local.TimeUnknown, local.UsingPeerReference = timeStatus.TimeUnknown, timeStatus.UsingPeerReference
+		local.TimeSource = timeStatus.Source
 		local.ClockSuspect = local.ClockSuspect || timeStatus.ClockSuspect
 	}
 	if local.ClockSuspect || local.TimeQuality != "" {

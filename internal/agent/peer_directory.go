@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/outpostos/OutpostNet/pkg/state"
 	"github.com/outpostos/OutpostNet/pkg/tunnel"
 )
 
@@ -153,11 +154,12 @@ func statusFromConnState(state tunnel.ConnState) string {
 }
 
 type ManagementServer struct {
-	socketPath string
-	directory  *PeerDirectory
-	logger     *slog.Logger
-	server     *http.Server
-	listener   net.Listener
+	socketPath    string
+	directory     *PeerDirectory
+	logger        *slog.Logger
+	server        *http.Server
+	listener      net.Listener
+	timeReference *state.TimeReference
 }
 
 func NewManagementServer(socketPath string, directory *PeerDirectory, logger *slog.Logger) *ManagementServer {
@@ -187,6 +189,7 @@ func (ms *ManagementServer) Start(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/peers", ms.handlePeers(ctx))
+	ms.registerTimeStatus(mux)
 	mux.HandleFunc("GET /v1/security", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ms.directory.tunnels.SecurityStatus())

@@ -30,6 +30,10 @@ type TimeSample struct {
 type TimeSourceStatus struct {
 	Synchronized bool
 	Uncertainty  time.Duration
+	Source       string        // daemon and upstream identity, or "none"
+	State        string        // synchronized, unsynchronized, unavailable, error
+	Offset       time.Duration // signed system-clock offset when OffsetKnown
+	OffsetKnown  bool
 }
 
 // TimeReferenceConfig configures a process-local reference. Callbacks must be
@@ -57,6 +61,8 @@ type TimeStatus struct {
 	DiscardedSamples   uint64
 	StepRejected       bool
 	StepRejections     uint64
+	Source             TimeSourceStatus // latest observation, including source loss
+	SourceAge          time.Duration    // monotonic elapsed time since that observation
 }
 
 type peerTimeSample struct {
@@ -75,6 +81,8 @@ type TimeReference struct {
 	source              TimeSourceStatus
 	sourceAt            time.Time
 	synchronized        bool
+	lastSource          TimeSourceStatus
+	lastSourceAt        time.Time
 	accepted, discarded uint64
 	stepWall            int64
 	stepAt              time.Time
@@ -135,6 +143,7 @@ func (r *TimeReference) UpdateSource(source TimeSourceStatus) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.lastSource, r.lastSourceAt = source, r.cfg.MonotonicNow()
 	if source.Synchronized {
 		r.source, r.sourceAt, r.synchronized = source, r.cfg.MonotonicNow(), true
 		if r.qualityLocked(r.sourceAt) != TimeUnsynced {
@@ -189,6 +198,10 @@ func (r *TimeReference) statusLocked() TimeStatus {
 	r.lastQuality = quality
 	physical := r.stepTimeLocked(system, now)
 	s := TimeStatus{Quality: quality, ReferenceMS: physical, SystemMS: system, AcceptedSamples: r.accepted, DiscardedSamples: r.discarded, ClockSuspect: r.stepRejected, StepRejected: r.stepRejected, StepRejections: r.stepRejections}
+	s.Source = r.lastSource
+	if !r.lastSourceAt.IsZero() {
+		s.SourceAge = now.Sub(r.lastSourceAt)
+	}
 	if s.Quality != TimeUnsynced {
 		return s
 	}

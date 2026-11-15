@@ -13,6 +13,7 @@ import (
 
 	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
+	"github.com/outpostos/OutpostNet/pkg/state"
 )
 
 // Agent manages QUIC tunnels and cross-region service bridging.
@@ -33,8 +34,10 @@ type Agent struct {
 	healthAddr  net.Addr
 	metricsAddr net.Addr
 
-	observationAddr string
-	observation     *Observation
+	observationAddr  string
+	observation      *Observation
+	reference        *state.TimeReference
+	timeSourceConfig state.OSTimeSourceConfig
 }
 
 // New creates a new Agent.
@@ -55,6 +58,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.cancel = cancel
 	a.mu.Unlock()
 	defer cancel()
+
+	reference, stopTime, err := state.NewSystemTimeReference(ctx, state.TimeReferenceConfig{}, a.timeSourceConfig)
+	if err != nil {
+		return fmt.Errorf("start time reference: %w", err)
+	}
+	defer stopTime()
+	a.mu.Lock()
+	a.reference = reference
+	a.mu.Unlock()
 
 	a.logger.Info("agent starting",
 		"tunnels", len(a.cfg.Tunnels),
@@ -100,9 +112,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	observationAddr := a.observationAddr
 	a.mu.Unlock()
 	obs := StartObservation(ctx, ObservationConfig{
-		Addr:      observationAddr,
-		NodeID:    a.cfg.NodeID,
-		Component: observation.ComponentNet,
+		Addr:          observationAddr,
+		NodeID:        a.cfg.NodeID,
+		Component:     observation.ComponentNet,
+		TimeReference: reference,
 	}, a.tunnels, a.logger)
 	defer obs.Wait()
 	defer cancel()
@@ -121,6 +134,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.NodeID != "" {
 		directory := NewPeerDirectory(a.cfg.NodeID, a.tunnels, a.logger)
 		a.mgmtServer = NewManagementServer(a.cfg.Management.SocketPath, directory, a.logger)
+		a.mgmtServer.timeReference = reference
 		if err := a.mgmtServer.Start(ctx); err != nil {
 			return fmt.Errorf("start management server: %w", err)
 		}

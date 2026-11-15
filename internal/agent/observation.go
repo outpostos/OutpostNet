@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/outpostos/OutpostNet/internal/observation"
+	"github.com/outpostos/OutpostNet/pkg/state"
 	"github.com/outpostos/OutpostNet/pkg/tunnel"
 )
 
@@ -25,8 +26,9 @@ type ObservationConfig struct {
 	// Addr is the loopback listen address; empty disables observation.
 	Addr string
 	// NodeID is the stable node identity; empty disables observation.
-	NodeID    string
-	Component observation.Component
+	NodeID        string
+	Component     observation.Component
+	TimeReference *state.TimeReference
 }
 
 // StartObservation starts reporting tm's client tunnels until ctx is done.
@@ -49,6 +51,13 @@ func StartObservation(ctx context.Context, cfg ObservationConfig, tm *TunnelMana
 		Component: cfg.Component,
 		Logger:    logger,
 	})}
+	if cfg.TimeReference != nil {
+		o.wg.Add(1)
+		go func() {
+			defer o.wg.Done()
+			o.Reporter.RunTimeSampler(ctx, cfg.TimeReference)
+		}()
+	}
 	if tm != nil {
 		notifier := observation.NewNotifier()
 		tm.SetLinkObserver(notifier.Notify)
