@@ -13,9 +13,6 @@ import (
 )
 
 func runDirectoryObservation(ctx context.Context, obs *agent.Observation, dir *meshdirectory.Directory) {
-	notifier := observation.NewNotifier()
-	unsubscribe := dir.Subscribe(notifier.Notify)
-	defer unsubscribe()
 	ticker := time.NewTicker(observation.DefaultSampleInterval)
 	defer ticker.Stop()
 	for {
@@ -23,7 +20,6 @@ func runDirectoryObservation(ctx context.Context, obs *agent.Observation, dir *m
 		select {
 		case <-ctx.Done():
 			return
-		case <-notifier.C():
 		case <-ticker.C:
 		}
 	}

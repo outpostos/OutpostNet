@@ -78,8 +78,10 @@ contain upstream response text or credentials and is never serialized here.
 
 When the host has a directory and observation is enabled, it samples these
 counters as the existing **109 `MetricSample`** events on the
-`COMPONENT_OUTPOSTSERVICE` stream. Sampling runs initially, on directory
-notifications, and at least every second while the process is scheduled.
+`COMPONENT_OUTPOSTSERVICE` stream. Sampling runs initially and once per second while the process is scheduled.
+Directory notifications do not trigger extra samples: counter increments between
+ticks are coalesced into the next cumulative value, including rejection and expiry
+counters. The management endpoint still reports current values immediately.
 The existing bounded log, slow-subscriber and gap behavior applies. Metrics
 are events; the observation Snapshot has no generic metric field.
 

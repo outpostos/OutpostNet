@@ -284,3 +284,37 @@ func TestDirectoryManagementRejectsForgedWriters(t *testing.T) {
 			len(v.Leases) == 1 && v.Leases[0].State == "valid" && v.Leases[0].Seq == 7 && v.Leases[0].Age != nil && *v.Leases[0].Age < 5
 	})
 }
+
+// A burst of directory deltas must not emit a full metric set per delta.
+func TestDirectoryObservationCoalescesBurst(t *testing.T) {
+	mesh := newFakeMesh(t)
+	cfg := logicalNode(t, "node-a", freeAddr(t), mesh.url(), nil)
+	host := startObservedHost(t, validated(t, cfg), "127.0.0.1:0", &logBuffer{})
+	client := unixHTTP(cfg.Management.SocketPath)
+	defer client.CloseIdleConnections()
+	waitFor(t, 5*time.Second, "directory synced", func() bool { return readDirectory(t, client).Synced })
+	sub, err := observationtest.Subscribe(context.Background(), observationURL(t, host), observationv1alpha1.Component_COMPONENT_OUTPOSTSERVICE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	for i := range 100 {
+		publishDirectoryRecord(t, mesh, leaseRecord("node-c", "node-b", uint64(i+1)))
+		time.Sleep(time.Millisecond)
+	}
+	waitFor(t, 5*time.Second, "all rejections counted", func() bool { return readDirectory(t, client).Stats.WriterRejected == 100 })
+	mustEvent(t, sub, "coalesced counter", func(e *observationv1alpha1.Event) bool {
+		return e.GetMetricSample().GetName() == "service_directory_writer_rejected_total" && e.GetMetricSample().GetValue() == 100
+	})
+	var samples []*observationv1alpha1.Event
+	for _, e := range sub.Events() {
+		if e.GetMetricSample().GetName() == "service_directory_writer_rejected_total" {
+			samples = append(samples, e)
+		}
+	}
+	for i := 1; i < len(samples); i++ {
+		if elapsed := samples[i].GetNodeTime().AsTime().Sub(samples[i-1].GetNodeTime().AsTime()); elapsed < 900*time.Millisecond {
+			t.Fatalf("counter samples emitted %s apart during burst, want periodic coalescing", elapsed)
+		}
+	}
+}
