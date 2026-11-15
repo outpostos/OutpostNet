@@ -201,6 +201,10 @@ The config file uses the agent schema (`node_id`, `tunnels`, `exports`, `imports
 | `persistence`, `metrics` | Accepted for schema compatibility, not used |
 | Unknown fields | Rejected |
 
+The Service management socket also serves read-only `GET /v1/directory`:
+directory counters and per-node lease validity, with no entity payloads.
+See [directory observation](directory-observation.md) for fields and metrics.
+
 Runtime changes: export `local_addr` add/change/remove applies in place when the config file
 changes (`--watch-interval`, default 5s). `node_id`, tunnels, entries, auth, TLS, management,
 `health_addr`, `peers` and `mesh` require a restart (the watcher logs a warning; `--node-id` /

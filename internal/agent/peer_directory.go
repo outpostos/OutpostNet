@@ -154,12 +154,13 @@ func statusFromConnState(state tunnel.ConnState) string {
 }
 
 type ManagementServer struct {
-	socketPath    string
-	directory     *PeerDirectory
-	logger        *slog.Logger
-	server        *http.Server
-	listener      net.Listener
-	timeReference *state.TimeReference
+	socketPath       string
+	directory        *PeerDirectory
+	logger           *slog.Logger
+	server           *http.Server
+	listener         net.Listener
+	timeReference    *state.TimeReference
+	readOnlyHandlers map[string]http.HandlerFunc
 }
 
 func NewManagementServer(socketPath string, directory *PeerDirectory, logger *slog.Logger) *ManagementServer {
@@ -167,10 +168,17 @@ func NewManagementServer(socketPath string, directory *PeerDirectory, logger *sl
 		logger = slog.Default()
 	}
 	return &ManagementServer{
-		socketPath: socketPath,
-		directory:  directory,
-		logger:     logger,
+		socketPath:       socketPath,
+		directory:        directory,
+		logger:           logger,
+		readOnlyHandlers: make(map[string]http.HandlerFunc),
 	}
+}
+
+// HandleReadOnly adds a host-owned local status endpoint. Call before Start.
+// Only GET (and HTTP's implicit HEAD) is registered on the Unix socket.
+func (ms *ManagementServer) HandleReadOnly(path string, handler http.HandlerFunc) {
+	ms.readOnlyHandlers[path] = handler
 }
 
 func (ms *ManagementServer) Start(ctx context.Context) error {
@@ -190,6 +198,9 @@ func (ms *ManagementServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/peers", ms.handlePeers(ctx))
 	ms.registerTimeStatus(mux)
+	for path, handler := range ms.readOnlyHandlers {
+		mux.HandleFunc("GET "+path, handler)
+	}
 	mux.HandleFunc("GET /v1/security", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ms.directory.tunnels.SecurityStatus())

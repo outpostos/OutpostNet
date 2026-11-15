@@ -1,13 +1,33 @@
 package servicehost
 
 import (
+	"context"
 	"errors"
 	"net"
+	"time"
 
 	"github.com/outpostos/OutpostNet/internal/agent"
+	"github.com/outpostos/OutpostNet/internal/meshdirectory"
 	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/service"
 )
+
+func runDirectoryObservation(ctx context.Context, obs *agent.Observation, dir *meshdirectory.Directory) {
+	notifier := observation.NewNotifier()
+	unsubscribe := dir.Subscribe(notifier.Notify)
+	defer unsubscribe()
+	ticker := time.NewTicker(observation.DefaultSampleInterval)
+	defer ticker.Stop()
+	for {
+		obs.Reporter.UpdateDirectory(dir.Status())
+		select {
+		case <-ctx.Done():
+			return
+		case <-notifier.C():
+		case <-ticker.C:
+		}
+	}
+}
 
 // EnableObservation makes Run serve the OutpostRange observation API on the
 // loopback addr (stream component OUTPOSTSERVICE). Call before Run. Any

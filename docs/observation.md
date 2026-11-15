@@ -58,6 +58,11 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
 
 ## 3. Service 层报告的本地事实（`service_access_changed` 116、快照字段 20）
 
+NET-15 adds directory counters and lease validity as existing 109 `MetricSample`
+events on the Service stream. The local management socket also exposes
+`GET /v1/directory`; metric names, field meanings and V2-RANGE-3 collection are
+documented in [directory-observation.md](directory-observation.md).
+
 来源：`outpostnet-service` 的每个稳定入口（`imports[]`）。每个应用连接到达入口时，入口按当前隧道状态打开一条流——
 这就是“经入口的真实连接”。观测包装入口使用的 `StreamOpener` 与返回的流，只读结果，不改变转发。
 

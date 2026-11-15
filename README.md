@@ -222,6 +222,7 @@ own repositories and report their own replication status.
 - [Service Layer (outpostnet-service)](docs/service-layer.md)
 - [Migrating agent imports/exports to outpostnet-service](docs/service-migration.md)
 - [Observation producers (Range)](docs/observation.md)
+- [Service directory counters and lease validity](docs/directory-observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
 - [Shared time reference and replication status clock](docs/time-reference.md)
 - [Local clock alarm and offline state reset](docs/clock-reset.md)
