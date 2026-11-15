@@ -125,7 +125,9 @@ imports:
 
 - Built on QUIC (quic-go implementation), with TLS 1.3 encryption
 - Native stream multiplexing — one QUIC connection carries multiple service streams
-- Optional token authentication (both ends configure the same `auth.token`)
+- Tunnel tokens are optional; configured group credentials enable mutual TLS
+- Embedded state/delivery HTTP adapters support `token`, `token+cert` and `cert`
+  modes with certificate-bound identity ([HTTP authentication](http-node-auth.md))
 - Automatic recovery on network changes (QUIC protocol feature)
 
 ### Peer Directory Management API

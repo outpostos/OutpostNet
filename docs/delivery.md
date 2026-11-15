@@ -234,7 +234,10 @@ both loops, then close both boxes. Report errors through the host logger; repeat
 unknown/unreachable destinations are observable failures, never successful
 admission or message deletion. The HTTP client defaults to a 10-second timeout
 (and adds that default to a supplied client with no timeout), honors context
-cancellation, and refuses redirects. The host owns HTTP server timeouts and TLS.
+cancellation, and refuses redirects. The host owns HTTP server timeouts and the
+listener. For certificate modes,
+use the [HTTP node authentication setup](http-node-auth.md) to install mutual TLS
+and configure both adapters; default token mode retains the legacy boundary.
 
 `go test -run '^ExampleHTTPTransport$' ./pkg/delivery` executes the complete
 bidirectional example: two independent durable nodes, HTTP acceptance,
@@ -256,19 +259,26 @@ protocol 3.0. A mismatched request major returns 426; an incompatible response,
 wrong receiver node, malformed JSON, result ID/order/length or code rejects the
 whole acknowledgement. No payload is released on transport failure.
 
-Authentication matches the state HTTP boundary: required Bearer token,
-`X-Outpost-Node-ID` equal to request `source`, no self requests. Every envelope's
+Authentication matches the state HTTP boundary: `AuthMode=token` (default) requires
+a Bearer token; `token+cert` requires both token and group certificate, while `cert`
+requires only the group certificate. Certificate modes require HTTPS and bind
+source/destination and responder metadata to authenticated node IDs. See
+[setup and counters](http-node-auth.md). In all modes,
+`X-Outpost-Node-ID` must equal request `source`, and self requests are refused.
+Every envelope's
 source and every receipt's `receiver_node_id` must match that source. These
-checks run over the entire batch before any persistence. Wrong tokens return
+checks, plus destination validation for every envelope and receipt, run over the
+entire batch before any persistence. Wrong tokens return
 401; identity mismatches return 403. A handler can expose only Inbox or Outbox;
 a request needing an absent box returns 503. Persistence failures return 500
 with a generic message, never an acknowledgement. A mixed batch may commit one
 box before the other fails; resending is safe because both paths deduplicate.
 
-As with state replication, a shared token authenticates membership, and node
-identity is self-declared: any token holder can claim a different node ID. This
-does not implement per-node credentials or cross-group authorization. Reuse the
-host's TLS/protected listener; plain HTTP does not provide confidentiality.
+In token mode, a shared token authenticates membership and node identity is
+self-declared: any token holder can claim a different node ID. Certificate modes
+provide per-node authentication and reject missing/foreign group certificates.
+Cross-group authorization remains outside this phase. Plain HTTP in legacy token
+mode does not provide confidentiality.
 Errors never include remote response bodies, bearer tokens or complete peer
 URLs. HTTP client errors use the same credential redaction utility as state.
 The library adds no per-request logger; default Run logging receives those

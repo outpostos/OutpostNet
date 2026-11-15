@@ -1,6 +1,10 @@
 # Configuration Reference
 
-This document covers all configuration options for OutpostNet.
+This document covers the binary configuration options for OutpostNet.
+Embedding hosts configure the state/delivery HTTP adapters separately with
+`AuthMode`, `Identity`, and optional `AuthToken`; see
+[HTTP node authentication](http-node-auth.md). These are library settings, not
+new agent/service YAML fields.
 
 > **v1.0 users**: Most scenarios only need `outpostnet-agent` — see the first section.
 

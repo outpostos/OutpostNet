@@ -289,7 +289,11 @@ Policies:
 
 HTTP adapter:
 
-- Handlers require a non-empty bearer token and `X-Outpost-Node-ID`.
+- `AuthMode` selects `token` (default), `token+cert` (both required), or `cert`.
+  Certificate modes require HTTPS mutual TLS and bind request/response node IDs
+  to group certificates. All modes retain `X-Outpost-Node-ID` consistency checks.
+  See [HTTP node authentication](../../docs/http-node-auth.md) for host setup,
+  migration, fail-closed configuration and visible counters.
 - Request body size is bounded by `MaxRequestBytes` (default 1 MiB).
 - Client response body size is bounded by `MaxResponseBytes` (default 1 MiB) for
   both success and error responses; oversized responses fail instead of being
