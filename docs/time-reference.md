@@ -10,8 +10,10 @@ central service. Local writes continue when time is unknown.
 Create one reference per host process, then share it across keyspaces and delivery:
 
 ```go
-reference, err := state.NewTimeReference(state.TimeReferenceConfig{})
+reference, stopTime, err := state.NewSystemTimeReference(ctx,
+    state.TimeReferenceConfig{}, state.OSTimeSourceConfig{})
 if err != nil { return err }
+defer stopTime() // cancel and join the OS source poller
 store, err := state.NewDurableStore(state.DurableStoreConfig{
     Dir: stateDir, NodeID: nodeID, TimeReference: reference,
     TombstoneRetention: retention,
@@ -31,8 +33,10 @@ The explicit store `TimeReference` option also attaches gossip sampling and the
 independent retention clock automatically. Configure `PhysicalClock` or
 `TimeReference`, and delivery `Clock` or `TimeReference`, exclusively. Without a
 reference, existing injectable clocks keep their behavior; handshake quality is
-`UNSYNCED`. There is no implicit global clock or automatic product-host wiring.
-Mesh/Let integration belongs to V2-MESH-5 / V2-LET-4.
+`UNSYNCED`. There is no implicit global clock. `NewSystemTimeReference` supplies
+the production process reference; pass that same pointer to Mesh/Let clock
+callbacks and stores. Consumers must upgrade their Net dependency and select this
+constructor; this Net-only change does not change their dependency pins.
 
 ### Replication status timestamps (NET-14)
 
@@ -64,13 +68,13 @@ non-increasing timestamps; use the catch-up flags for exchange-order facts.
 Physical handshake samples, the wire protocol and durable formats are unchanged.
 Embedding hosts opt in; this ticket does not upgrade Mesh/Let dependency pins.
 
-The host's trusted time-source adapter (for example, a chrony monitor) periodically
-calls `reference.UpdateSource(state.TimeSourceStatus{Synchronized: true,
-Uncertainty: measuredErrorBound})`. Report source loss with an unsynchronized
-observation. Net derives quality; it does not infer synchronization from successful
-replication or the system clock's apparent date. No OS-specific source probe is
-installed by this library. Hosts must supply honest uncertainty and an oscillator
-drift bound suitable for their hardware.
+The production constructor polls Linux chrony or systemd-timesyncd and calls
+`UpdateSource`; see [OS source configuration, mapping and evidence](os-time-source.md).
+`NewTimeReference` remains the goroutine-free constructor for injected clocks or
+custom adapters. Those adapters call `UpdateSource` with an honest error bound and
+report loss with an unsynchronized observation. Net does not infer synchronization
+from successful replication or the system clock's apparent date. Hosts configure
+an oscillator drift bound suitable for their hardware.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -157,9 +161,10 @@ responsible for them. A wrong-clock future envelope is not repaired here; existi
 MaxExpiry admission rules apply. The state reset command leaves delivery untouched.
 
 `TimeStatus()` reports quality, unknown/reference selection, local self-suspicion,
-system/reference milliseconds, and accepted/discarded sample counters.
+system/reference milliseconds, accepted/discarded sample counters, the latest
+`Source` observation and its monotonic `SourceAge`.
 Store/engine `ClockStatus()` and `ReplicationStatus.Clocks` additionally expose local
-quality/unknown/reference fields alongside the existing per-writer entry and
+quality/unknown/reference fields and `TimeSource` alongside the existing per-writer entry and
 per-peer horizon counters. Hosts poll these snapshots and map transitions to their
 observation event stream and node leases; this library adds no Range dependency.
 Self-suspicion from a reference clears when a valid local source returns. Existing

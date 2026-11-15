@@ -119,6 +119,17 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
 - 不泄露凭据：`pkg/state` 的全部日志与导出 API 返回的错误只以“密码已遮蔽”的 peer 地址出现；任何 `Syncer` 的每 peer 错误在返回、记日志、进状态前去掉地址里的密码；`HTTPSyncer` 把 bearer token 与对端回显的 URL 密码替换为 `[REDACTED]`。脱敏收敛在 `pkg/state/redact.go`。
 - `pkg/state` 不依赖 OutpostRange；映射到 proto 由宿主完成。
 
+### OS time-source observations (V2-NET-1d)
+
+Agents sample their shared `TimeReference` once a second using the existing
+`MetricSample` event body. `net_time_quality` has value 1 and labels `quality`,
+`source`, `source_state`; synchronized source observations additionally report
+`net_time_source_uncertainty_seconds`, and a measured signed offset reports
+`net_time_source_offset_seconds`. Unknown measurements are omitted. These samples
+belong to the event timeline, not Snapshot fields. No Range contract upgrade is
+needed. Public `TimeStatus.Source` and store/engine `TimeSource` provide the same
+source facts for embedding hosts; see [source mapping and tests](os-time-source.md).
+
 ## 5. 快照与“只发变化”
 
 - 观测状态由一个 `Reporter` 持有：每个键（Net：`peer_node_id` 或 `peer_address`；Service：`service_name`）一份

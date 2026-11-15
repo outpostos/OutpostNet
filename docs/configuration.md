@@ -1,5 +1,10 @@
 # Configuration Reference
 
+OS time-source defaults, the embedding configuration API, and the mapping to
+`SYNCED` / `HOLDOVER` / `UNSYNCED` are documented in
+[OS time source](os-time-source.md). Agents expose `GET /v1/time` on their
+management socket when `node_id` is configured.
+
 This document covers the binary configuration options for OutpostNet.
 Embedding hosts configure the state/delivery HTTP adapters separately with
 `AuthMode`, `Identity`, and optional `AuthToken`; see
