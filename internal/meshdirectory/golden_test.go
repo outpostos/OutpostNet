@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/outpostos/OutpostNet/pkg/service"
 )
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -24,8 +22,9 @@ func fixture(t *testing.T, name string) string {
 }
 
 // The golden transcripts are real gateway output: the local decoder must read
-// them exactly as Mesh writes them.
-func TestGoldenMeshStream(t *testing.T) {
+// them exactly as Mesh writes them. Pre-originNodeId gateways are rejected
+// by S2; transition registrations must be read through an upgraded gateway.
+func TestGoldenMeshStreamWithoutWriterIsRejected(t *testing.T) {
 	recordedAt := time.Date(2026, 11, 13, 7, 43, 34, 0, time.UTC)
 	s := newSSEServer(t,
 		func(r *http.Request, send func(string)) {
@@ -45,15 +44,10 @@ func TestGoldenMeshStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, fr := d.Instances("echo")
-	if uids(got) != "uid-b/READY,uid-c/READY" || !fr.Synced {
+	if len(got) != 0 || !fr.Synced {
 		t.Fatalf("after golden stream = %v %+v", uids(got), fr)
 	}
-	b := got[0]
-	want := service.Instance{ServiceName: "echo", InstanceID: "uid-b", NodeID: "node-a", Endpoints: []service.Endpoint{{Protocol: "tcp", Port: 18080}}, Health: service.HealthReady, Live: true, Version: "1.0.0"}
-	if b.ServiceName != want.ServiceName || b.NodeID != want.NodeID || b.Version != want.Version || len(b.Endpoints) != 1 || b.Endpoints[0] != want.Endpoints[0] || b.EffectiveWeight() != 100 || b.Expiry.IsZero() {
-		t.Fatalf("uid-b = %+v", b)
-	}
-	if st := d.Stats(); st.Malformed != 0 || st.Snapshots != 1 || st.Deltas != 4 {
+	if st := d.Stats(); st.Malformed != 0 || st.Snapshots != 1 || st.Deltas != 4 || st.WriterRejected != 5 {
 		t.Fatalf("stats = %+v", st)
 	}
 	// Reconnect: the gateway answered the stale cursor with a fresh snapshot
@@ -61,10 +55,10 @@ func TestGoldenMeshStream(t *testing.T) {
 	if _, err := d.follow(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := d.Instances("echo"); uids(got) != "uid-b/READY" {
+	if got, _ := d.Instances("echo"); len(got) != 0 {
 		t.Fatalf("after fallback = %v", uids(got))
 	}
-	if st := d.Stats(); st.Malformed != 0 || st.Snapshots != 2 || st.Deltas != 5 {
+	if st := d.Stats(); st.Malformed != 0 || st.Snapshots != 2 || st.Deltas != 5 || st.WriterRejected != 7 {
 		t.Fatalf("stats after fallback = %+v", st)
 	}
 }

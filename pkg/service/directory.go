@@ -69,8 +69,9 @@ type Instance struct {
 	Health Health
 	// Live is false once the registration has been withdrawn.
 	Live bool
-	// Expiry is the registration's TTL deadline. The zero value means the
-	// registration carries no expiry.
+	// Expiry is a legacy registration's wall-clock deadline. Lease-backed
+	// adapters leave it zero and enforce local monotonic liveness before returning
+	// the candidate; Select still enforces readiness and reachability.
 	Expiry  time.Time
 	Version string
 }
@@ -99,7 +100,7 @@ type Freshness struct {
 	// snapshot from its source since it started.
 	Synced bool
 	// Stale is true while the answer comes from a cold cache or the source
-	// connection is down. Instances are still filtered by TTL as usual.
+	// connection is down. Instances are still filtered by the adapter's lease or legacy TTL rules.
 	Stale bool
 	// AsOf is when the answer was last confirmed by the source.
 	AsOf time.Time
@@ -110,7 +111,8 @@ type Freshness struct {
 // pkg/service never reaches the registry directly.
 type Directory interface {
 	// Instances returns a snapshot of every known instance of service,
-	// including unhealthy and expired ones; callers filter with Select.
+	// potentially including unhealthy or expired ones; callers filter with Select.
+	// Adapters must enforce liveness that Select cannot evaluate, such as leases.
 	Instances(service string) ([]Instance, Freshness)
 	// Subscribe registers fn to be called after any directory change. fn
 	// must not block. The returned function cancels the subscription.

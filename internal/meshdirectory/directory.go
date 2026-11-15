@@ -1,23 +1,11 @@
 // Package meshdirectory implements service.Directory over the local
 // OutpostMesh gateway (OutpostOS ADR-0003 D2).
 //
-// It follows GET /v1alpha1/entities:stream (Server-Sent Events) filtered to
-// entities carrying a ServiceRegistration, decodes the JSON with local
-// minimal structs (OutpostNet must not import OutpostMesh: Mesh already
-// depends on Net), and keeps an in-memory directory:
-//
-//   - A snapshot (SNAPSHOT events) is collected aside and replaces the
-//     directory atomically on SNAPSHOT_COMPLETE.
-//   - DELTA events update one entity; DELETED, EXPIRED and is_live=false
-//     remove it.
-//   - Disconnects reconnect with capped exponential backoff and the last
-//     confirmed cursor; Mesh answers an unusable cursor with a fresh
-//     snapshot, which is handled like the first one.
-//   - Every instance keeps its expiry_time and is dropped locally when it
-//     passes, without waiting for Mesh.
-//   - A cold-start cache file holds the last directory. It is loaded at
-//     start and marked stale until the first snapshot completes; cached
-//     instances still expire by their TTL.
+// It follows the local Mesh SSE stream for registrations and node leases.
+// Snapshots replace both atomically; resumed deltas only renew leases when
+// their sequence advances. Lease expiry hides instances without deleting them,
+// allowing resolution to recover after partitions without re-registration.
+// Legacy registrations retain their wall-clock expiry for one transition version.
 package meshdirectory
 
 import (
@@ -43,7 +31,7 @@ import (
 
 const (
 	streamPath   = "/v1alpha1/entities:stream"
-	streamFilter = "ENTITY_COMPONENT_SERVICE_REGISTRATION"
+	streamFilter = "urn:outpostos:"
 
 	defaultInitialBackoff = 100 * time.Millisecond
 	defaultMaxBackoff     = 5 * time.Second
@@ -53,7 +41,7 @@ const (
 
 	// CacheFileName is the cold-start cache inside the host's data dir.
 	CacheFileName = "service-directory.json"
-	cacheVersion  = 1
+	cacheVersion  = 2
 )
 
 // Config configures a Directory.
@@ -70,7 +58,17 @@ type Config struct {
 	CacheInterval time.Duration
 	// SweepInterval is how often expired instances are dropped.
 	SweepInterval time.Duration
-	Now           func() time.Time
+	// Now supplies wall time for legacy expiry and diagnostics only.
+	Now func() time.Time
+	// MonotonicNow must retain time.Time's monotonic reading (default time.Now).
+	// It is independent of Now and any platform wall-time reference.
+	MonotonicNow func() time.Time
+	// LeaseTTL defaults to 30s. LeaseTTLByLinkClass overrides it for the
+	// class returned by NodeLinkClass. Unknown classes use LeaseTTL.
+	LeaseTTL            time.Duration
+	LeaseTTLByLinkClass map[string]time.Duration
+	// NodeLinkClass must be concurrency safe and must not call Directory methods.
+	NodeLinkClass func(nodeID string) string
 	Logger        *slog.Logger
 }
 
@@ -81,6 +79,8 @@ type Stats struct {
 	Deltas            uint64
 	Malformed         uint64
 	Expired           uint64
+	LeaseExpired      uint64
+	WriterRejected    uint64
 	CacheWrites       uint64
 	CacheWriteErrors  uint64
 	LastResumeCursor  string
@@ -95,7 +95,8 @@ type Directory struct {
 	base   *url.URL
 
 	mu        sync.RWMutex
-	entities  map[string]service.Instance // by entity_id
+	entities  map[string]registration // by entity_id
+	leases    map[string]nodeLease    // by hosting node_id
 	synced    bool
 	connected bool
 	stale     bool
@@ -104,9 +105,10 @@ type Directory struct {
 	dirty     bool
 	lastSaved time.Time
 
-	subMu  sync.Mutex
-	subs   map[int]func()
-	nextID int
+	cacheMu sync.Mutex // serialize atomic cache replacements
+	subMu   sync.Mutex
+	subs    map[int]func()
+	nextID  int
 
 	statsMu sync.Mutex
 	stats   Stats
@@ -138,6 +140,23 @@ func New(cfg Config) (*Directory, error) {
 	if cfg.SweepInterval <= 0 {
 		cfg.SweepInterval = defaultSweepInterval
 	}
+	if cfg.LeaseTTL < 0 {
+		return nil, errors.New("meshdirectory: LeaseTTL must be positive")
+	}
+	if cfg.LeaseTTL == 0 {
+		cfg.LeaseTTL = 30 * time.Second
+	}
+	ttls := make(map[string]time.Duration, len(cfg.LeaseTTLByLinkClass))
+	for class, ttl := range cfg.LeaseTTLByLinkClass {
+		if class == "" || ttl <= 0 {
+			return nil, errors.New("meshdirectory: link classes need a name and positive LeaseTTL")
+		}
+		ttls[class] = ttl
+	}
+	cfg.LeaseTTLByLinkClass = ttls
+	if cfg.MonotonicNow == nil {
+		cfg.MonotonicNow = time.Now
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -149,7 +168,8 @@ func New(cfg Config) (*Directory, error) {
 		cfg:      cfg,
 		logger:   logger.With("component", "meshdirectory"),
 		base:     base,
-		entities: map[string]service.Instance{},
+		entities: map[string]registration{},
+		leases:   map[string]nodeLease{},
 		stale:    true,
 		subs:     map[int]func(){},
 	}
@@ -162,7 +182,7 @@ func New(cfg Config) (*Directory, error) {
 // Instances implements service.Directory. Expired instances are never
 // returned, even between sweeps.
 func (d *Directory) Instances(name string) ([]service.Instance, service.Freshness) {
-	now := d.cfg.Now()
+	now, mono := d.cfg.Now(), d.cfg.MonotonicNow()
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var out []service.Instance
@@ -170,10 +190,10 @@ func (d *Directory) Instances(name string) ([]service.Instance, service.Freshnes
 		if in.ServiceName != name {
 			continue
 		}
-		if !in.Expiry.IsZero() && !now.Before(in.Expiry) {
+		if !d.valid(in, now, mono) {
 			continue
 		}
-		out = append(out, cloneInstance(in))
+		out = append(out, cloneInstance(in.Instance))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].InstanceID < out[j].InstanceID })
 	return out, service.Freshness{Synced: d.synced, Stale: d.stale, AsOf: d.asOf}
@@ -182,11 +202,11 @@ func (d *Directory) Instances(name string) ([]service.Instance, service.Freshnes
 // ServiceNames returns the names of every service with at least one
 // unexpired instance, sorted.
 func (d *Directory) ServiceNames() []string {
-	now := d.cfg.Now()
+	now, mono := d.cfg.Now(), d.cfg.MonotonicNow()
 	d.mu.RLock()
 	seen := map[string]struct{}{}
 	for _, in := range d.entities {
-		if !in.Expiry.IsZero() && !now.Before(in.Expiry) {
+		if !d.valid(in, now, mono) {
 			continue
 		}
 		seen[in.ServiceName] = struct{}{}
@@ -299,7 +319,7 @@ func (d *Directory) maintain(ctx context.Context) {
 			return
 		case <-t.C:
 			if n := d.sweep(); n > 0 {
-				d.count(func(s *Stats) { s.Expired += uint64(n) })
+
 				d.notify()
 			}
 			d.saveCacheIfDirty(false)
@@ -308,13 +328,24 @@ func (d *Directory) maintain(ctx context.Context) {
 }
 
 func (d *Directory) sweep() int {
-	now := d.cfg.Now()
+	now, mono := d.cfg.Now(), d.cfg.MonotonicNow()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	n := 0
 	for id, in := range d.entities {
-		if !in.Expiry.IsZero() && !now.Before(in.Expiry) {
+		if in.Incarnation == "" && !in.Expiry.IsZero() && !now.Before(in.Expiry) {
 			delete(d.entities, id)
+			n++
+		}
+	}
+	if n > 0 {
+		d.count(func(s *Stats) { s.Expired += uint64(n) })
+	}
+	for node, lease := range d.leases {
+		if !lease.expired && mono.Sub(lease.Seen) > d.leaseTTL(node) {
+			lease.expired = true
+			d.leases[node] = lease
+			d.count(func(s *Stats) { s.LeaseExpired++ })
 			n++
 		}
 	}
@@ -345,7 +376,7 @@ func (d *Directory) follow(ctx context.Context) (progressed bool, err error) {
 	u := *d.base
 	u.Path = strings.TrimRight(u.Path, "/") + streamPath
 	q := url.Values{}
-	q.Set("filter.requiredComponents", streamFilter)
+	q.Set("filter.entityIdPrefix", streamFilter)
 	if cursor != "" {
 		q.Set("resumeCursor", cursor)
 	}
@@ -381,7 +412,7 @@ func (d *Directory) follow(ctx context.Context) (progressed bool, err error) {
 		d.notify()
 	}
 
-	var pending map[string]service.Instance // non-nil while a snapshot is being collected
+	var pending *snapshot // non-nil while a snapshot is being collected
 	r := bufio.NewReaderSize(resp.Body, 64<<10)
 	var event, data strings.Builder
 	for {
@@ -450,17 +481,20 @@ type wireResponse struct {
 type wireEntity struct {
 	EntityID            string                   `json:"entityId"`
 	IsLive              *bool                    `json:"isLive"`
+	OriginNodeID        string                   `json:"originNodeId"`
+	NodeLease           *wireNodeLease           `json:"nodeLease"`
 	ExpiryTime          string                   `json:"expiryTime"`
 	ServiceRegistration *wireServiceRegistration `json:"serviceRegistration"`
 }
 
 type wireServiceRegistration struct {
-	ServiceName string         `json:"serviceName"`
-	InstanceID  string         `json:"instanceId"`
-	NodeID      string         `json:"nodeId"`
-	Endpoints   []wireEndpoint `json:"endpoints"`
-	Version     string         `json:"version"`
-	HealthState string         `json:"healthState"`
+	RegistrarIncarnation string         `json:"registrarIncarnation"`
+	ServiceName          string         `json:"serviceName"`
+	InstanceID           string         `json:"instanceId"`
+	NodeID               string         `json:"nodeId"`
+	Endpoints            []wireEndpoint `json:"endpoints"`
+	Version              string         `json:"version"`
+	HealthState          string         `json:"healthState"`
 }
 
 type wireEndpoint struct {
@@ -469,90 +503,6 @@ type wireEndpoint struct {
 		Port     uint32 `json:"port"`
 	} `json:"port"`
 	Weight *uint32 `json:"weight"`
-}
-
-// handle applies one SSE event and returns the snapshot-in-progress map.
-func (d *Directory) handle(event, data string, pending map[string]service.Instance) map[string]service.Instance {
-	if event == "error" {
-		d.count(func(s *Stats) { s.Malformed++ })
-		d.logger.Warn("mesh stream reported an error event", "data", data)
-		return pending
-	}
-	var msg wireResponse
-	if err := json.Unmarshal([]byte(data), &msg); err != nil {
-		d.malformed("undecodable event", err, data)
-		return pending
-	}
-	switch msg.Phase {
-	case "STREAM_PHASE_SNAPSHOT":
-		if pending == nil {
-			pending = map[string]service.Instance{}
-		}
-		if msg.Entity == nil {
-			d.malformed("snapshot event without entity", nil, data)
-			return pending
-		}
-		if in, ok, err := toInstance(msg.Entity); err != nil {
-			d.malformed("bad snapshot entity", err, data)
-		} else if ok {
-			pending[msg.Entity.EntityID] = in
-		}
-		return pending
-	case "STREAM_PHASE_SNAPSHOT_COMPLETE":
-		if pending == nil {
-			pending = map[string]service.Instance{}
-		}
-		d.mu.Lock()
-		d.entities = pending
-		d.synced = true
-		d.stale = false
-		d.cursor = msg.Cursor
-		d.dirty = true
-		d.mu.Unlock()
-		d.count(func(s *Stats) { s.Snapshots++ })
-		d.logger.Info("service directory snapshot applied", "instances", len(pending))
-		d.saveCacheIfDirty(true)
-		d.notify()
-		return nil
-	case "STREAM_PHASE_DELTA":
-		if pending != nil {
-			d.malformed("delta before snapshot completed", nil, data)
-			return pending
-		}
-		if msg.Entity == nil || msg.Entity.EntityID == "" {
-			d.malformed("delta without entity", nil, data)
-			return nil
-		}
-		remove := msg.EventType == "ENTITY_EVENT_TYPE_DELETED" || msg.EventType == "ENTITY_EVENT_TYPE_EXPIRED" ||
-			(msg.Entity.IsLive != nil && !*msg.Entity.IsLive)
-		var in service.Instance
-		keep := false
-		if !remove {
-			var err error
-			in, keep, err = toInstance(msg.Entity)
-			if err != nil {
-				d.malformed("bad delta entity", err, data)
-				return nil
-			}
-		}
-		d.mu.Lock()
-		if keep {
-			d.entities[msg.Entity.EntityID] = in
-		} else {
-			delete(d.entities, msg.Entity.EntityID)
-		}
-		if msg.Cursor != "" {
-			d.cursor = msg.Cursor
-		}
-		d.dirty = true
-		d.mu.Unlock()
-		d.count(func(s *Stats) { s.Deltas++ })
-		d.notify()
-		return nil
-	default:
-		d.malformed("unknown phase "+msg.Phase, nil, data)
-		return pending
-	}
 }
 
 func (d *Directory) malformed(what string, err error, data string) {
@@ -587,7 +537,7 @@ func toInstance(e *wireEntity) (service.Instance, bool, error) {
 	if in.InstanceID == "" {
 		in.InstanceID = e.EntityID
 	}
-	if e.ExpiryTime != "" {
+	if sr.RegistrarIncarnation == "" && e.ExpiryTime != "" {
 		t, err := time.Parse(time.RFC3339Nano, e.ExpiryTime)
 		if err != nil {
 			return service.Instance{}, false, fmt.Errorf("expiryTime: %w", err)
@@ -647,22 +597,25 @@ func cloneInstance(in service.Instance) service.Instance {
 // ── cold-start cache ─────────────────────────────────────────────────────────
 
 type cacheFile struct {
-	Version   int             `json:"version"`
-	SavedAt   time.Time       `json:"saved_at"`
-	Instances []cacheInstance `json:"instances"`
+	Version   int                  `json:"version"`
+	SavedAt   time.Time            `json:"saved_at"`
+	Instances []cacheInstance      `json:"instances"`
+	Leases    map[string]nodeLease `json:"leases,omitempty"`
 }
 
 type cacheInstance struct {
-	EntityID    string             `json:"entity_id"`
-	ServiceName string             `json:"service_name"`
-	InstanceID  string             `json:"instance_id"`
-	NodeID      string             `json:"node_id"`
-	Endpoints   []service.Endpoint `json:"endpoints"`
-	Weight      *uint32            `json:"weight,omitempty"`
-	Health      service.Health     `json:"health"`
-	Live        bool               `json:"live"`
-	Expiry      time.Time          `json:"expiry,omitempty"`
-	Version     string             `json:"version,omitempty"`
+	OriginNodeID string             `json:"origin_node_id"`
+	Incarnation  string             `json:"registrar_incarnation,omitempty"`
+	EntityID     string             `json:"entity_id"`
+	ServiceName  string             `json:"service_name"`
+	InstanceID   string             `json:"instance_id"`
+	NodeID       string             `json:"node_id"`
+	Endpoints    []service.Endpoint `json:"endpoints"`
+	Weight       *uint32            `json:"weight,omitempty"`
+	Health       service.Health     `json:"health"`
+	Live         bool               `json:"live"`
+	Expiry       time.Time          `json:"expiry,omitempty"`
+	Version      string             `json:"version,omitempty"`
 }
 
 func (d *Directory) loadCache() {
@@ -682,20 +635,29 @@ func (d *Directory) loadCache() {
 		return
 	}
 	for _, c := range f.Instances {
-		if c.EntityID == "" || c.ServiceName == "" {
+		if c.EntityID == "" || c.ServiceName == "" || c.NodeID == "" || c.OriginNodeID != c.NodeID || (c.Incarnation == "" && c.Expiry.IsZero()) {
 			continue
 		}
-		d.entities[c.EntityID] = service.Instance{
+		d.entities[c.EntityID] = registration{OriginNodeID: c.OriginNodeID, Incarnation: c.Incarnation, Instance: service.Instance{
 			ServiceName: c.ServiceName, InstanceID: c.InstanceID, NodeID: c.NodeID,
 			Endpoints: c.Endpoints, Weight: c.Weight, Health: c.Health, Live: c.Live,
 			Expiry: c.Expiry, Version: c.Version,
+		}}
+	}
+	for node, lease := range f.Leases {
+		if node == "" || lease.OriginNodeID != node || lease.Incarnation == "" || lease.Seq == 0 {
+			continue
 		}
+		lease.Seen = d.cfg.MonotonicNow()
+		d.leases[node] = lease
 	}
 	d.asOf = f.SavedAt
 	d.logger.Info("loaded stale service directory cache", "path", d.cfg.CachePath, "instances", len(d.entities), "saved_at", f.SavedAt)
 }
 
 func (d *Directory) saveCacheIfDirty(force bool) {
+	d.cacheMu.Lock()
+	defer d.cacheMu.Unlock()
 	if d.cfg.CachePath == "" {
 		return
 	}
@@ -705,10 +667,13 @@ func (d *Directory) saveCacheIfDirty(force bool) {
 		d.mu.Unlock()
 		return
 	}
-	f := cacheFile{Version: cacheVersion, SavedAt: now}
+	f := cacheFile{Version: cacheVersion, SavedAt: now, Leases: make(map[string]nodeLease, len(d.leases))}
+	for node, lease := range d.leases {
+		f.Leases[node] = lease
+	}
 	for id, in := range d.entities {
 		f.Instances = append(f.Instances, cacheInstance{
-			EntityID: id, ServiceName: in.ServiceName, InstanceID: in.InstanceID, NodeID: in.NodeID,
+			OriginNodeID: in.OriginNodeID, Incarnation: in.Incarnation, EntityID: id, ServiceName: in.ServiceName, InstanceID: in.InstanceID, NodeID: in.NodeID,
 			Endpoints: in.Endpoints, Weight: in.Weight, Health: in.Health, Live: in.Live,
 			Expiry: in.Expiry, Version: in.Version,
 		})

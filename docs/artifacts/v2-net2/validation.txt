@@ -1,0 +1,107 @@
+V2-NET-2 resumed validation; all paths omitted from recorded output.
+
+Final gates: PASS on macOS amd64 Go 1.26.1 and Linux amd64 Go 1.26.2.
+make fmt; go build ./...; make vet; GOFLAGS=-p=2 make test;
+GOOS=linux GOARCH=amd64 make build-agent; git diff --check.
+No tests excluded; normal race detector and ten-minute test timeout.
+Linux final temporary stores use SSD; macOS uses a short temporary path.
+
+macOS complete race suite
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-agent	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-agent/app	1.866s
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar/app	[no test files]
+ok  	github.com/outpostos/OutpostNet/deploy/docker	1.866s
+ok  	github.com/outpostos/OutpostNet/internal/agent	4.628s
+ok  	github.com/outpostos/OutpostNet/internal/controller/reconciler	3.103s
+ok  	github.com/outpostos/OutpostNet/internal/controller/webhook	2.145s
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	3.597s
+ok  	github.com/outpostos/OutpostNet/internal/observation	1.707s
+?   	github.com/outpostos/OutpostNet/internal/observation/observationtest	[no test files]
+?   	github.com/outpostos/OutpostNet/internal/peerredact	[no test files]
+ok  	github.com/outpostos/OutpostNet/internal/server	3.219s
+ok  	github.com/outpostos/OutpostNet/internal/servicehost	13.612s
+ok  	github.com/outpostos/OutpostNet/internal/sidecar	1.895s
+ok  	github.com/outpostos/OutpostNet/pkg/agentconfig	1.591s
+ok  	github.com/outpostos/OutpostNet/pkg/annotations	1.526s
+ok  	github.com/outpostos/OutpostNet/pkg/config	1.541s
+ok  	github.com/outpostos/OutpostNet/pkg/delivery	238.880s
+ok  	github.com/outpostos/OutpostNet/pkg/protocol	1.618s
+ok  	github.com/outpostos/OutpostNet/pkg/service	6.791s
+ok  	github.com/outpostos/OutpostNet/pkg/state	211.902s
+?   	github.com/outpostos/OutpostNet/pkg/state/httpauth	[no test files]
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel	15.376s
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil	1.622s
+?   	github.com/outpostos/OutpostNet/pkg/version	[no test files]
+ok  	github.com/outpostos/OutpostNet/test/e2e	4.389s
+
+Linux complete race suite
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-agent	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-agent/app	1.090s
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar/app	[no test files]
+ok  	github.com/outpostos/OutpostNet/deploy/docker	4.386s
+ok  	github.com/outpostos/OutpostNet/internal/agent	3.965s
+ok  	github.com/outpostos/OutpostNet/internal/controller/reconciler	2.452s
+ok  	github.com/outpostos/OutpostNet/internal/controller/webhook	1.091s
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	2.192s
+ok  	github.com/outpostos/OutpostNet/internal/observation	1.075s
+?   	github.com/outpostos/OutpostNet/internal/observation/observationtest	[no test files]
+?   	github.com/outpostos/OutpostNet/internal/peerredact	[no test files]
+ok  	github.com/outpostos/OutpostNet/internal/server	2.546s
+ok  	github.com/outpostos/OutpostNet/internal/servicehost	13.686s
+ok  	github.com/outpostos/OutpostNet/internal/sidecar	1.326s
+ok  	github.com/outpostos/OutpostNet/pkg/agentconfig	1.037s
+ok  	github.com/outpostos/OutpostNet/pkg/annotations	1.018s
+ok  	github.com/outpostos/OutpostNet/pkg/config	1.018s
+ok  	github.com/outpostos/OutpostNet/pkg/delivery	196.073s
+ok  	github.com/outpostos/OutpostNet/pkg/protocol	1.020s
+ok  	github.com/outpostos/OutpostNet/pkg/service	6.388s
+ok  	github.com/outpostos/OutpostNet/pkg/state	180.396s
+?   	github.com/outpostos/OutpostNet/pkg/state/httpauth	[no test files]
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel	15.048s
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil	1.035s
+?   	github.com/outpostos/OutpostNet/pkg/version	[no test files]
+ok  	github.com/outpostos/OutpostNet/test/e2e	3.638s
+
+Service-host red, before fake ownership metadata
+--- FAIL: TestDirectoryExportsFollowRegistrations (5.04s)
+--- FAIL: TestStaticExportWinsOverDirectory (5.03s)
+--- FAIL: TestLogicalEntryThroughDirectoryExport (15.12s)
+--- FAIL: TestLogicalEntryFollowsDirectory (15.16s)
+--- FAIL: TestLogicalFailoverOnlyBeforeBytes (15.13s)
+--- FAIL: TestLogicalFailureReasonsCounted (5.15s)
+    --- FAIL: TestLogicalFailureReasonsCounted/all_unreachable (5.07s)
+FAIL	github.com/outpostos/OutpostNet/internal/servicehost	68.233s
+
+Service-host green
+ok  	github.com/outpostos/OutpostNet/internal/servicehost	5.529s
+
+Cold-cache corrected clock, ten repetitions
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	4.309s
+
+Final directory and Service focused suites
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	5.517s
+ok  	github.com/outpostos/OutpostNet/pkg/service	7.684s
+
+Real Mesh integration with merged Mesh 924ebde
+=== RUN   TestRealMeshGateway
+    integration_test.go:64: registration visible after 11ms
+    integration_test.go:66: withdrawal applied after 0s
+--- PASS: TestRealMeshGateway (0.83s)
+=== RUN   TestRealMeshLeaseDirectory
+--- PASS: TestRealMeshLeaseDirectory (1.18s)
+PASS
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	4.172s

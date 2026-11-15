@@ -36,7 +36,7 @@ func newSSEServer(t *testing.T, conns ...func(r *http.Request, send func(string)
 
 func (s *sseServer) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != streamPath || r.Header.Get("Accept") != "text/event-stream" ||
-		r.URL.Query().Get("filter.requiredComponents") != streamFilter {
+		r.URL.Query().Get("filter.entityIdPrefix") != streamFilter || r.URL.Query().Has("filter.requiredComponents") {
 		s.t.Errorf("unexpected request %s %s accept=%q", r.Method, r.URL, r.Header.Get("Accept"))
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -86,7 +86,7 @@ func entityJSON(id, svc, uid, health string, live bool, expiry time.Time, weight
 	if weight >= 0 {
 		w = fmt.Sprintf(`, "weight":%d`, weight)
 	}
-	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}%s}], "healthState":%q}}`,
+	return fmt.Sprintf(`{"entityId":%q, "isLive":%t, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":%q, "provenance":{"integrationName":"outpostlet"}, "originNodeId":"node-a", "serviceRegistration":{"serviceName":%q, "instanceId":%q, "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}%s}], "healthState":%q}}`,
 		id, live, expiry.UTC().Format(time.RFC3339Nano), svc, uid, w, health)
 }
 
@@ -341,7 +341,11 @@ func TestExpiryDropsInstanceAndNotifies(t *testing.T) {
 
 func writeCache(t *testing.T, path string, insts map[string]service.Instance) {
 	t.Helper()
-	d := &Directory{cfg: Config{CachePath: path, Now: time.Now, CacheInterval: time.Second}, entities: insts, synced: true, dirty: true}
+	records := map[string]registration{}
+	for id, in := range insts {
+		records[id] = registration{Instance: in, OriginNodeID: in.NodeID}
+	}
+	d := &Directory{cfg: Config{CachePath: path, Now: time.Now, CacheInterval: time.Second}, entities: records, synced: true, dirty: true}
 	d.logger = testLogger()
 	d.saveCacheIfDirty(true)
 	if _, err := os.Stat(path); err != nil {
@@ -353,17 +357,20 @@ func writeCache(t *testing.T, path string, insts map[string]service.Instance) {
 // stays stale, still expires by TTL, and turns fresh after a snapshot.
 func TestColdStartFromCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), CacheFileName)
+	now := time.Now()
+	var wall atomic.Int64
+	wall.Store(now.UnixNano())
 	w := uint32(7)
 	writeCache(t, path, map[string]service.Instance{
 		id("a"): {ServiceName: "echo", InstanceID: "a", NodeID: "node-a", Endpoints: []service.Endpoint{{Protocol: "tcp", Port: 18080}}, Weight: &w, Health: service.HealthReady, Live: true, Expiry: far},
-		id("x"): {ServiceName: "echo", InstanceID: "x", NodeID: "node-a", Endpoints: []service.Endpoint{{Protocol: "tcp", Port: 18080}}, Health: service.HealthReady, Live: true, Expiry: time.Now().Add(2 * time.Second)},
+		id("x"): {ServiceName: "echo", InstanceID: "x", NodeID: "node-a", Endpoints: []service.Endpoint{{Protocol: "tcp", Port: 18080}}, Health: service.HealthReady, Live: true, Expiry: now.Add(2 * time.Second)},
 	})
 
 	// Phase 1: Mesh unreachable.
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
 	dead.Close()
-	h := startDir(t, Config{GatewayURL: deadURL, CachePath: path})
+	h := startDir(t, Config{GatewayURL: deadURL, CachePath: path, Now: func() time.Time { return time.Unix(0, wall.Load()) }})
 	got, fr := h.d.Instances("echo")
 	if uids(got) != "a/READY,x/READY" || !fr.Stale || fr.Synced {
 		t.Fatalf("cold start = %v %+v", uids(got), fr)
@@ -371,6 +378,7 @@ func TestColdStartFromCache(t *testing.T) {
 	if got[0].EffectiveWeight() != 7 {
 		t.Fatalf("cached weight lost: %+v", got[0])
 	}
+	wall.Add(int64(3 * time.Second))
 	eventually(t, "cached instance expiry", hasState(h.d, "a/READY"))
 	if _, fr := h.d.Instances("echo"); !fr.Stale {
 		t.Fatal("directory claimed fresh without Mesh")
