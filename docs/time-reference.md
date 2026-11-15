@@ -103,7 +103,11 @@ and restart the whole group. Mixed majors are rejected (requests: HTTP 426;
 responses including 410: version validation). The durable log format is unchanged.
 Time-source observations and samples are not persisted: restart begins `UNSYNCED`
 and needs fresh observations. Durable HLC monotonicity remains intact; an already
-future HLC is not rewritten when the reference changes (V2-NET-1c handles reset).
+future HLC is not rewritten when the reference changes. V2-NET-1c adds a
+[local alarm and offline reset](clock-reset.md), with a one-time future-horizon
+upgrade check and runtime forward-step rejection. A qualified source observation
+or `ConfirmSystemClock()` confirms a correction and resets the step baseline,
+including on leaving UNSYNCED. `TimeStatus` exposes rejection state and counts.
 
 ## Retention, expiry and observation
 
@@ -120,7 +124,7 @@ expiry values are never rewritten: envelopes that become expired after a referen
 switch expire normally, and delivery status/counters expose those outcomes.
 Business applications supplying absolute timestamps from their own clocks remain
 responsible for them. A wrong-clock future envelope is not repaired here; existing
-MaxExpiry admission rules apply. No new clock-reset command is added.
+MaxExpiry admission rules apply. The state reset command leaves delivery untouched.
 
 `TimeStatus()` reports quality, unknown/reference selection, local self-suspicion,
 system/reference milliseconds, and accepted/discarded sample counters.

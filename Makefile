@@ -22,6 +22,7 @@ SIDECAR_BINARY=outpostnet-sidecar
 CONTROLLER_BINARY=outpostnet-controller
 AGENT_BINARY=outpostnet-agent
 SERVICE_BINARY=outpostnet-service
+STATE_RESET_BINARY=outpostnet-state-reset
 
 # Build directory
 BUILD_DIR=build
@@ -39,7 +40,7 @@ LDFLAGS = -ldflags "-X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gi
 
 # Release platforms
 RELEASE_PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
-RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller outpostnet-service
+RELEASE_COMPONENTS = outpostnet-server outpostnet-sidecar outpostnet-agent outpostnet-controller outpostnet-service outpostnet-state-reset
 RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(VERSION_PKG).gitCommit=$(COMMIT) -X $(VERSION_PKG).buildDate=$(BUILD_TIME)"
 
 # Release artifacts
@@ -58,7 +59,7 @@ KUSTOMIZE ?= kubectl kustomize
 all: clean fmt vet test build
 
 # Build targets
-build: build-server build-sidecar build-controller build-agent build-service
+build: build-server build-sidecar build-controller build-agent build-service build-state-reset
 
 build-server:
 	@echo "Building $(SERVER_BINARY)..."
@@ -84,6 +85,10 @@ build-service:
 	@echo "Building $(SERVICE_BINARY)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(SERVICE_BINARY) ./cmd/outpostnet-service
+
+build-state-reset:
+	@mkdir -p $(BUILD_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(STATE_RESET_BINARY) ./cmd/outpostnet-state-reset
 
 # Install builds binaries to project root for easy testing
 install: build
@@ -136,7 +141,7 @@ deps:
 clean:
 	@echo "Cleaning..."
 	$(GOCLEAN)
-	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY) $(AGENT_BINARY) $(SERVICE_BINARY)
+	@rm -f $(SERVER_BINARY) $(SIDECAR_BINARY) $(CONTROLLER_BINARY) $(AGENT_BINARY) $(SERVICE_BINARY) $(STATE_RESET_BINARY)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
 
@@ -252,6 +257,7 @@ help:
 	@echo "  build-controller - Build controller binary only"
 	@echo "  build-agent     - Build agent binary only"
 	@echo "  build-service   - Build service (OutpostService entry) binary only"
+	@echo "  build-state-reset - Build offline state clock recovery tool"
 	@echo "  install         - Build and install binaries to project root"
 	@echo ""
 	@echo "  test            - Run all tests"
@@ -268,7 +274,7 @@ help:
 	@echo "  clean-all       - Clean all generated files"
 	@echo ""
 	@echo "  bench-tunnel         - Run QUIC tunnel benchmarks"
-	@echo "  release              - Build archives (5 components × 4 OS/arch), k8s manifest, and SHA256SUMS"
+	@echo "  release              - Build archives (6 components × 4 OS/arch), k8s manifest, and SHA256SUMS"
 	@echo "  release-verify       - Verify release artifacts against SHA256SUMS"
 	@echo "  e2e-k8s / e2e-controller / e2e-cross-region / e2e-relay - Run hack/ E2E scripts (*-cleanup to tear down)"
 	@echo "  help                 - Show this help"

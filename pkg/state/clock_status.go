@@ -67,19 +67,24 @@ func (s *storeCore) observeClockEntry(e Entry, refused bool) {
 
 // ClockStatus returns owned, sorted local writer observations.
 func (s *storeCore) ClockStatus() []NodeClockStatus {
+	localSuspect := s.hlc.ClockSuspect()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]NodeClockStatus, 0, len(s.clockStatus)+1)
 	local := s.clockStatus[s.nodeID]
+	local.NodeID = s.nodeID
+	local.ClockSuspect = local.ClockSuspect || localSuspect
 	if ref := s.TimeReference(); ref != nil {
 		timeStatus := ref.TimeStatus()
 		local.NodeID, local.TimeQuality = s.nodeID, timeStatus.Quality
 		local.TimeUnknown, local.UsingPeerReference = timeStatus.TimeUnknown, timeStatus.UsingPeerReference
 		local.ClockSuspect = local.ClockSuspect || timeStatus.ClockSuspect
+	}
+	if local.ClockSuspect || local.TimeQuality != "" {
 		result = append(result, local)
 	}
 	for _, status := range s.clockStatus {
-		if status.NodeID == s.nodeID && local.TimeQuality != "" {
+		if status.NodeID == s.nodeID && (local.ClockSuspect || local.TimeQuality != "") {
 			continue
 		}
 		result = append(result, status)

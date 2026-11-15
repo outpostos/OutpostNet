@@ -153,9 +153,10 @@ var (
 )
 
 type durableManifest struct {
-	FormatVersion int    `json:"format_version"`
-	NodeID        string `json:"node_id"`
-	PolicyID      string `json:"policy_id"`
+	FormatVersion        int    `json:"format_version"`
+	NodeID               string `json:"node_id"`
+	PolicyID             string `json:"policy_id"`
+	ClockRecoveryVersion int    `json:"clock_recovery_version,omitempty"`
 }
 
 type durableRecord struct {
@@ -200,6 +201,10 @@ type CompactionResult struct {
 
 // NewDurableStore opens or creates a durable state replica.
 func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
+	return openDurableStore(cfg, false)
+}
+
+func openDurableStore(cfg DurableStoreConfig, offlineReset bool) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
@@ -244,19 +249,36 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 	}
 	core.purgeHook = store.appendPurge
 	core.batchHook = store.appendBatch
+	if _, err := os.Stat(filepath.Join(cfg.Dir, clockRebuildPending)); !errors.Is(err, os.ErrNotExist) {
+		_ = store.Close()
+		if err != nil {
+			return nil, fmt.Errorf("check clock rebuild marker: %w", err)
+		}
+		return nil, ErrClockRebuildIncomplete
+	}
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
-	if err := store.discardCompactionTemp(); err != nil {
-		_ = store.Close()
-		return nil, err
+	if !offlineReset {
+		if err := store.discardCompactionTemp(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	// recoverLog also repairs an unconfirmed tail record and reports the append
 	// offset left behind, so it must run before the log is opened for appending.
-	if err := store.recoverLog(); err != nil {
+	// Offline reset must not change any state file until its archive is durable.
+	if err := store.recoverLog(!offlineReset); err != nil {
 		_ = store.Close()
 		return nil, err
+	}
+	if !offlineReset {
+		if err := store.checkClockUpgrade(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		store.hlc.ClockSuspect()
 	}
 	var logFile durableLog
 	logFile, err = os.OpenFile(filepath.Join(cfg.Dir, durableLogFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -402,9 +424,13 @@ func writeManifest(path string, manifest durableManifest) error {
 // the record was never confirmed. A corrupt or sequence-regressed record that is
 // terminated (necessarily a record from an earlier, confirmed write) still
 // refuses the directory.
-func (s *DurableStore) recoverLog() error {
+func (s *DurableStore) recoverLog(repairTail bool) error {
 	path := filepath.Join(s.dir, durableLogFile)
-	opened, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	mode := os.O_RDONLY
+	if repairTail {
+		mode = os.O_RDWR
+	}
+	opened, err := os.OpenFile(path, mode, 0o600)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -425,6 +451,9 @@ func (s *DurableStore) recoverLog() error {
 			break
 		}
 		if errors.Is(err, io.EOF) && len(line) > 0 {
+			if !repairTail {
+				break
+			}
 			if truncErr := s.truncateLogTail(handle, offset); truncErr != nil {
 				return errors.Join(fmt.Errorf("%w at line %d", ErrDurableLogTruncated, lineNo), truncErr)
 			}

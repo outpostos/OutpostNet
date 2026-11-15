@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -54,6 +55,8 @@ type TimeStatus struct {
 	SystemMS           int64
 	AcceptedSamples    uint64
 	DiscardedSamples   uint64
+	StepRejected       bool
+	StepRejections     uint64
 }
 
 type peerTimeSample struct {
@@ -73,6 +76,11 @@ type TimeReference struct {
 	sourceAt            time.Time
 	synchronized        bool
 	accepted, discarded uint64
+	stepWall            int64
+	stepAt              time.Time
+	stepRejected        bool
+	stepRejections      uint64
+	lastQuality         TimeQuality
 }
 
 // NewTimeReference creates an UNSYNCED reference until source/peer observations arrive.
@@ -101,7 +109,7 @@ func NewTimeReference(cfg TimeReferenceConfig) (*TimeReference, error) {
 	if cfg.ClockBudget < 0 || cfg.MaxSampleRTT < 0 || cfg.SampleTTL < 0 || cfg.SourceTTL < 0 || !(cfg.DriftPPM > 0) || cfg.DriftPPM > 1_000_000 {
 		return nil, fmt.Errorf("invalid time reference budget, lifetime or drift")
 	}
-	return &TimeReference{cfg: cfg, peers: make(map[string]peerTimeSample)}, nil
+	return &TimeReference{cfg: cfg, peers: make(map[string]peerTimeSample), stepWall: cfg.SystemClock.NowMS(), stepAt: cfg.MonotonicNow(), lastQuality: TimeUnsynced}, nil
 }
 
 func (r *TimeReference) qualityLocked(now time.Time) TimeQuality {
@@ -129,6 +137,11 @@ func (r *TimeReference) UpdateSource(source TimeSourceStatus) error {
 	defer r.mu.Unlock()
 	if source.Synchronized {
 		r.source, r.sourceAt, r.synchronized = source, r.cfg.MonotonicNow(), true
+		if r.qualityLocked(r.sourceAt) != TimeUnsynced {
+			// A qualified trusted-source observation confirms the corrected clock,
+			// including the transition away from a peer reference in UNSYNCED.
+			r.confirmSystemClockLocked(r.sourceAt)
+		}
 	} else {
 		r.source.Synchronized = false
 	}
@@ -169,7 +182,13 @@ func (r *TimeReference) ForgetPeer(peer string) { r.mu.Lock(); delete(r.peers, p
 func (r *TimeReference) statusLocked() TimeStatus {
 	now := r.cfg.MonotonicNow()
 	system := r.cfg.SystemClock.NowMS()
-	s := TimeStatus{Quality: r.qualityLocked(now), ReferenceMS: system, SystemMS: system, AcceptedSamples: r.accepted, DiscardedSamples: r.discarded}
+	quality := r.qualityLocked(now)
+	if r.lastQuality == TimeUnsynced && quality != TimeUnsynced {
+		r.confirmSystemClockLocked(now)
+	}
+	r.lastQuality = quality
+	physical := r.stepTimeLocked(system, now)
+	s := TimeStatus{Quality: quality, ReferenceMS: physical, SystemMS: system, AcceptedSamples: r.accepted, DiscardedSamples: r.discarded, ClockSuspect: r.stepRejected, StepRejected: r.stepRejected, StepRejections: r.stepRejections}
 	if s.Quality != TimeUnsynced {
 		return s
 	}
@@ -204,7 +223,7 @@ func (r *TimeReference) statusLocked() TimeStatus {
 		s.ReferenceMS = a + (b-a)/2
 	}
 	s.UsingPeerReference = true
-	s.ClockSuspect = checkFutureTimestamp(Timestamp{WallMS: system}, s.ReferenceMS) != nil || checkFutureTimestamp(Timestamp{WallMS: s.ReferenceMS}, system) != nil
+	s.ClockSuspect = s.ClockSuspect || checkFutureTimestamp(Timestamp{WallMS: system}, s.ReferenceMS) != nil || checkFutureTimestamp(Timestamp{WallMS: s.ReferenceMS}, system) != nil
 	return s
 }
 
@@ -237,4 +256,44 @@ func (r *TimeReference) RetentionMS() int64 {
 		return s.SystemMS
 	}
 	return s.ReferenceMS
+}
+
+// ConfirmSystemClock lets an operator explicitly accept a corrected system
+// clock. It resets step detection, not the HLC or persisted entries. A qualified
+// UpdateSource observation also confirms it. Confirming a still-wrong clock can
+// produce future writes and is the caller's responsibility.
+func (r *TimeReference) ConfirmSystemClock() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.confirmSystemClockLocked(r.cfg.MonotonicNow())
+}
+
+func (r *TimeReference) confirmSystemClockLocked(now time.Time) {
+	r.stepWall, r.stepAt, r.stepRejected = r.cfg.SystemClock.NowMS(), now, false
+	r.lastQuality = r.qualityLocked(now)
+}
+
+func (r *TimeReference) stepTimeLocked(system int64, now time.Time) int64 {
+	elapsed := now.Sub(r.stepAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	expected := int64(math.MaxInt64)
+	if r.stepWall <= math.MaxInt64-elapsed {
+		expected = r.stepWall + elapsed
+	}
+	limit := MaxClockOffsetMS
+	if r.stepRejected {
+		limit = r.cfg.ClockBudget.Milliseconds()
+	}
+	if expected <= math.MaxInt64-limit && system > expected+limit {
+		if !r.stepRejected {
+			r.stepRejections++
+			slog.Warn("state: local clock_suspect forward clock step; awaiting clock confirmation")
+		}
+		r.stepRejected = true
+		return expected
+	}
+	r.stepWall, r.stepAt, r.stepRejected = system, now, false
+	return system
 }
