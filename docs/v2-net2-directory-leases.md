@@ -1,10 +1,10 @@
-# V2-NET-2 directory leases: implementation and blocked validation
+# V2-NET-2 directory leases: implementation and validation
 
 Specification: [OutpostNet#50](https://github.com/outpostos/OutpostNet/issues/50),
 [ADR-0007 D3/D6](https://github.com/outpostos/OutpostOS/blob/main/docs/adr/0007-node-lease.md),
 [ADR-0008 D4](https://github.com/outpostos/OutpostOS/blob/main/docs/adr/0008-node-identity-and-origin.md).
-Epic: outpostos/OutpostOS#30. This branch is not ready for deployment or a PR:
-the full test gate is blocked by an existing fixture outside the authorized scope.
+Epic: outpostos/OutpostOS#30. The architect authorized Mesh entity API fake
+updates in the latest issue comment; the missing writer fixture is corrected.
 
 ## Behavior on this branch
 
@@ -94,38 +94,64 @@ Automated behavior coverage:
 | Snapshot/cache | `TestLeaseSnapshotReplacesRecordsAtomically`, `TestLeaseTTLByLinkClassAndSnapshotRefresh`, `TestLeaseCacheRestartIsJustSeenAndStillExpires`; existing reconnect, fallback and cache tests. |
 | Legacy compatibility and failures | Existing TTL/readiness/endpoint/weight tests plus `TestLeaseIncarnationAndLegacyTransition`, invalid lease replacements and invalid TTL configuration. |
 
-`go build ./...` and `go vet ./...` passed on macOS. The full
-`go test -race -count=1 ./...` run failed in the service-host tests listed below;
-it also encountered a macOS Unix-socket path-length failure in the unchanged
-`internal/server.TestConnectExporterDisconnected` fixture. Raw logs remain
-local; only sanitized excerpts are recorded here.
+## Resumed red → green
 
-## Blocker and remaining acceptance
+Before changing the service-host fake, all six affected tests failed again:
+`TestDirectoryExportsFollowRegistrations`, `TestStaticExportWinsOverDirectory`,
+`TestLogicalEntryThroughDirectoryExport`, `TestLogicalEntryFollowsDirectory`,
+`TestLogicalFailoverOnlyBeforeBytes`, and
+`TestLogicalFailureReasonsCounted/all_unreachable`. The fake now emits
+`originNodeId` equal to the registration node. The same focused race command
+passes (5.529s). Production writer filtering remains enforced.
 
-The architect limits changes to `internal/meshdirectory`, `pkg/service` and
-their docs. `internal/servicehost/mesh_fake_test.go`, function `reg.json`,
-emits legacy registrations with no `originNodeId`. Enforcing ADR-0008 correctly
-rejects them; six existing tests fail:
+The Linux full race run also reproduced a pre-existing cold-cache fixture race:
+`TestColdStartFromCache` observed only `a/READY` because its two-second record
+expired during setup. The test now uses the existing injected wall-clock port,
+asserts both records first, then advances time to check expiry. Ten repetitions
+pass under the race detector (4.309s), with the original expiry assertion intact.
 
-- `TestDirectoryExportsFollowRegistrations`: route does not appear.
-- `TestStaticExportWinsOverDirectory`: conflict warning absent.
-- `TestLogicalEntryThroughDirectoryExport`: no backend.
-- `TestLogicalEntryFollowsDirectory`: no backend.
-- `TestLogicalFailoverOnlyBeforeBytes`: no backend.
-- `TestLogicalFailureReasonsCounted/all_unreachable`: registrations rejected.
+The two real Mesh gateway integration tests passed again against merged Mesh
+`924ebde`: legacy registration/withdrawal, no-expiry lease expiration/recovery,
++60s consumer wall offset, and gateway-derived writer rejection (4.172s).
 
-Representative diagnostic:
+## Gate and deployment record
 
-```text
-rejecting node-scoped directory record: writer mismatch
-node_id=node-b writer_node_id=""
+macOS uses a short `TMPDIR` to avoid the unchanged Unix-socket fixture path
+limit. The first full macOS race run passed every package except delivery's
+unchanged process-crash fixture: a SIGKILL child emitted additional test output
+(`invalid character 'P' after top-level value`). The focused crash test then
+passed (2.277s). The final complete run passed with two-package concurrency; no test was
+excluded (delivery 238.880s, state 211.902s).
+
+The first e5box run used temporary stores on the host's rotational root disk;
+state and delivery reached the unchanged ten-minute timeout. The corrected
+cold-cache test passed separately. The final complete Linux run passed with temporary
+stores on the host's SSD and two-package concurrency, retaining normal fsync
+and the original test timeouts (delivery 196.073s, state 180.396s). These initial
+failures are not counted as passing gates. No Mesh contract or binding is
+changed, so buf/generated-code gates do not apply to this Net-only consumer
+update.
+
+Final passing commands on macOS (Go 1.26.1) and Linux amd64 (Go 1.26.2):
+
+```sh
+make fmt
+go build ./...
+make vet
+# Set TMPDIR to a short path on a fast local disk.
+GOFLAGS=-p=2 make test   # go test -race -count=1 ./...; all packages
+GOOS=linux GOARCH=amd64 make build-agent
+git diff --check
 ```
 
-The fixture needs to emit `originNodeId` equal to the registration's node.
-That file is outside the authorized paths. It has not been modified, and the
-production filter has not been weakened to accommodate it. Implementation
-stopped at this scope boundary as instructed.
+The final format check also leaves the committed tree unchanged. See the
+[sanitized gate record](artifacts/v2-net2/validation.txt) for complete race
+package results, failing-first fixture evidence and real-gateway test results.
 
-The full gate, Linux gates, hosted CI and actual three-VM RANGE-1/Let-stop
-regression remain unverified. VM inspection was read-only; no product binary,
-configuration, service or clock on any VM was changed. No PR has been opened.
+At validation time, the shared reference VMs were running V2-RANGE-1 fault trials. This
+work has made only read-only inspections there; no product unit, configuration,
+clock or trial state has been changed. Actual Let-stop and the three-VM RANGE-1
+regression remain pending; automated adapter results above do not claim that
+full-stack deployment acceptance. ADR-0007 assigns the joint deployment
+validation to V2-RANGE-3. This PR supplies the directory implementation needed
+for that run; it does not claim all field acceptance is complete.
