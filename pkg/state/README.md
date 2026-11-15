@@ -353,4 +353,7 @@ Clock refusal safety (V2-NET-1a, ADR-0006 D3/D4):
 - V2-NET-1b adds time quality, bounded handshake samples, a shared host reference,
   and conservative retention, raising the state protocol to **3.0**. See
   [time reference configuration and acceptance](../../docs/time-reference.md).
-  Local future-HLC cleanup remains V2-NET-1c. See [GC compatibility and acceptance evidence](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).
+  V2-NET-1c adds local HLC alarms, runtime step protection, a one-time horizon
+  upgrade check and the offline `outpostnet-state-reset` command. See
+  [clock recovery and acceptance evidence](../../docs/clock-reset.md) and
+  [GC compatibility](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).

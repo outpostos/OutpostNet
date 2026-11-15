@@ -97,7 +97,7 @@ See [docs/observation.md](docs/observation.md).
 ```bash
 git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
 make build-agent        # standalone agent only
-make build              # all five components (agent, service, server, sidecar, controller)
+make build              # all components, including the offline state reset tool
 ```
 
 ## Quick Start
@@ -223,6 +223,7 @@ own repositories and report their own replication status.
 - [Migrating agent imports/exports to outpostnet-service](docs/service-migration.md)
 - [Observation producers (Range)](docs/observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
+- [Local clock alarm and offline state reset](docs/clock-reset.md)
 - [Durable delivery library (`pkg/delivery`)](docs/delivery.md)
 - [Deployment Examples](deploy/examples/)
 

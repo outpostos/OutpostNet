@@ -29,6 +29,12 @@ Three pieces of per-store state are added. They are persisted by
 | GC floor (`uint64`) | Highest local position of any collected tombstone, or a fresh local position allocated by a resync purge that removed values. A consumer position below it may have missed a removed tombstone or still hold a purged value. Only grows. |
 | Replicated flag | Set when a `GossipEngine` is built on the store. Direct local GC is refused afterwards; GC must go through the engine's peer gate. |
 
+ADR-0006 D5 adds one explicit offline exception to horizon monotonicity:
+[clock reset with a future horizon](clock-reset.md) clears the entire local state
+and horizon, retains identity/counters, raises the floor, and rebuilds from healthy
+peers. Partial future-entry cleanup leaves a valid horizon intact. The first
+D5-aware open checks legacy horizons once; the offline command checks every time.
+
 ### Collection condition
 
 A tombstone `t` is collected only when all of the following hold:

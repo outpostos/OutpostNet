@@ -153,9 +153,10 @@ var (
 )
 
 type durableManifest struct {
-	FormatVersion int    `json:"format_version"`
-	NodeID        string `json:"node_id"`
-	PolicyID      string `json:"policy_id"`
+	FormatVersion        int    `json:"format_version"`
+	NodeID               string `json:"node_id"`
+	PolicyID             string `json:"policy_id"`
+	ClockRecoveryVersion int    `json:"clock_recovery_version,omitempty"`
 }
 
 type durableRecord struct {
@@ -200,6 +201,10 @@ type CompactionResult struct {
 
 // NewDurableStore opens or creates a durable state replica.
 func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
+	return openDurableStore(cfg, false)
+}
+
+func openDurableStore(cfg DurableStoreConfig, offlineReset bool) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
@@ -257,6 +262,13 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 	if err := store.recoverLog(); err != nil {
 		_ = store.Close()
 		return nil, err
+	}
+	if !offlineReset {
+		if err := store.checkClockUpgrade(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		store.hlc.ClockSuspect()
 	}
 	var logFile durableLog
 	logFile, err = os.OpenFile(filepath.Join(cfg.Dir, durableLogFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

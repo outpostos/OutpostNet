@@ -4,7 +4,7 @@ Standard Operating Procedure for releasing OutpostNet versions. This document co
 
 ## Overview
 
-OutpostNet releases produce **20 artifacts** (5 components x 4 platforms; v1.0.x–v2.0.0 shipped 16, before `outpostnet-service` existed) as compressed tarballs, published via GitHub Releases. Each release also publishes the single-file Kubernetes manifest `outpostnet-k8s.yaml` and a `SHA256SUMS` checksum file covering every archive and the manifest. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
+OutpostNet releases produce **24 artifacts** (6 components x 4 platforms; v1.0.x–v2.0.0 shipped 16, before `outpostnet-service` and `outpostnet-state-reset` existed) as compressed tarballs, published via GitHub Releases. Each release also publishes the single-file Kubernetes manifest `outpostnet-k8s.yaml` and a `SHA256SUMS` checksum file covering every archive and the manifest. The landing page at [net.outpostos.com](https://net.outpostos.com/) is updated to reflect the latest version.
 
 ### Components
 
@@ -12,6 +12,7 @@ OutpostNet releases produce **20 artifacts** (5 components x 4 platforms; v1.0.x
 |-----------|--------|-------------|
 | Agent | `outpostnet-agent` | Unified tunnel agent (server/client roles), peer directory — primary 1.0 component |
 | Service | `outpostnet-service` | OutpostService stable entries for `<service>@<node_id>` ([service-layer.md](service-layer.md)) |
+| State reset | `outpostnet-state-reset` | Offline local clock recovery ([clock-reset.md](clock-reset.md)) |
 | Server | `outpostnet-server` | Node-local routing hub for sidecars (Unix socket) |
 | Sidecar | `outpostnet-sidecar` | Per-application process that registers exports/imports with the local server |
 | Controller | `outpostnet-controller` | Kubernetes controller and mutating webhook (sidecar injection) |
@@ -101,7 +102,7 @@ make release
 
 This target:
 1. Runs `fmt` and `vet` checks
-2. Cross-compiles all 5 components (`RELEASE_COMPONENTS`) for all 4 platforms (`RELEASE_PLATFORMS`) with `CGO_ENABLED=0` (static linking)
+2. Cross-compiles all 6 components (`RELEASE_COMPONENTS`) for all 4 platforms (`RELEASE_PLATFORMS`) with `CGO_ENABLED=0` (static linking)
 3. Strips debug symbols (`-s -w`) for smaller binaries
 4. Packages each binary as `<component>-<VERSION>-<os>-<arch>.tar.gz`
 5. Generates `outpostnet-k8s.yaml` from `deploy/kustomize/base`, pinning every image tag to `<VERSION>` (`kubectl` must be on `PATH`, or set `KUSTOMIZE` to another kustomize-compatible command)

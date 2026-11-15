@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -68,13 +69,26 @@ type hlcClock struct {
 	mu       sync.Mutex
 	physical PhysicalClock
 	last     Timestamp
+	suspect  bool
 }
 
 func newHLCClock(physical PhysicalClock) *hlcClock {
 	if physical == nil {
-		physical = SystemPhysicalClock{}
+		physical, _ = NewTimeReference(TimeReferenceConfig{})
 	}
 	return &hlcClock{physical: physical}
+}
+
+// ClockSuspect detects restored or previously issued local HLCs beyond the
+// current reference, independently of peer blame and time-source quality.
+func (c *hlcClock) ClockSuspect() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if checkFutureTimestamp(c.last, c.physical.NowMS()) != nil && !c.suspect {
+		c.suspect = true
+		slog.Warn("state: local clock_suspect HLC; offline clock reset required")
+	}
+	return c.suspect
 }
 
 func (c *hlcClock) Now() Timestamp {
