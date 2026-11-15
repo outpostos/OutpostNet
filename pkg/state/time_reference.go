@@ -36,7 +36,7 @@ type TimeSourceStatus struct {
 type TimeReferenceConfig struct {
 	SystemClock  PhysicalClock
 	MonotonicNow func() time.Time
-	ClockBudget  time.Duration // default 2s
+	ClockBudget  time.Duration // default 2s between two qualified nodes
 	MaxSampleRTT time.Duration // default 2s
 	SampleTTL    time.Duration // default 30s; unreachable samples expire
 	SourceTTL    time.Duration // default 30s; stale source observations enter holdover
@@ -110,7 +110,8 @@ func (r *TimeReference) qualityLocked(now time.Time) TimeQuality {
 	}
 	age := now.Sub(r.sourceAt)
 	uncertainty := float64(r.source.Uncertainty) + float64(age)*r.cfg.DriftPPM/1_000_000
-	if age < 0 || uncertainty > float64(r.cfg.ClockBudget) {
+	// Each node gets half the pairwise budget, including oscillator drift.
+	if age < 0 || uncertainty > float64(r.cfg.ClockBudget)/2 {
 		return TimeUnsynced
 	}
 	if r.source.Synchronized && age <= r.cfg.SourceTTL {

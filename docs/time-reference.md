@@ -44,7 +44,7 @@ drift bound suitable for their hardware.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ClockBudget` | 2s | Maximum estimated source error / agreement width |
+| `ClockBudget` | 2s | Pairwise clock error budget / UNSYNCED agreement width |
 | `DriftPPM` | 50 | Worst-case local oscillator drift, parts per million |
 | `SourceTTL` | 30s | Maximum age of a `SYNCED` source observation |
 | `MaxSampleRTT` | 2s | Maximum accepted full round trip |
@@ -53,8 +53,9 @@ drift bound suitable for their hardware.
 | `MonotonicNow` | `time.Now` | Local elapsed-time clock; preserve its monotonic component |
 
 `SYNCED` requires a recent synchronized source observation whose uncertainty plus
-elapsed-time drift is within budget. Losing or ceasing to report the source enters
-`HOLDOVER` while that estimate remains within budget; afterwards quality is
+elapsed-time drift is within **half** the pairwise budget. Two qualified nodes
+therefore stay within the full budget. Losing or ceasing to report the source enters
+`HOLDOVER` while that estimate remains within half the budget; afterwards quality is
 `UNSYNCED`. Repeated loss reports never restart the holdover timer. Both `SYNCED`
 and `HOLDOVER` use the system clock and never self-suspect from peer samples.
 
@@ -142,7 +143,7 @@ acceptance (those are separate tickets).
 | 9a: trusted A, ahead B; A does not self-suspect, B counted | `TestTimeReferenceSyncedReceiverBlamesAheadWriterOnly` (SYNCED and HOLDOVER) |
 | 9b: behind UNSYNCED A, SYNCED B; A self-suspects and converges | `TestTimeReferenceBehindNodeCompletes410Resync` |
 | 9c: two UNSYNCED nodes remain time unknown without blame | `TestTimeReferenceTwoUnsyncedPeersDoNotBlameEachOther` (also two addresses for the same peer) |
-| Quality, median/majority, monotonic extrapolation, RTT/expiry bounds | `TestTimeReferenceSourceQualityAndPeerSelection`, `TestTimeReferenceConsensusRTTAndExpiry`, `TestTimeReferenceSlowHTTPResponseCannotSupplyReference`, `TestTimeReferenceRejectsOverflowAndAcceptsEpoch` |
+| Quality, median/majority, monotonic extrapolation, RTT/expiry bounds | `TestTimeReferenceSourceQualityAndPeerSelection`, `TestTimeReferenceSourceErrorFitsPairwiseClockBudget`, `TestTimeReferenceConsensusRTTAndExpiry`, `TestTimeReferenceSlowHTTPResponseCannotSupplyReference`, `TestTimeReferenceRejectsOverflowAndAcceptsEpoch` |
 | Handshake fields, physical rather than reference time, major upgrade | `TestTimeReferenceWireMetadataAndProtocolUpgrade`; existing byte-budget / protocol / horizon tests |
 | Delivery reference admission/expiry, existing values, restart | `TestTimeReferenceDeliveryAdmissionExpiryAndRestart` |
 | Shared concurrent reference | `TestTimeReferenceConcurrentHostUse` under `-race` |

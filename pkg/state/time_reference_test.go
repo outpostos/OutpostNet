@@ -467,3 +467,22 @@ func TestTimeReferenceRetentionWaitsForSlowerSystemClock(t *testing.T) {
 		})
 	}
 }
+
+func TestTimeReferenceSourceErrorFitsPairwiseClockBudget(t *testing.T) {
+	ref, err := state.NewTimeReference(state.TimeReferenceConfig{MonotonicNow: func() time.Time { return time.Unix(0, 0) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ref.UpdateSource(state.TimeSourceStatus{Synchronized: true, Uncertainty: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if ref.TimeStatus().Quality != state.TimeSynced {
+		t.Fatal("one-second source error should fit half the two-second pair budget")
+	}
+	if err := ref.UpdateSource(state.TimeSourceStatus{Synchronized: true, Uncertainty: time.Second + time.Nanosecond}); err != nil {
+		t.Fatal(err)
+	}
+	if ref.TimeStatus().Quality != state.TimeUnsynced {
+		t.Fatal("two sources at this error bound could exceed the pairwise clock budget")
+	}
+}
