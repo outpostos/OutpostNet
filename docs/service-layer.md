@@ -128,6 +128,10 @@ URI SAN 认证节点，握手声明必须匹配证书；同组允许服务流。
 
 ## 8. 逻辑服务目录（P1-NET-2，ADR-0003 D2）
 
+运行中目录的只读状态：管理 Unix socket 上 `GET /v1/directory`，含写者拒绝、
+租约过期等计数与逐节点租约有效性；同一计数也进入 Service 观测事件流。
+端点、字段及 V2-RANGE-3 取证方式见 [目录观测](directory-observation.md)。
+
 `internal/meshdirectory` 实现 `service.Directory`：订阅本节点 Mesh 网关 `GET /v1alpha1/entities:stream?filter.entityIdPrefix=urn:outpostos:`（SSE），用本地最小 JSON 结构体解码（**不**在 `go.mod` 引入 OutpostMesh，`gomod_test.go` 守护）。
 
 - 快照在 `SNAPSHOT_COMPLETE` 时原子替换；`DELTA` 按实体更新，`DELETED`/`EXPIRED`/`is_live=false` 移除（`EXPIRED` 事件中 `isLive` 仍为 true，按事件类型判断）。

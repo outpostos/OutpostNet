@@ -20,6 +20,11 @@ mismatched writers are rejected and counted in `Directory.Stats().WriterRejected
 Rejected replacement versions evict the previously accepted record. This is
 consumer filtering, not a cryptographic attestation of forwarded records.
 
+NET-15 exposes these counters from the executable at Unix-socket
+`GET /v1/directory` and as Service observation MetricSample events, together
+with per-node lease validity and monotonic advance age. See
+[directory observation](directory-observation.md) for the API and V2-RANGE-3 procedure.
+
 A live registration carrying `registrarIncarnation` is returned only while its
 node lease has the same incarnation and the local monotonic elapsed time since
 sequence progress is at most `LeaseTTL`. Readiness, weight, TCP endpoint and

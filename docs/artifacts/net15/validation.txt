@@ -1,0 +1,57 @@
+NET-15 local validation
+Go 1.26.1 darwin/amd64; baseline 01135a3
+No VM access or changes.
+
+Red: TestDirectoryManagementRejectsForgedWriters -> GET /v1/directory: status 404
+Green: same focused race command -> PASS (1.760s)
+Red: TestDirectoryObservationAndLeaseRecovery -> no event for initial directory counters within 15s
+Green: both tests together -> PASS (33.807s)
+Additional failure/redaction tests -> PASS (3.528s)
+
+make fmt: PASS
+go build ./...: PASS
+make vet (go vet ./...): PASS
+GOOS=linux GOARCH=amd64 make build-agent build-service: PASS
+git diff --check: PASS
+
+Initial broader run: unchanged agent fixtures exceeded macOS Unix-socket path limits.
+Reproduced TestAgentObservationReportsTunnelPeer and TestObservationListenFailureDoesNotStopAgent
+with the system temporary directory: socket bind returned invalid argument.
+Final complete run uses TMPDIR=/tmp GOFLAGS=-p=2 make test, without exclusions/timeouts changes:
+
+Running tests...
+go test -race -count=1 ./...
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-agent	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-agent/app	3.932s
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar/app	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-state-reset	2.928s
+ok  	github.com/outpostos/OutpostNet/deploy/docker	3.231s
+ok  	github.com/outpostos/OutpostNet/internal/agent	7.107s
+ok  	github.com/outpostos/OutpostNet/internal/controller/reconciler	5.861s
+ok  	github.com/outpostos/OutpostNet/internal/controller/webhook	6.017s
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	4.993s
+ok  	github.com/outpostos/OutpostNet/internal/observation	3.275s
+?   	github.com/outpostos/OutpostNet/internal/observation/observationtest	[no test files]
+?   	github.com/outpostos/OutpostNet/internal/peerredact	[no test files]
+ok  	github.com/outpostos/OutpostNet/internal/server	3.808s
+ok  	github.com/outpostos/OutpostNet/internal/servicehost	47.143s
+ok  	github.com/outpostos/OutpostNet/internal/sidecar	2.510s
+ok  	github.com/outpostos/OutpostNet/pkg/agentconfig	1.804s
+ok  	github.com/outpostos/OutpostNet/pkg/annotations	1.685s
+ok  	github.com/outpostos/OutpostNet/pkg/config	1.606s
+ok  	github.com/outpostos/OutpostNet/pkg/delivery	237.301s
+ok  	github.com/outpostos/OutpostNet/pkg/protocol	1.652s
+ok  	github.com/outpostos/OutpostNet/pkg/service	6.910s
+ok  	github.com/outpostos/OutpostNet/pkg/state	210.491s
+?   	github.com/outpostos/OutpostNet/pkg/state/httpauth	[no test files]
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel	15.974s
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil	1.665s
+?   	github.com/outpostos/OutpostNet/pkg/version	[no test files]
+ok  	github.com/outpostos/OutpostNet/test/e2e	4.332s
