@@ -23,6 +23,9 @@ func TestOSTimeSourceDefaultRunner(t *testing.T) {
 	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bin, "timedatectl"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	probe, _ := state.NewOSTimeSource(state.OSTimeSourceConfig{CommandTimeout: 200 * time.Millisecond})
 	if s := probe.Poll(context.Background()); !s.Synchronized || s.Source != "chrony:202.118.1.130" {
