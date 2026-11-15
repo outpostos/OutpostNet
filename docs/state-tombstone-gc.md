@@ -129,7 +129,8 @@ exact identities removed) is committed before the entries leave memory.
   purge record after a restart). Those entries are exactly the ones the peer
   would refuse: either values of keys deleted and collected cluster-side, or
   writes that failed to reach the peer within the retention window. Both are
-  dropped explicitly (logged per key), never silently merged back. A failed page
+  archived before the purge commits, counted by writer/local origin and triggering
+  peer, and logged per key; they are never silently merged back (NET-16). A failed page
   aborts the resync before the purge; the pages already applied are ordinary
   merges. Snapshot pages hold at most 256 entries and at most `max_bytes` of
   encoded response (`HTTPSyncer` sends its `MaxResponseBytes`); a single entry
@@ -346,6 +347,40 @@ Residual risks (documented, not hidden):
   page, and that value's HLC is above the horizon read with the first page). It
   is removed at the next refused exchange with that peer (the next `410` or
   `beyond_gc_horizon`), not immediately.
+
+## NET-16: archival compatibility
+
+Archiving does not change any purge decision. The horizon guard, snapshot
+`held` set, HLC comparison, GC acknowledgement gate, floor/consumer notices,
+and all three resurrection-prevention mechanisms above are unchanged. Before
+the final purge commits, selected entries are archived and synced; a failure
+prevents that purge and horizon adoption. Snapshot pages already applied remain
+ordinary merges. Committed counts and the relative latest archive path are
+persisted with the same purge record and retained by compaction. Archives are
+never replayed or replicated, so they cannot resurrect a collected value.
+The GC compatibility argument is therefore unchanged. The accepted trade-off
+still removes old unreplicated writes from live state; it now preserves operator
+recovery evidence and exposes losses and a pre-retention warning.
+
+See [resync loss operations and evidence](resync-loss.md) for status, metric
+names, warning configuration, archive failure/retry semantics, and deliberate
+manual republishing. In-memory stores need `ArchiveDir` for durable evidence.
+
+The resync floor is an inclusive consumption boundary: a cursor below it must
+snapshot, while a cursor at it can resume with entries at strictly greater
+positions. `finishResync` reserves `Current()+1` for the purge record without
+advancing the clock. After that record commits, `applyPurgeLocked` calls
+`clock.SetAtLeast(floor)` while `commitMu` still excludes every mutation. The
+floor is therefore consumed before any subsequent local write calls `Next()`;
+that write receives a position strictly above the floor. Durable replay uses
+the same application path. Reserving the position this way also leaves
+`CurrentPosition` unchanged if the purge log fails; calling `Next()` before
+that failure would consume a position for a purge that never committed.
+
+`TestResyncPurgeImmediateWriteReachesReadersAndPeer` covers both stores: an
+immediate write after a resync purge reaches observers, `ChangesSince(floor)`,
+the byte-page reader used by push cursors at the floor, and the HTTP peer in
+the next push round, with its cursor acknowledging that write.
 
 ## ADR-0006 D3/D4: clock refusal compatibility (V2-NET-1a)
 

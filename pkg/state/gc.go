@@ -88,6 +88,7 @@ type purgeSet struct {
 	Removed []removedEntry
 	// Adopted is the peer horizon adopted by a resync; zero for collection.
 	Adopted Timestamp
+	Resync  *ResyncStatus
 }
 
 func (t Timestamp) isZero() bool { return t == Timestamp{} }
@@ -123,7 +124,7 @@ type gcStore interface {
 	markReplicated()
 	collectTombstones(ctx context.Context, safePosition uint64, gated bool) (TombstoneGCResult, error)
 	applySnapshotPage(ctx context.Context, page []Entry) (snapshotPageResult, error)
-	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error)
+	finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp, peer ...string) (resyncResult, error)
 }
 
 // snapshotPageResult reports how one resync snapshot page was merged.
@@ -245,9 +246,11 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 		s.removeEntryLocked(current)
 		removed = append(removed, current)
 	}
+	s.recordResyncLocked(set.Resync)
 	s.horizon = maxTimestamp(s.horizon, set.Horizon)
 	s.floor = maxUint64(s.floor, set.Floor)
 	s.adopted = maxTimestamp(s.adopted, set.Adopted)
+	// Consume the committed floor before commitMu allows another local write.
 	s.clock.SetAtLeast(s.floor)
 	// Local writes must order after every removed or adopted entry; otherwise a
 	// store whose physical clock lags the horizon would issue writes at or below
@@ -259,7 +262,8 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 // finishResync completes a snapshot resync after every snapshot page was
 // applied through Apply: in one atomic purge it drops every local entry at or
 // below the peer horizon whose key the peer does not hold, and adopts that
-// horizon. held is the set of keys the peer's snapshot carried.
+// horizon. held is the set of keys the peer's snapshot carried. The optional peer
+// is provided by gossip for archive/log attribution; local legacy callers omit it.
 //
 // Snapshot entries go through the same local horizon check as any Apply: a
 // snapshot value for a key this store collected (absent, HLC <= local horizon)
@@ -267,19 +271,24 @@ func (s *storeCore) applyPurgeLocked(set purgeSet) []Entry {
 // not prove the peer saw that delete. The peer still holding such a value is
 // cleaned up by its own resync from us (beyond_gc_horizon push rejection or a
 // digest pull answered with 410).
-func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp) (resyncResult, error) {
+func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, peerHorizon Timestamp, peer ...string) (resyncResult, error) {
 	var result resyncResult
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
+	shownPeer := ""
+	if len(peer) > 0 {
+		shownPeer = redactedPeerURL(peer[0])
+	}
 	if err := checkFutureTimestamp(peerHorizon, s.TimeReferenceMS()); err != nil {
 		return result, err
 	}
 	s.mu.RLock()
 	set := purgeSet{Horizon: maxTimestamp(s.horizon, peerHorizon), Floor: s.floor}
 	horizonChanged := set.Horizon != s.horizon
+	var archived []Entry
 	for _, entry := range s.entries {
 		if _, ok := held[entry.Key]; ok {
 			continue
@@ -288,6 +297,7 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 			continue
 		}
 		set.Removed = append(set.Removed, removedEntry{Key: entry.Key, ChangeID: entry.ChangeID, Version: entry.Version})
+		archived = append(archived, entry)
 	}
 	s.mu.RUnlock()
 	if len(set.Removed) == 0 && !horizonChanged {
@@ -303,7 +313,15 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 	if len(set.Removed) > 0 {
 		// A purged value is a visible change. It gets a fresh local position that
 		// becomes the floor, so every consumer that may hold the value re-snapshots.
-		set.Floor = s.clock.Next()
+		path, err := s.writeResyncArchive(archived, shownPeer, peerHorizon)
+		if err != nil {
+			return result, err
+		}
+		set.Resync = s.resyncSummary(archived, shownPeer, path)
+		// Reserve without consuming: a failed purgeHook must leave the position
+		// unchanged. On success applyPurgeLocked advances the clock to this floor
+		// before commitMu is released, so the next local write is strictly above it.
+		set.Floor = s.clock.Current() + 1
 	}
 	if s.purgeHook != nil {
 		if err := s.purgeHook(set); err != nil {
@@ -317,6 +335,10 @@ func (s *storeCore) finishResync(ctx context.Context, held map[string]struct{}, 
 		slog.Warn("state: resync purged entry the peer refuses (deleted cluster-side or lagging beyond retention)",
 			"key", entry.Key,
 			"writer", entry.Version.WriterNodeID,
+			"localOrigin", entry.Version.WriterNodeID == s.nodeID,
+			"peer", shownPeer,
+			"horizon", peerHorizon,
+			"archive", set.Resync.LatestArchivePath,
 			"hlcWallMS", entry.Version.HLC.WallMS,
 		)
 		notice := Entry{Key: entry.Key, Deleted: true, Version: entry.Version, ChangeID: entry.ChangeID, Position: set.Floor}

@@ -15,15 +15,18 @@ const rejectionReasonClockOffset = "clock_offset"
 
 // GossipConfig configures incremental push and digest pull exchange.
 type GossipConfig struct {
-	NodeID              string
-	Store               Store
-	Syncer              Syncer
-	PeerProvider        PeerProvider
-	Policy              MergePolicy
-	Interval            time.Duration
-	AntiEntropyInterval time.Duration
-	BackoffBase         time.Duration
-	BackoffMax          time.Duration
+	// ResyncLossWarningFraction warns after this fraction of TombstoneRetention
+	// without a successful exchange. Zero defaults to 0.8; must be between 0 and 1.
+	ResyncLossWarningFraction float64
+	NodeID                    string
+	Store                     Store
+	Syncer                    Syncer
+	PeerProvider              PeerProvider
+	Policy                    MergePolicy
+	Interval                  time.Duration
+	AntiEntropyInterval       time.Duration
+	BackoffBase               time.Duration
+	BackoffMax                time.Duration
 	// Clock supplies emitted replication status timestamps (default time.Now).
 	// It must support concurrent calls; hosts can use TimeReference.Now.
 	// Scheduling, backoff, RTT and event ordering always use local monotonic time.
@@ -45,16 +48,17 @@ type GossipConfig struct {
 // method or another Run while it is running. Injected stores, syncers, peer
 // providers and policy/clock callbacks must support concurrent use.
 type GossipEngine struct {
-	nodeID              string
-	store               Store
-	syncer              Syncer
-	peerProvider        PeerProvider
-	policy              MergePolicy
-	interval            time.Duration
-	antiEntropyInterval time.Duration
-	backoffBase         time.Duration
-	backoffMax          time.Duration
-	clock               func() time.Time
+	resyncLossWarningFraction float64
+	nodeID                    string
+	store                     Store
+	syncer                    Syncer
+	peerProvider              PeerProvider
+	policy                    MergePolicy
+	interval                  time.Duration
+	antiEntropyInterval       time.Duration
+	backoffBase               time.Duration
+	backoffMax                time.Duration
+	clock                     func() time.Time
 
 	maxDigestBytes       int64
 	maxPushBytes         int64
@@ -68,9 +72,13 @@ type GossipEngine struct {
 }
 
 type peerState struct {
-	refused              []refusedPosition
-	lastPushPosition     uint64
-	oversizedPushEntries uint64
+	unreachableSince           time.Time
+	unreachableFor             time.Duration
+	resyncLossLimitApproaching bool
+	resyncLossWarnings         uint64
+	refused                    []refusedPosition
+	lastPushPosition           uint64
+	oversizedPushEntries       uint64
 	// nodeID is the node that answered the latest acknowledged push here.
 	nodeID          string
 	failures        int
@@ -105,6 +113,12 @@ func (g *GossipEngine) timestamp() gossipTime {
 // NewGossipEngine creates a replication engine. If Policy is provided it must
 // match the store policy; otherwise the store is the only strategy source.
 func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
+	if cfg.ResyncLossWarningFraction == 0 {
+		cfg.ResyncLossWarningFraction = .8
+	}
+	if math.IsNaN(cfg.ResyncLossWarningFraction) || cfg.ResyncLossWarningFraction <= 0 || cfg.ResyncLossWarningFraction >= 1 {
+		return nil, fmt.Errorf("resync loss warning fraction must be between 0 and 1")
+	}
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("gossip node id is required")
 	}
@@ -182,20 +196,21 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 		gs.markReplicated()
 	}
 	return &GossipEngine{
-		nodeID:               cfg.NodeID,
-		store:                cfg.Store,
-		syncer:               cfg.Syncer,
-		peerProvider:         cfg.PeerProvider,
-		policy:               storePolicy,
-		interval:             interval,
-		antiEntropyInterval:  antiEntropyInterval,
-		backoffBase:          backoffBase,
-		backoffMax:           backoffMax,
-		clock:                cfg.Clock,
-		peerStates:           make(map[string]*peerState),
-		maxPushBytes:         maxPushBytes,
-		maxDigestBytes:       maxDigestBytes,
-		maxPushPagesPerRound: maxPages,
+		nodeID:                    cfg.NodeID,
+		resyncLossWarningFraction: cfg.ResyncLossWarningFraction,
+		store:                     cfg.Store,
+		syncer:                    cfg.Syncer,
+		peerProvider:              cfg.PeerProvider,
+		policy:                    storePolicy,
+		interval:                  interval,
+		antiEntropyInterval:       antiEntropyInterval,
+		backoffBase:               backoffBase,
+		backoffMax:                backoffMax,
+		clock:                     cfg.Clock,
+		peerStates:                make(map[string]*peerState),
+		maxPushBytes:              maxPushBytes,
+		maxDigestBytes:            maxDigestBytes,
+		maxPushPagesPerRound:      maxPages,
 	}, nil
 }
 
@@ -207,6 +222,9 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 	defer pushTicker.Stop()
 	antiEntropyTicker := time.NewTicker(g.antiEntropyInterval)
 	defer antiEntropyTicker.Stop()
+	warningDone := make(chan struct{})
+	go func() { defer close(warningDone); g.runResyncWarnings(ctx.Done()) }()
+	defer func() { <-warningDone }()
 	pushDone := make(chan struct{})
 	go func() {
 		defer close(pushDone)
@@ -236,6 +254,7 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 // It may overlap AntiEntropyOnce and handlers, but must not overlap another
 // SyncOnce call (including Run's push loop).
 func (g *GossipEngine) SyncOnce(ctx context.Context) error {
+	g.checkResyncLossWarnings()
 	var errs []error
 	now := time.Now()
 	for _, addr := range g.peerProvider.Peers() {
@@ -358,6 +377,7 @@ func (g *GossipEngine) pushTo(ctx context.Context, addr string, startPosition ui
 // It may overlap SyncOnce and handlers, but must not overlap another
 // AntiEntropyOnce call (including Run's pull loop).
 func (g *GossipEngine) AntiEntropyOnce(ctx context.Context) error {
+	g.checkResyncLossWarnings()
 	var errs []error
 	now := time.Now()
 	for _, addr := range g.peerProvider.Peers() {
@@ -603,6 +623,7 @@ func (g *GossipEngine) recordPushSuccess(ctx context.Context, addr string, pushe
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
+	state.reachable()
 	state.failures = 0
 	state.nextAttempt = time.Time{}
 	state.nextAttemptTime = time.Time{}
@@ -617,6 +638,7 @@ func (g *GossipEngine) recordPeerSuccess(addr string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
+	state.reachable()
 	state.failures = 0
 	state.nextAttempt = time.Time{}
 	state.nextAttemptTime = time.Time{}
@@ -627,6 +649,7 @@ func (g *GossipEngine) recordPullSuccess(addr string, started gossipTime) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
+	state.reachable()
 	state.failures = 0
 	state.nextAttempt = time.Time{}
 	state.nextAttemptTime = time.Time{}
@@ -654,6 +677,10 @@ func (g *GossipEngine) recordPeerFailure(addr, operation string, err error, now 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.peerStateLocked(addr)
+	if state.unreachableSince.IsZero() {
+		state.unreachableSince = time.Now()
+	}
+	state.unreachableFor = time.Since(state.unreachableSince)
 	state.failures++
 	backoff := saturatedBackoff(g.backoffBase, g.backoffMax, state.failures)
 	state.nextAttempt = now.Add(backoff)
@@ -885,7 +912,7 @@ func (g *GossipEngine) resyncFrom(ctx context.Context, addr string, knownHorizon
 		}
 		since = resp.NextSincePosition
 	}
-	result, err := gs.finishResync(ctx, held, horizon)
+	result, err := gs.finishResync(ctx, held, horizon, addr)
 	if err != nil {
 		return fmt.Errorf("resync from %s: %w", shown, err)
 	}
