@@ -17,7 +17,7 @@ func run(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("outpostnet-state-reset", flag.ContinueOnError)
 	dir := flags.String("data-dir", "", "existing pkg/state directory; stop its host first")
 	reference := flags.String("reference-time", "", "confirmed reference time in RFC3339 (default: corrected system clock)")
-	rebuild := flags.Bool("rebuild", false, "clear ALL state if its GC horizon is in the future; rebuild from healthy peers after restart")
+	rebuild := flags.Bool("rebuild", false, "archive ALL old state files if its GC horizon is in the future; rebuild from healthy peers after restart")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

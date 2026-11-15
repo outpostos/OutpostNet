@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -158,15 +159,64 @@ func TestClockResetFutureHorizonUpgrade(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("refused reset changed log")
 	}
+	if err := os.WriteFile(filepath.Join(cfg.Dir, durableLogFile), append(before, []byte("{unconfirmed")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild must preserve even unfinished artifacts byte-for-byte by rename.
+	for name, data := range map[string]string{durableCompactTmpFile: "uninstalled compaction", durableManifestFile + ".tmp": "uninstalled manifest"} {
+		if err := os.WriteFile(filepath.Join(cfg.Dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldFiles := make(map[string][]byte)
+	oldInfo := make(map[string]os.FileInfo)
+	for _, name := range []string{durableLogFile, durableManifestFile, durableCompactTmpFile, durableManifestFile + ".tmp"} {
+		oldFiles[name], err = os.ReadFile(filepath.Join(cfg.Dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldInfo[name], err = os.Stat(filepath.Join(cfg.Dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	result, err := ResetDurableClock(ctx, ClockResetConfig{Dir: cfg.Dir, Reference: clock, Rebuild: true})
 	if err != nil || !result.Rebuilt || result.Purged != 1 || result.Floor <= 50 {
 		t.Fatalf("rebuild: %+v %v", result, err)
+	}
+	if filepath.Dir(result.ArchivePath) != filepath.Join(cfg.Dir, "archive") || !strings.HasPrefix(filepath.Base(result.ArchivePath), "rebuild-") || result.Archived != 1 {
+		t.Fatalf("rebuild archive result: %+v", result)
+	}
+	for name, data := range oldFiles {
+		path := filepath.Join(result.ArchivePath, name)
+		got, err := os.ReadFile(path)
+		if err != nil || !reflect.DeepEqual(got, data) {
+			t.Fatalf("rebuild changed archived %s: %v", name, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || !os.SameFile(oldInfo[name], info) {
+			t.Fatalf("rebuild did not rename %s: %v", name, err)
+		}
 	}
 	s, err = NewDurableStore(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if entries, err := s.ListEntries(ctx); err != nil || len(entries) != 0 || !s.CheckConsumerPosition(50).NeedsSnapshot {
+		t.Fatalf("rebuild recovered archived entries or old cursor: %+v %v", entries, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewDurableStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if entries, err := s.ListEntries(ctx); err != nil || len(entries) != 0 {
+		t.Fatalf("second startup recovered archived state: %+v %v", entries, err)
+	}
 	if s.nodeID != cfg.NodeID || !s.GCHorizon().isZero() || !s.adoptedHorizon().isZero() {
 		t.Fatal("identity or horizon incorrect")
 	}

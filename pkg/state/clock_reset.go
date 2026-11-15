@@ -17,8 +17,9 @@ var ErrClockRebuildRequired = errors.New("state GC horizon is in the future; sto
 
 // ClockResetConfig configures an offline reset of an existing state directory.
 // Reference must be a corrected clock (or a host's established TimeReference).
-// Nil uses system time. Rebuild explicitly permits clearing ALL state when the
-// horizon is ahead, while retaining the manifest identity and monotonic counters.
+// Nil uses system time. Rebuild explicitly permits moving ALL old state files
+// into an archive and starting empty when the horizon is ahead, while retaining
+// the manifest identity and monotonic counters.
 type ClockResetConfig struct {
 	Dir       string
 	Reference PhysicalClock
@@ -26,14 +27,18 @@ type ClockResetConfig struct {
 	// Test hooks exercise the same disk operations and commit boundary as Compact.
 	wrapLog        func(durableLog) durableLog
 	compactionHook func(string) error
+	wrapArchive    func(durableLog) durableLog
+	archiveSyncDir func(string) error
 }
 
-// ClockResetResult contains counts only, never entry payloads or credentials.
+// ClockResetResult reports counts and the local archive path, never payloads.
 type ClockResetResult struct {
 	Purged      int
 	Rebuilt     bool
 	ReferenceMS int64
 	Floor       uint64
+	ArchivePath string
+	Archived    int
 }
 
 // committedPolicy replays accepted log commits by their local position. Reset
@@ -87,10 +92,11 @@ func (s *DurableStore) checkClockUpgrade() error {
 }
 
 // ResetDurableClock takes the same exclusive directory lock as normal recovery.
-// The host must be stopped. An atomic, synced compaction replaces ALL historical
-// HLC sources (entries, batches, snapshot headers and purge records) together.
-// A failure is never reported as a successful purge. Before rename the old log
-// survives; after rename the complete replacement is authoritative on restart.
+// The host must be stopped. Purged entries are archived and synced before an
+// atomic compaction replaces historical HLC sources (entries, batches, snapshot
+// headers and purge records). Rebuild instead archives the original files by
+// rename; a pending marker refuses startup until the new state is complete.
+// A failure is never reported as a successful purge.
 func ResetDurableClock(ctx context.Context, cfg ClockResetConfig) (result ClockResetResult, err error) {
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -122,6 +128,25 @@ func ResetDurableClock(ctx context.Context, cfg ClockResetConfig) (result ClockR
 	if s.CurrentPosition() == math.MaxUint64 {
 		return result, fmt.Errorf("clock reset position counter exhausted")
 	}
+	entries, err := s.ListEntries(ctx)
+	if err != nil {
+		return result, err
+	}
+	var purged []Entry
+	for _, entry := range entries {
+		if futureHorizon || checkFutureTimestamp(entry.Version.HLC, now) != nil {
+			purged = append(purged, entry)
+		}
+	}
+	if futureHorizon {
+		result.ArchivePath, err = archiveClockRebuild(cfg.Dir)
+	} else {
+		result.ArchivePath, err = writeClockResetArchive(cfg, purged)
+	}
+	if err != nil {
+		return ClockResetResult{}, err
+	}
+	result.Archived = len(purged)
 	result.ReferenceMS, result.Rebuilt = now, futureHorizon
 	// Bump past even the latest pre-reset cursor. A floor equal to a removed
 	// position would leave a consumer at that position incorrectly resumable.
@@ -161,6 +186,11 @@ func ResetDurableClock(ctx context.Context, cfg ClockResetConfig) (result ClockR
 	manifest.ClockRecoveryVersion = 1
 	if err := writeManifest(filepath.Join(s.dir, durableManifestFile), manifest); err != nil {
 		return ClockResetResult{}, err
+	}
+	if futureHorizon {
+		if err := finishClockRebuild(s.dir, result.ArchivePath); err != nil {
+			return ClockResetResult{}, err
+		}
 	}
 	return result, nil
 }
