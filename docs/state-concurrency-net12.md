@@ -59,6 +59,26 @@ GOOS=linux GOARCH=amd64 make build-agent
 The short temporary directory avoids existing Mac Unix-socket path limits;
 package serialization bounds contention in the full suite without skipping tests.
 
+The focused race command passed 20 repetitions on the local Mac (45.933s), as
+did formatting, build, vet and the Linux agent cross-build. The Mac full suite
+passed state (168.775s) and delivery (216.098s), then failed two unchanged QUIC
+tests: `TestCertificateReconnectAndConcurrentStreams` reported a closed network
+connection and `TestReconnectReplacesRegistration` timed out dialing. Both
+passed three isolated race repetitions. Their fixtures and product code are
+unchanged. Native Linux validation uses a fresh archive of implementation commit
+`b37af8e`, with build/test temporaries on the dev host's existing tmpfs:
+
+```sh
+go build ./...
+go vet ./...
+GOMAXPROCS=2 GOTMPDIR=/dev/shm TMPDIR=/dev/shm go test -race -count=1 -timeout=30m ./...
+make build-agent
+```
+
+Native Linux build, vet, the complete race suite and the agent build all passed
+(state 112.299s, delivery 132.562s). No tests were skipped. The follow-up evidence
+commit changes only this report; the implementation remains `b37af8e`.
+
 Red → green: before changing `Run`, the new held-digest test failed with
 `Run push waited for held-open digest` after its two-second deadline. With
 independent loops it passes. The manual overlap cases document behavior already
