@@ -34,6 +34,36 @@ reference, existing injectable clocks keep their behavior; handshake quality is
 `UNSYNCED`. There is no implicit global clock or automatic product-host wiring.
 Mesh/Let integration belongs to V2-MESH-5 / V2-LET-4.
 
+### Replication status timestamps (NET-14)
+
+Set `GossipConfig.Clock` explicitly to use the shared reference for replication
+status. It defaults to `time.Now`, independently of the store's clock options:
+
+```go
+engine, err := state.NewGossipEngine(state.GossipConfig{
+    NodeID: nodeID, Store: store, Syncer: syncer, PeerProvider: peers,
+    Clock: reference.Now,
+})
+if err != nil { return err }
+```
+
+The callback must support concurrent use. It supplies `OutboundRoundTime`
+(caught-up push round start), `LastPullTime` (fully applied pull start),
+`LastSuccessTime` (acknowledged push, applied pull or snapshot resync completion),
+and `LastErrorTime`. Start timestamps are captured when the round starts, even
+if the reference changes during the exchange. `NextAttemptTime` translates the
+existing monotonic retry deadline into the reference time base at failure;
+later reference changes do not rewrite that recorded deadline or reschedule retries.
+Unobserved events keep zero timestamps, errors survive subsequent success, and
+these process-local timestamps are not persisted.
+
+Only emitted status timestamps use this hook. Push/pull intervals, backoff,
+RTT sampling, elapsed time and the event ordering behind catch-up flags retain
+local monotonic time. A reference that steps backwards or freezes can produce
+non-increasing timestamps; use the catch-up flags for exchange-order facts.
+Physical handshake samples, the wire protocol and durable formats are unchanged.
+Embedding hosts opt in; this ticket does not upgrade Mesh/Let dependency pins.
+
 The host's trusted time-source adapter (for example, a chrony monitor) periodically
 calls `reference.UpdateSource(state.TimeSourceStatus{Synchronized: true,
 Uncertainty: measuredErrorBound})`. Report source loss with an unsynchronized
@@ -152,12 +182,17 @@ acceptance (those are separate tickets).
 | Handshake fields, physical rather than reference time, major upgrade | `TestTimeReferenceWireMetadataAndProtocolUpgrade`; existing byte-budget / protocol / horizon tests |
 | Delivery reference admission/expiry, existing values, restart | `TestTimeReferenceDeliveryAdmissionExpiryAndRestart` |
 | Shared concurrent reference | `TestTimeReferenceConcurrentHostUse` under `-race` |
+| NET-14: status follows a reference one year away, including start/completion and error history | `TestReplicationStatusClockTimestamps`; first fails with missing `GossipConfig.Clock`, then reports system timestamps when only the field is added, and passes with the implementation |
+| NET-14: shared backoff and periodic push/pull survive forward/backward jumps and a frozen reference | `TestReplicationStatusClockRunAndBackoff`: no early retries, both loops recover, inbound/outbound payloads arrive |
+| NET-14: overlapping failures and frozen-time recovery preserve monotonic catch-up ordering | `TestReplicationStatusClockConcurrentFailureOrdering`: each method fails while the other is held open; wall time reverses and then freezes |
+| NET-14: push/pull 410 resync completion uses `TimeReference.Now` | `TestReplicationStatusClockResync`: memory/durable stores, no pull claim until the next complete digest |
 | Net#55 follow-up: only clock_offset pins the refusal gate | `TestTimeReferencePermanentRejectionDoesNotPinGC`; existing clock-refusal tests |
 
 Reproduce from the repository root:
 
 ```sh
 go test -race -count=1 ./pkg/state ./pkg/delivery -run '^TestTimeReference'
+go test -race -count=20 ./pkg/state -run '^TestReplicationStatusClock'
 go build ./...
 go vet ./...
 TMPDIR=/tmp go test -p 1 -race -count=1 ./...
@@ -181,3 +216,27 @@ text after JSON), `TestStreamRecoversAfterEarlyReturns` (one QUIC dial timeout),
 and `TestColdStartFromCache` (Linux cache fixture expired before its assertion).
 Isolated rechecks passed; the crash test also passed repeated checks on the
 unchanged main baseline. These tests and their product code are unchanged here.
+
+### NET-14 validation
+
+On implementation commit `22ba3da`, all four `TestReplicationStatusClock*` tests
+passed 20 repetitions under the race detector (7.201s). Mac formatting with a
+clean diff, build, vet and the Linux agent cross-build passed. The complete Mac
+race run passed state (164.372s) and delivery (183.556s), but failed unchanged
+`TestIntegrationEndToEnd` with a QUIC dial timeout. A tunnel-package rerun failed
+`TestReverseStreamsConcurrentWithReconnect` and `TestNoTokenNoDeclaration`.
+An isolated archive of unchanged main (`4222909`) also failed the tunnel suite
+(`TestAddressChangeMovesRegistration`, QUIC dial timeout).
+
+A fresh archive of `22ba3da` passed all native Linux gates on the dev host:
+
+```sh
+go build ./...
+go vet ./...
+GOMAXPROCS=2 GOTMPDIR=/dev/shm TMPDIR=/dev/shm go test -race -count=1 -timeout=30m ./...
+make build-agent
+```
+
+The full Linux race suite excluded no tests: state 106.454s, delivery 122.499s,
+tunnel 14.524s. The evidence follow-up changes documentation only. No VM or
+operating-system clock was changed. Final GitHub checks are recorded in the PR.

@@ -10,6 +10,8 @@ import (
 // one peer. It is a local fact: it says what this node pushed, what the peer
 // acknowledged and what this node pulled, never what the peer itself holds.
 // Zero times mean "not in this process" (the engine does not persist them).
+// Timestamps use GossipConfig.Clock; catch-up ordering and backoff use local
+// monotonic time even if that clock steps backwards or stays frozen.
 type PeerReplicationStatus struct {
 	// Peer is the address from the PeerProvider with any password redacted.
 	Peer string
@@ -58,9 +60,9 @@ type PeerReplicationStatus struct {
 	// LastSuccessTime is when the latest acknowledged push, fully applied
 	// pull or snapshot resync with the peer completed.
 	LastSuccessTime time.Time
-	// LastError is the latest failed exchange, kept after later successes;
-	// compare LastErrorTime with LastPullTime/LastSuccessTime. Credentials
-	// are redacted.
+	// LastError is the latest failed exchange, kept after later successes.
+	// Wall timestamps can step; catch-up flags use monotonic event ordering.
+	// Credentials are redacted.
 	LastError string
 	// LastErrorTime is when LastError was recorded.
 	LastErrorTime time.Time
@@ -70,7 +72,9 @@ type PeerReplicationStatus struct {
 	// ConsecutiveFailures counts failures since the last success.
 	ConsecutiveFailures int
 	// NextAttemptTime is the end of the current backoff; zero when the peer
-	// is not in backoff.
+	// is not in backoff. This is the monotonic deadline translated to the status
+	// clock's time base when the failure was recorded; clock changes do not
+	// reschedule retries.
 	NextAttemptTime time.Time
 }
 
@@ -122,17 +126,17 @@ func (g *GossipEngine) ReplicationStatus(ctx context.Context) (ReplicationStatus
 			GCConfirmedPosition:   nonRefusedPosition(acknowledged, refused),
 			OversizedPushEntries:  state.oversizedPushEntries,
 			OutboundCaughtUp:      len(refused) == 0 && acknowledged >= status.Local.CurrentPosition,
-			LastPullTime:          state.lastPull,
-			InboundCaughtUp:       !state.lastPull.IsZero() && (state.lastErrorTime.IsZero() || state.lastErrorTime.Before(state.lastPull)),
+			LastPullTime:          state.lastPull.wall,
+			InboundCaughtUp:       !state.lastPull.monotonic.IsZero() && (state.lastErrorTime.monotonic.IsZero() || state.lastErrorTime.monotonic.Before(state.lastPull.monotonic)),
 			LastSuccessTime:       state.lastSuccess,
 			LastError:             state.lastError,
-			LastErrorTime:         state.lastErrorTime,
+			LastErrorTime:         state.lastErrorTime.wall,
 			LastErrorOperation:    state.lastErrorOp,
 			ConsecutiveFailures:   state.failures,
-			NextAttemptTime:       state.nextAttempt,
-			OutboundRoundTime:     state.lastCaughtUpRound,
+			NextAttemptTime:       state.nextAttemptTime,
+			OutboundRoundTime:     state.lastCaughtUpRound.wall,
 		}
-		roundCaughtUp := state.lastRoundCaughtUp && (state.lastErrorTime.IsZero() || state.lastErrorTime.Before(state.lastRound))
+		roundCaughtUp := state.lastRoundCaughtUp && (state.lastErrorTime.monotonic.IsZero() || state.lastErrorTime.monotonic.Before(state.lastRound.monotonic))
 		peer.OutboundRoundCaughtUp = len(refused) == 0 && (peer.OutboundCaughtUp || roundCaughtUp)
 		peer.CaughtUp = peer.OutboundCaughtUp && peer.InboundCaughtUp
 		status.Peers = append(status.Peers, peer)
