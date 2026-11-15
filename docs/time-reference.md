@@ -216,3 +216,27 @@ text after JSON), `TestStreamRecoversAfterEarlyReturns` (one QUIC dial timeout),
 and `TestColdStartFromCache` (Linux cache fixture expired before its assertion).
 Isolated rechecks passed; the crash test also passed repeated checks on the
 unchanged main baseline. These tests and their product code are unchanged here.
+
+### NET-14 validation
+
+On implementation commit `22ba3da`, all four `TestReplicationStatusClock*` tests
+passed 20 repetitions under the race detector (7.201s). Mac formatting with a
+clean diff, build, vet and the Linux agent cross-build passed. The complete Mac
+race run passed state (164.372s) and delivery (183.556s), but failed unchanged
+`TestIntegrationEndToEnd` with a QUIC dial timeout. A tunnel-package rerun failed
+`TestReverseStreamsConcurrentWithReconnect` and `TestNoTokenNoDeclaration`.
+An isolated archive of unchanged main (`4222909`) also failed the tunnel suite
+(`TestAddressChangeMovesRegistration`, QUIC dial timeout).
+
+A fresh archive of `22ba3da` passed all native Linux gates on the dev host:
+
+```sh
+go build ./...
+go vet ./...
+GOMAXPROCS=2 GOTMPDIR=/dev/shm TMPDIR=/dev/shm go test -race -count=1 -timeout=30m ./...
+make build-agent
+```
+
+The full Linux race suite excluded no tests: state 106.454s, delivery 122.499s,
+tunnel 14.524s. The evidence follow-up changes documentation only. No VM or
+operating-system clock was changed. Final GitHub checks are recorded in the PR.
