@@ -114,7 +114,7 @@ The `release` target removes stale `*.tar.gz` files from `build/release/` first,
 ### 2.3 Verify Artifacts
 
 ```bash
-# Count: should be 20
+# Count: should be 24 (6 components x 4 platforms)
 ls build/release/*.tar.gz | wc -l
 
 # Spot-check: extract and verify version
@@ -139,7 +139,7 @@ git push origin v1.X.Y
 
 Pushing a `v*.*.*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml). The workflow runs `make release` (which verifies the checksums before finishing), then creates the GitHub Release with:
 
-- all 20 `<component>-<VERSION>-<os>-<arch>.tar.gz` archives
+- all 24 `<component>-<VERSION>-<os>-<arch>.tar.gz` archives
 - `outpostnet-k8s.yaml`
 - `SHA256SUMS`
 
@@ -160,7 +160,7 @@ Or create via GitHub UI:
 1. Go to Releases > Draft a new release
 2. Select the tag `v1.X.Y`
 3. Paste release notes from CHANGELOG.md
-4. Upload all 20 archives, `outpostnet-k8s.yaml`, and `SHA256SUMS` from `build/release/`
+4. Upload all 24 archives, `outpostnet-k8s.yaml`, and `SHA256SUMS` from `build/release/`
 
 ### 3.3 Update Landing Page
 
@@ -178,7 +178,7 @@ After pushing the landing page changes, verify [net.outpostos.com](https://net.o
 ### 4.1 Download Verification
 
 - [ ] GitHub Release page loads correctly
-- [ ] All 20 artifact download links work
+- [ ] All 24 artifact download links work
 - [ ] Binary extracts and runs `--version` on at least one platform
 - [ ] `SHA256SUMS` is attached and `sha256sum -c SHA256SUMS` passes after downloading every asset
 - [ ] `outpostnet-k8s.yaml` is attached and its image tags match the release version
