@@ -30,13 +30,16 @@ func TestCertificateCLIProvisionInspectAndLoad(t *testing.T) {
 	}
 	leaf := filepath.Join(dir, "node.pem")
 	leafKey := filepath.Join(dir, "node.key")
-	if _, err := run("cert", "issue", "--ca", ca, "--ca-key", key, "--node-id", "node-a", "--cert", leaf, "--key", leafKey); err != nil {
+	if _, err := run("cert", "issue", "--ca", ca, "--ca-key", key, "--node-id", "node-a", "--cert", leaf, "--key", leafKey, "--san", "10.0.0.9", "--san", "node-a.edge.local"); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"cert", "inspect", leaf}, {"cert", "list", dir}} {
 		out, err := run(args...)
 		if err != nil || !strings.Contains(out, "node-a") {
 			t.Fatalf("%v: %s %v", args, out, err)
+		}
+		if !strings.Contains(out, "dns=node-a.edge.local") || !strings.Contains(out, "ip=10.0.0.9") {
+			t.Fatalf("%v: missing SANs: %s", args, out)
 		}
 		if strings.Contains(out, "PRIVATE KEY") {
 			t.Fatal("exposed private key")
@@ -75,6 +78,9 @@ func TestCertificateCLIRejectsInvalidNodeAndLoadsIssuedCredentials(t *testing.T)
 	if err := run("cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "bad node", "--cert", cert, "--key", key); err == nil {
 		t.Fatal("issued invalid identity")
 	}
+	if err := run("cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "node-a", "--san", "bad san", "--cert", cert, "--key", key); err == nil {
+		t.Fatal("issued invalid SAN")
+	}
 	if err := run("cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "node-a", "--cert", cert, "--key", key); err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +115,12 @@ func TestCertificateCLIWithNTSSANs(t *testing.T) {
 	}
 	cert, key := filepath.Join(dir, "node.pem"), filepath.Join(dir, "node.key")
 	args := []string{"cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "node-a", "--cert", cert, "--key", key}
-	for _, bad := range [][]string{{"--ip", "not-an-ip"}, {"--dns", "bad name"}, {"--dns", "*.example.net"}} {
+	for _, bad := range [][]string{{"--san", ""}, {"--san", "bad name"}, {"--san", "*.example.net"}} {
 		if _, err := run(append(append([]string{}, args...), bad...)...); err == nil {
 			t.Fatal("invalid SAN accepted")
 		}
 	}
-	if _, err := run(append(args, "--ip", "192.0.2.1", "--ip", "2001:db8::1", "--dns", "node-a.example.net")...); err != nil {
+	if _, err := run(append(args, "--san", "192.0.2.1", "--san", "2001:db8::1", "--san", "node-a.example.net")...); err != nil {
 		t.Fatal(err)
 	}
 	pair, err := tls.LoadX509KeyPair(cert, key)

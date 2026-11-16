@@ -27,11 +27,26 @@ certificate details. `list` reads `.pem`/`.crt` certificates, nonrecursively; ke
 private keys in `.key` files. Distribute only the group **public** CA and each
 node's own certificate/key to that node. Keep the CA private key offline.
 
-## NTS server SANs
+### Optional IP/DNS SANs (NTS server verification)
 
-`cert issue --ip 192.0.2.1 --dns node-a.example.net` adds repeatable IP/DNS SANs
-while retaining the node URI. `cert inspect` and `cert list` show these public names.
-See [group chrony/NTS](group-time-sync.md) for certificate requirements and startup ordering.
+Tunnel identity is the URI SAN above and needs no DNS or IP names. When the node
+also serves NTS to group peers (ADR-0006 D7), embed the names those peers use to
+verify it, alongside the node identity:
+
+```sh
+outpostnet-agent cert issue --ca credentials/group.pem --ca-key credentials/group.key \
+  --node-id node-a --san node-a.edge.local --san 10.0.0.5 \
+  --cert credentials/node-a.pem --key credentials/node-a.key
+```
+
+`--san` is repeatable and accepts an IP address or a DNS name. Names are validated
+(RFC 1123 labels; empty and duplicate values are rejected) and canonicalized
+before being written as IP/DNS SANs. They do not change tunnel authentication, so
+certificates without SANs and already-issued credentials stay valid. `cert inspect`
+appends `dns=` and `ip=` when those SANs are present.
+
+See [group chrony/NTS](group-time-sync.md) for the renderer, GNSS templates and
+startup ordering for K3s/Let.
 
 ## Configure both peers
 

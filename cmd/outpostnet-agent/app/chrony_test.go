@@ -31,7 +31,7 @@ func chronyFixture(t *testing.T) (string, string, string) {
 	ca, caKey := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key")
 	cert, key := filepath.Join(dir, "node.pem"), filepath.Join(dir, "node.key")
 	run("cert", "ca", "--cert", ca, "--key", caKey)
-	run("cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "a", "--cert", cert, "--key", key, "--ip", "192.0.2.1")
+	run("cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "a", "--cert", cert, "--key", key, "--san", "192.0.2.1")
 	config := filepath.Join(dir, "agent.yaml")
 	peers := filepath.Join(dir, "peers.json")
 	os.WriteFile(config, []byte("node_id: a\ntls:\n  ca_file: "+ca+"\n  cert_file: "+cert+"\n  key_file: "+key+"\n"), 0600)

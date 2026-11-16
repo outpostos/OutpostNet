@@ -2,7 +2,9 @@
 
 Scope: [Net#76](https://github.com/outpostos/OutpostNet/issues/76),
 [ADR-0006 D7](https://github.com/outpostos/OutpostOS/blob/main/docs/adr/0006-time-base.md).
-Implementation: certificate commit `a3d866b`, renderer/CLI/CI commit `b46bf4b`.
+The final branch uses certificate SAN issuance from merged [PR #77](https://github.com/outpostos/OutpostNet/pull/77),
+with additional CLI IPv6/identity regression coverage. Renderer/CLI/CI originated
+in `b46bf4b`; subsequent commits record portability fixes and the main merge.
 No VM configuration, service or system clock was changed. Node1 was queried only
 with read-only `chronyc -v`, `tracking`, and `sources -n` (client version 4.5).
 Native Linux process evidence uses chrony 4.2 built with `+NTS` on the development
@@ -27,7 +29,8 @@ host; it is not evidence that node1 has NTS configured.
 
 ## Red then green
 
-The new SAN CLI test first failed with `unknown flag: --ip`. The renderer golden
+The SAN CLI regression was added before implementing SAN support, then adapted
+to the merged `--san` interface from PR #77. The renderer golden
 suite first failed because the package had no implementation. Render/watch CLI
 tests first failed with `unknown command "chrony"`; the live-directory slice first
 failed with `unknown flag: --socket`. Each passed after its implementation.
@@ -53,7 +56,12 @@ archive without Mac metadata. These files were never in the branch.
 
 ## Results
 
-All local gates passed. The complete Mac race suite passed, including delivery
+After integrating main, the combined branch passed native Linux build, vet,
+module tidiness, complete race tests with real NTS enabled, and the agent build
+(delivery 139.369s, state 126.500s, tunnel 14.936s). Mac build/vet, cross-build and
+focused race tests also passed after the merge. The earlier complete Mac/Linux
+runs below preceded main's SAN/reconnect changes; an additional complete Mac run
+is recorded in the PR. The complete Mac race suite passed, including delivery
 182.533s, state 182.974s, and tunnel 15.177s. The complete native Linux race suite
 (with the real NTS test enabled) passed: delivery 138.029s, state 127.656s, and
 tunnel 15.435s. No tests were excluded. Build, vet, module tidiness, formatting,

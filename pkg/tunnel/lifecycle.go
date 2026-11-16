@@ -152,6 +152,16 @@ func (mc *ManagedClient) State() ConnState {
 	return mc.state
 }
 
+// Connected reports whether the client holds a live, authenticated connection
+// that OpenServiceStream can use. It is false between UpdateServerAddr clearing
+// the old connection and the reconnect loop installing the new one, even though
+// State may still read StateConnected during that hand-off window.
+func (mc *ManagedClient) Connected() bool {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.conn != nil && mc.state == StateConnected
+}
+
 // ServerAddr returns the current remote tunnel server address.
 func (mc *ManagedClient) ServerAddr() string {
 	mc.mu.RLock()

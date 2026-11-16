@@ -27,18 +27,11 @@ func IssueNode(ca tls.Certificate, nodeID string, now time.Time) (certPEM, keyPE
 	return IssueNodeWithSANs(ca, nodeID, now, nil, nil)
 }
 
-// IssueNodeWithSANs adds NTS server names while preserving the node URI identity.
-func IssueNodeWithSANs(ca tls.Certificate, nodeID string, now time.Time, dns []string, ips []net.IP) (certPEM, keyPEM []byte, err error) {
-	for _, name := range dns {
-		if !ValidDNSName(name) {
-			return nil, nil, fmt.Errorf("invalid DNS SAN")
-		}
-	}
-	for _, ip := range ips {
-		if ip.To16() == nil {
-			return nil, nil, fmt.Errorf("invalid IP SAN")
-		}
-	}
+// IssueNodeWithSANs issues a node certificate that additionally carries the
+// given DNS and IP subject alternative names. Node identity still comes only
+// from the urn:outpostos:node: URI, so existing certificates remain valid;
+// these names exist so NTS servers can be verified by IP or DNS (ADR-0006 D7).
+func IssueNodeWithSANs(ca tls.Certificate, nodeID string, now time.Time, dnsNames []string, ips []net.IP) (certPEM, keyPEM []byte, err error) {
 	if len(ca.Certificate) == 0 {
 		return nil, nil, fmt.Errorf("missing CA")
 	}
@@ -53,10 +46,67 @@ func IssueNodeWithSANs(ca tls.Certificate, nodeID string, now time.Time, dns []s
 	if !parent.IsCA || parent.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return nil, nil, fmt.Errorf("issuer is not a signing CA")
 	}
-	return issue(parent, signer, nodeID, now, dns, ips)
+	dnsNames, ips, err = normalizeSANs(dnsNames, ips)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issue(parent, signer, nodeID, now, dnsNames, ips)
 }
 
-func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, now time.Time, dns []string, ips []net.IP) ([]byte, []byte, error) {
+// normalizeSANs validates and canonicalizes extra subject alternative names.
+func normalizeSANs(dnsNames []string, ips []net.IP) ([]string, []net.IP, error) {
+	names := make([]string, 0, len(dnsNames))
+	seenNames := make(map[string]struct{}, len(dnsNames))
+	for _, raw := range dnsNames {
+		name := strings.TrimSuffix(strings.TrimSpace(raw), ".")
+		if !ValidDNSName(name) {
+			return nil, nil, fmt.Errorf("invalid DNS SAN %q", raw)
+		}
+		key := strings.ToLower(name)
+		if _, dup := seenNames[key]; dup {
+			return nil, nil, fmt.Errorf("duplicate DNS SAN %q", raw)
+		}
+		seenNames[key] = struct{}{}
+		names = append(names, name)
+	}
+	addrs := make([]net.IP, 0, len(ips))
+	seenAddrs := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		if ip == nil {
+			return nil, nil, fmt.Errorf("invalid IP SAN")
+		}
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		key := ip.String()
+		if _, dup := seenAddrs[key]; dup {
+			return nil, nil, fmt.Errorf("duplicate IP SAN %q", key)
+		}
+		seenAddrs[key] = struct{}{}
+		addrs = append(addrs, ip)
+	}
+	return names, addrs, nil
+}
+
+// ValidDNSName accepts RFC 1123 hostname labels, but not IP literals.
+func ValidDNSName(name string) bool {
+	if name == "" || len(name) > 253 || net.ParseIP(name) != nil {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, now time.Time, dnsNames []string, ips []net.IP) ([]byte, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -74,12 +124,12 @@ func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, no
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid node_id")
 		}
-		cert.DNSNames = dns
-		cert.IPAddresses = ips
 		cert.IsCA = false
 		cert.KeyUsage = x509.KeyUsageDigitalSignature
 		cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
 		cert.URIs = []*url.URL{uri}
+		cert.DNSNames = dnsNames
+		cert.IPAddresses = ips
 		cert.Subject = pkix.Name{}
 		cert.NotAfter = now.AddDate(10, 0, 0)
 		if got, err := NodeID(cert); err != nil || got != nodeID {
@@ -104,22 +154,4 @@ func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, no
 		return nil, nil, err
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
-}
-
-// ValidDNSName accepts concrete ASCII host names, excluding wildcards and IPs.
-func ValidDNSName(name string) bool {
-	if name == "" || len(name) > 253 || net.ParseIP(name) != nil {
-		return false
-	}
-	for _, label := range strings.Split(name, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, c := range label {
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
-				return false
-			}
-		}
-	}
-	return true
 }

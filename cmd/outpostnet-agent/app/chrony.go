@@ -154,7 +154,7 @@ func renderChrony(ctx context.Context, configFile, peersFile, socket string, gns
 		return nil, zero, fmt.Errorf("invalid NTS certificate")
 	}
 	if len(leaf.DNSNames)+len(leaf.IPAddresses) == 0 {
-		return nil, zero, fmt.Errorf("NTS requires a node certificate with IP or DNS SANs; reissue with cert issue --ip/--dns")
+		return nil, zero, fmt.Errorf("NTS requires a node certificate with IP or DNS SANs; reissue with cert issue --san")
 	}
 	var b []byte
 	if socket == "" {

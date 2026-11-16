@@ -9,7 +9,7 @@ Issue each node a certificate with its actual NTS endpoint IPs and/or DNS names:
 
 ```sh
 outpostnet-agent cert issue --ca credentials/group.pem --ca-key credentials/group.key \
-  --node-id node-a --ip 192.0.2.1 --ip 2001:db8::1 --dns node-a.example.net \
+  --node-id node-a --san 192.0.2.1 --san 2001:db8::1 --san node-a.example.net \
   --cert credentials/node-a.pem --key credentials/node-a.key
 ```
 

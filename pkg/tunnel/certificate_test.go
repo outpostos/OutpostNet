@@ -185,6 +185,22 @@ func TestCertificateTLSWithSkewedClocks(t *testing.T) {
 	}
 }
 
+// waitConnected blocks until mc holds a live client connection. waitAccepted
+// only observes the server's view, and the server registers the peer during
+// the TLS auth handshake — before reconnect() installs the new connection on
+// the client. Opening streams in that window sees conn == nil and returns
+// net.ErrClosed, so the test must also gate on client-side readiness.
+func waitConnected(t *testing.T, mc *ManagedClient) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !mc.Connected() {
+		if time.Now().After(deadline) {
+			t.Fatalf("managed client did not become connected, state=%v", mc.State())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestCertificateReconnectAndConcurrentStreams(t *testing.T) {
 	ca, roots := groupCA(t)
 	sid := nodeIdentity(t, ca, roots, "node-b")
@@ -207,6 +223,7 @@ func TestCertificateReconnectAndConcurrentStreams(t *testing.T) {
 	}
 	waitAccepted(t, first, nil)
 	waitAccepted(t, second, []string{"node-a"})
+	waitConnected(t, mc)
 	done := make(chan error, 8)
 	for n := 0; n < 8; n++ {
 		go func() {
