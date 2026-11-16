@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,6 +17,7 @@ import (
 func newCertificateCommand() *cobra.Command {
 	root := &cobra.Command{Use: "cert", Short: "Provision and inspect offline group/node certificates"}
 	var certFile, keyFile, caFile, caKey, nodeID string
+	var dnsNames, ipNames []string
 	ca := &cobra.Command{Use: "ca", Short: "Create a group CA (never overwrites files)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		cert, key, err := tlsutil.GenerateCA(time.Now())
 		if err != nil {
@@ -32,7 +34,15 @@ func newCertificateCommand() *cobra.Command {
 		if err != nil {
 			return fmt.Errorf("load signing CA: %w", err)
 		}
-		cert, key, err := tlsutil.IssueNode(ca, nodeID, time.Now())
+		var ips []net.IP
+		for _, name := range ipNames {
+			ip := net.ParseIP(name)
+			if ip == nil {
+				return fmt.Errorf("invalid IP SAN")
+			}
+			ips = append(ips, ip)
+		}
+		cert, key, err := tlsutil.IssueNodeWithSANs(ca, nodeID, time.Now(), dnsNames, ips)
 		if err != nil {
 			return err
 		}
@@ -42,6 +52,8 @@ func newCertificateCommand() *cobra.Command {
 	issue.Flags().StringVar(&keyFile, "key", "", "Output node private key PEM")
 	issue.Flags().StringVar(&caFile, "ca", "", "Group CA certificate PEM")
 	issue.Flags().StringVar(&caKey, "ca-key", "", "Group CA private key PEM (offline issuer only)")
+	issue.Flags().StringSliceVar(&dnsNames, "dns", nil, "NTS DNS SAN (repeatable or comma-separated)")
+	issue.Flags().StringSliceVar(&ipNames, "ip", nil, "NTS IP SAN (repeatable or comma-separated)")
 	issue.Flags().StringVar(&nodeID, "node-id", "", "Node identity")
 	for _, name := range []string{"cert", "key", "ca", "ca-key", "node-id"} {
 		issue.MarkFlagRequired(name)
@@ -127,7 +139,7 @@ func inspectCertificate(cmd *cobra.Command, path string) error {
 			return err
 		}
 		id, _ := tlsutil.NodeID(cert)
-		fmt.Fprintf(cmd.OutOrStdout(), "%s node_id=%s ca=%t not_before=%s not_after=%s\n", filepath.Base(path), id, cert.IsCA, cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339))
+		fmt.Fprintf(cmd.OutOrStdout(), "%s node_id=%s ca=%t not_before=%s not_after=%s dns=%v ips=%v\n", filepath.Base(path), id, cert.IsCA, cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339), cert.DNSNames, cert.IPAddresses)
 	}
 	if !found {
 		return fmt.Errorf("no certificate in %s", filepath.Base(path))
