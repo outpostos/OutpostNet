@@ -237,6 +237,7 @@ own repositories and report their own replication status.
 - [Resync loss archives, counters and early warnings](docs/resync-loss.md)
 - [Local clock alarm and offline state reset](docs/clock-reset.md)
 - [OS time source, quality and shared host reference](docs/os-time-source.md)
+- [Group chrony/NTS time sync configuration](docs/time-sync.md)
 - [Durable delivery library (`pkg/delivery`)](docs/delivery.md)
 - [Deployment Examples](deploy/examples/)
 

@@ -43,7 +43,9 @@ outpostnet-agent cert issue --ca credentials/group.pem --ca-key credentials/grou
 (RFC 1123 labels; empty and duplicate values are rejected) and canonicalized
 before being written as IP/DNS SANs. They do not change tunnel authentication, so
 certificates without SANs and already-issued credentials stay valid. `cert inspect`
-appends `dns=` and `ip=` when those SANs are present.
+appends `dns=` and `ip=` when those SANs are present. See
+[group chrony/NTS time sync](time-sync.md) for rendering the matching chrony
+configuration from the peer set and these credentials.
 
 ## Configure both peers
 

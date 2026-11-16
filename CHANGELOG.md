@@ -4,6 +4,11 @@ All notable changes to OutpostNet will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `outpostnet-agent cert issue --san <ip|dns>` adds IP/DNS SANs to node certificates so NTS clients can verify them, alongside the existing `urn:outpostos:node:` identity. Certificates without SANs stay valid. (V2-NET-17)
+- `outpostnet-agent chrony render` renders a chrony/NTS fragment from the Net peer set and node certificate: NTS server, group-CA-only trust, orphan mode, `makestep`, NTS certificate-time relaxation, group-peer access rules, optional GNSS gpsd/PPS refclocks, and split `.sources` output for `chronyc reload sources`. (ADR-0006 D7, V2-NET-17)
+- `docs/time-sync.md`: deployment, firewall, reload, GNSS and systemd ordering before K3s/Let.
+
 ## [3.0.1] - 2026-11-16
 
 Patch release shipping the fix for the v3.0.0 Kubernetes manifest.

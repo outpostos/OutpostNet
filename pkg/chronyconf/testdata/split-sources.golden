@@ -1,0 +1,4 @@
+# NTP sources for node node-a (reload with `chronyc reload sources`).
+# Group peers are served over NTS with the group CA set defined above.
+server 10.0.0.6 nts iburst certset 1
+server node-c.edge.local nts iburst certset 1
