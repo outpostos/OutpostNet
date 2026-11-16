@@ -126,7 +126,7 @@ make release-verify          # runs: (cd build/release && sha256sum -c SHA256SUM
 
 Expected output includes: git version, commit hash, build date, Go version, platform, and one `OK` line per checksummed file.
 
-Use `--version` for every component. Only agent, server, sidecar, and controller also accept a `version` subcommand; `outpostnet-service` does not, so `outpostnet-service version` is parsed as an ordinary start and fails with `Error: --config is required`. `--version` is the portable form across all five components.
+Use `--version` for every component except `outpostnet-state-reset`. The five Cobra-based components (agent, server, sidecar, controller, service) all accept `--version`; `outpostnet-state-reset` parses its arguments with the stdlib `flag` package and defines no version flag or subcommand, so `outpostnet-state-reset --version` exits non-zero with `flag provided but not defined: -version` — verify its build metadata another way. Only agent, server, sidecar, and controller also accept a `version` subcommand; `outpostnet-service` does not, so `outpostnet-service version` is parsed as an ordinary start and fails with `Error: --config is required`.
 
 ## Phase 3: Publish
 
