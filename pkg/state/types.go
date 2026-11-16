@@ -15,8 +15,8 @@ type ProtocolVersion struct {
 	Minor int `json:"minor"`
 }
 
-// StateProtocolVersion is the first generic state replication protocol.
-var StateProtocolVersion = ProtocolVersion{Major: 1, Minor: 0}
+// StateProtocolVersion requires bounded handshake time samples (cluster-wide upgrade).
+var StateProtocolVersion = ProtocolVersion{Major: 3, Minor: 0}
 
 func (v ProtocolVersion) String() string {
 	return fmt.Sprintf("%d.%d", v.Major, v.Minor)
@@ -78,6 +78,7 @@ type Mutation struct {
 
 // PushRequest is a batch of entries pushed from one node to a peer.
 type PushRequest struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	SourceNodeID    string          `json:"source"`
@@ -88,6 +89,7 @@ type PushRequest struct {
 
 // PushResponse reports how many pushed entries changed receiver state.
 type PushResponse struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	Accepted        int             `json:"accepted"`
@@ -112,6 +114,7 @@ type PushRejection struct {
 
 // PullRequest asks for entries newer than a cursor or a digest.
 type PullRequest struct {
+	TimeSample
 	ProtocolVersion ProtocolVersion         `json:"protocol_version"`
 	PolicyID        string                  `json:"policy_id"`
 	SourceNodeID    string                  `json:"source,omitempty"`
@@ -120,14 +123,24 @@ type PullRequest struct {
 	Digest          map[string]DigestRecord `json:"digest,omitempty"`
 	// GCHorizon is the requester's GC horizon; omitted when zero.
 	GCHorizon *Timestamp `json:"gc_horizon,omitempty"`
-	// MaxBytes bounds the encoded size of a position pull response: the
+	// StartKey selects digest mode even for an empty digest. Intervals are
+	// [StartKey, EndKey); empty EndKey means unbounded. Nil selects a position
+	// pull (or a full-space digest for direct callers supplying Digest).
+	StartKey *string `json:"start_key,omitempty"`
+	EndKey   string  `json:"end_key,omitempty"`
+	// AfterKey is an exclusive diff cursor within the SAME complete interval.
+	AfterKey string `json:"after_key,omitempty"`
+	// MaxBytes bounds the encoded size of a pull response: the
 	// responder ends the page (More) before it would exceed it. Omitted when
-	// zero (no byte bound).
+	// zero (digest pulls use the default 1 MiB; position pulls are unbounded).
 	MaxBytes int64 `json:"max_bytes,omitempty"`
 }
 
 // PullResponse is returned by the HTTP pull endpoint.
 type PullResponse struct {
+	// NodeID identifies the responder, so address aliases cannot count as two peers.
+	NodeID string `json:"node_id"`
+	TimeSample
 	ProtocolVersion ProtocolVersion `json:"protocol_version"`
 	PolicyID        string          `json:"policy_id"`
 	Entries         []Entry         `json:"entries"`
@@ -137,6 +150,8 @@ type PullResponse struct {
 	// More and NextSincePosition page a position pull with a Limit.
 	More              bool   `json:"more,omitempty"`
 	NextSincePosition uint64 `json:"next_since_position,omitempty"`
+	// NextKey is the exclusive last-key cursor of a digest diff page.
+	NextKey string `json:"next_key,omitempty"`
 }
 
 // DigestRecord captures latest known state for a key plus policy metadata.
@@ -172,6 +187,7 @@ type Store interface {
 // LocalStatus reports whether the store has completed local recovery and the
 // latest node-local state position. It does not claim global convergence.
 type LocalStatus struct {
+	Resync          ResyncStatus
 	Ready           bool
 	CurrentPosition uint64
 }

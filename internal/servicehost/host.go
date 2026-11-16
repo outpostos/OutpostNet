@@ -14,11 +14,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/outpostos/OutpostNet/internal/agent"
+	"github.com/outpostos/OutpostNet/internal/meshdirectory"
 	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/agentconfig"
 	"github.com/outpostos/OutpostNet/pkg/service"
@@ -38,6 +40,16 @@ type Host struct {
 
 	observationAddr string
 	observation     *agent.Observation
+
+	directory *meshdirectory.Directory
+	logical   map[string]*service.LogicalOpener // by logical service name
+
+	// Export routes: static exports (h.exports) merged with directory
+	// exports (dirRoutes), static winning; routes is what the tunnel
+	// servers currently hold. See direxports.go.
+	routes         map[string]string
+	dirRoutes      map[string]string
+	conflictWarned map[string]time.Time
 }
 
 // New creates a host for a validated Service config.
@@ -45,7 +57,11 @@ func New(cfg *service.Config, logger *slog.Logger) *Host {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Host{cfg: cfg, logger: logger.With("component", "outpostnet-service", "node_id", cfg.NodeID)}
+	return &Host{
+		cfg:            cfg,
+		logger:         logger.With("component", "outpostnet-service", "node_id", cfg.NodeID),
+		conflictWarned: map[string]time.Time{},
+	}
 }
 
 // Run starts the host and blocks until ctx is cancelled.
@@ -108,6 +124,7 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 	}
 	mgmt := agent.NewManagementServer(h.cfg.Management.SocketPath, dir, h.logger)
+	mgmt.HandleReadOnly("/v1/directory", h.handleDirectoryStatus)
 	if err := mgmt.Start(ctx); err != nil {
 		return fmt.Errorf("start management server: %w", err)
 	}
@@ -119,6 +136,25 @@ func (h *Host) Run(ctx context.Context) error {
 	}
 	defer stopHealth()
 
+	// Service directory from the local Mesh gateway (ADR-0003 D2). It stops
+	// after the entries that read it (deferred later, so run earlier).
+	var svcDir *meshdirectory.Directory
+	if h.cfg.Mesh.GatewayURL != "" {
+		cachePath := ""
+		if h.cfg.Mesh.DirectoryCacheDir != "" {
+			cachePath = filepath.Join(h.cfg.Mesh.DirectoryCacheDir, meshdirectory.CacheFileName)
+		}
+		svcDir, err = meshdirectory.New(meshdirectory.Config{GatewayURL: h.cfg.Mesh.GatewayURL, CachePath: cachePath, Logger: h.logger})
+		if err != nil {
+			return fmt.Errorf("service directory: %w", err)
+		}
+		dirCtx, cancelDir := context.WithCancel(ctx)
+		dirDone := make(chan struct{})
+		go func() { defer close(dirDone); svcDir.Run(dirCtx) }()
+		defer func() { cancelDir(); <-dirDone }()
+	}
+	logical := map[string]*service.LogicalOpener{}
+
 	// Service: stable entries, resolved through the Net host per connection.
 	// Bind every entry before serving any, so a taken address fails startup
 	// with the real bind error.
@@ -129,7 +165,22 @@ func (h *Host) Run(ctx context.Context) error {
 		}
 	}()
 	for i, tgt := range h.cfg.EntryTargets() {
-		opener, observer := observedOpener(obs, tm, tgt, service.NetOpener(tm))
+		var base service.StreamOpener = service.NetOpener(tm)
+		if tgt.Logical {
+			lo, err := service.NewLogicalOpener(service.LogicalConfig{
+				Self:      h.cfg.NodeID,
+				Directory: svcDir,
+				Peers:     tm,
+				Reachable: tm.PeerReachable,
+				Logger:    h.logger,
+			})
+			if err != nil {
+				return fmt.Errorf("service entry %s: %w", tgt, err)
+			}
+			logical[tgt.Service] = lo
+			base = lo
+		}
+		opener, observer := observedOpener(obs, tm, tgt, base)
 		e := service.NewEntry(service.EntryConfig{
 			Target:     tgt,
 			ListenAddr: h.cfg.Imports[i].ListenAddr,
@@ -161,9 +212,29 @@ func (h *Host) Run(ctx context.Context) error {
 	h.mu.Lock()
 	h.tunnels = tm
 	h.exports = exports
+	h.routes = map[string]string{}
+	for _, e := range exports {
+		h.routes[e.Name] = e.LocalAddr
+	}
 	h.entries = entries
+	h.directory = svcDir
+	h.logical = logical
 	h.ready = true
 	h.mu.Unlock()
+
+	// Directory-driven exports (ADR-0003 D4); stopped before the directory.
+	if svcDir != nil {
+		if obs != nil {
+			obsCtx, cancelObs := context.WithCancel(ctx)
+			obsDone := make(chan struct{})
+			go func() { defer close(obsDone); runDirectoryObservation(obsCtx, obs, svcDir) }()
+			defer func() { cancelObs(); <-obsDone }()
+		}
+		expCtx, cancelExp := context.WithCancel(ctx)
+		expDone := make(chan struct{})
+		go func() { defer close(expDone); h.runDirectoryExports(expCtx, svcDir) }()
+		defer func() { cancelExp(); <-expDone }()
+	}
 	h.logger.Info("service host ready", "exports", len(exports), "entries", len(entries), "peers", len(h.cfg.Peers))
 
 	<-ctx.Done()
@@ -220,38 +291,18 @@ func (h *Host) Ready() bool {
 	return h.ready
 }
 
-// ApplyExports moves this node's exports to next on every tunnel server
-// (add / re-point / remove). Established streams keep their backend.
+// ApplyExports moves this node's static exports to next (add / re-point /
+// remove) on every tunnel server and reports the routes that changed. A
+// static export also overrides a directory export of the same name.
+// Established streams keep their backend.
 func (h *Host) ApplyExports(next []agentconfig.ExportConfig) service.ExportChanges {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	next = append([]agentconfig.ExportConfig(nil), next...)
-	var ch service.ExportChanges
-	if h.tunnels != nil {
-		// Every server routes the same export set, so their change reports
-		// agree; dedup by name to keep the merged report stable anyway.
-		seen := make(map[string]struct{})
-		add := func(dst *[]string, names []string) {
-			for _, name := range names {
-				if _, ok := seen[name]; ok {
-					continue
-				}
-				seen[name] = struct{}{}
-				*dst = append(*dst, name)
-			}
-		}
-		for _, srv := range h.tunnels.Servers() {
-			part := service.ApplyExports(srv, h.exports, next)
-			add(&ch.Added, part.Added)
-			add(&ch.Updated, part.Updated)
-			add(&ch.Removed, part.Removed)
-		}
+	h.exports = append([]agentconfig.ExportConfig(nil), next...)
+	if h.routes == nil {
+		return service.ExportChanges{}
 	}
-	h.exports = next
-	if len(ch.Added)+len(ch.Updated)+len(ch.Removed) > 0 {
-		h.logger.Info("exports applied", "added", ch.Added, "updated", ch.Updated, "removed", ch.Removed)
-	}
-	return ch
+	return h.syncRoutesLocked()
 }
 
 // WatchConfig polls path with the existing agent ConfigWatcher (using the
@@ -298,6 +349,7 @@ func (h *Host) reload(next *service.Config) {
 // sameRestartScope compares everything Run reads at startup except exports.
 func sameRestartScope(a, b *service.Config) bool {
 	return a.NodeID == b.NodeID &&
+		a.Mesh == b.Mesh &&
 		reflect.DeepEqual(a.Tunnels, b.Tunnels) &&
 		reflect.DeepEqual(a.Imports, b.Imports) &&
 		reflect.DeepEqual(a.TLS, b.TLS) &&
@@ -344,4 +396,24 @@ func (h *Host) HealthAddr() net.Addr {
 		return nil
 	}
 	return h.healthLn.Addr()
+}
+
+// LogicalStats returns the resolution counters of the logical entry for the
+// named service, if one is configured.
+func (h *Host) LogicalStats(name string) (service.LogicalStats, bool) {
+	h.mu.Lock()
+	lo := h.logical[name]
+	h.mu.Unlock()
+	if lo == nil {
+		return service.LogicalStats{}, false
+	}
+	return lo.Stats(), true
+}
+
+// Directory returns the service directory, or nil when mesh.gateway_url is
+// not configured or the host is not running.
+func (h *Host) Directory() *meshdirectory.Directory {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.directory
 }

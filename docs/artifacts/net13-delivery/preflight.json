@@ -1,0 +1,20 @@
+[
+  {
+    "node": "outpost-node1",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "disk": "Filesystem     1K-blocks     Used Available Use% Mounted on\n/dev/vda1       19221248 13317852   5887012  70% /\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n"
+  },
+  {
+    "node": "outpost-node2",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "disk": "Filesystem     1K-blocks     Used Available Use% Mounted on\n/dev/vda1       19221248 12644488   6560376  66% /\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n"
+  },
+  {
+    "node": "outpost-node3",
+    "services": "active\nactive\nactive\nactive\nactive\n",
+    "disk": "Filesystem     1K-blocks     Used Available Use% Mounted on\n/dev/vda1       19221248 12520216   6684648  66% /\n",
+    "qdisc": "qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 \n"
+  }
+]

@@ -27,6 +27,10 @@ type ServerConfig struct {
 	// TLS is the TLS configuration. If nil, a self-signed cert is generated.
 	TLS *tls.Config
 
+	// Identity enables strict group mutual TLS and certificate-bound handshake identity.
+	// When set, it takes precedence over TLS.
+	Identity *tlsutil.Identity
+
 	// KeepAlivePeriod is the QUIC keepalive interval. Default: 10s.
 	KeepAlivePeriod time.Duration
 
@@ -34,7 +38,7 @@ type ServerConfig struct {
 	MaxIdleTimeout time.Duration
 
 	// Token is the shared secret for authenticating incoming connections.
-	// An empty token disables authentication (backward compatible).
+	// An empty token disables the token check; Identity still requires node authentication.
 	Token string
 }
 
@@ -46,6 +50,10 @@ type ClientConfig struct {
 	// TLS is the TLS configuration. If nil, insecure (skip verify) is used.
 	TLS *tls.Config
 
+	// Identity enables strict group mutual TLS and certificate-bound handshake identity.
+	// When set, it takes precedence over TLS.
+	Identity *tlsutil.Identity
+
 	// KeepAlivePeriod is the QUIC keepalive interval. Default: 10s.
 	KeepAlivePeriod time.Duration
 
@@ -53,8 +61,15 @@ type ClientConfig struct {
 	MaxIdleTimeout time.Duration
 
 	// Token is the shared secret sent to the server for authentication.
-	// An empty token disables authentication (backward compatible).
+	// An empty token disables the token check; Identity still requires node authentication.
 	Token string
+	// NodeID is the handshake compatibility claim. With Identity it must
+	// match the local certificate (and defaults to that identity). Without
+	// Identity it is self-reported under the shared token (ADR-0003 D5).
+	NodeID string
+
+	// ExpectedPeerID binds a peer-directory address to its certificate identity.
+	ExpectedPeerID string
 }
 
 // ServiceRoute maps a service name to a local TCP address.
@@ -91,6 +106,9 @@ func (c *ServerConfig) quicConfig() *quic.Config {
 }
 
 func (c *ServerConfig) tlsConfig() (*tls.Config, error) {
+	if c.Identity != nil {
+		return c.Identity.TLSConfig(true), nil
+	}
 	if c.TLS != nil {
 		return c.TLS, nil
 	}
@@ -117,6 +135,9 @@ func (c *ClientConfig) quicConfig() *quic.Config {
 }
 
 func (c *ClientConfig) tlsConfig() *tls.Config {
+	if c.Identity != nil {
+		return c.Identity.TLSConfig(false)
+	}
 	if c.TLS != nil {
 		return c.TLS
 	}

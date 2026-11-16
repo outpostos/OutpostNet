@@ -3,14 +3,15 @@ package state
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
+
+	"github.com/outpostos/OutpostNet/pkg/state/httpauth"
+	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 )
 
 const (
@@ -27,20 +28,31 @@ const (
 
 // HTTPSyncerConfig configures HTTP peer calls.
 type HTTPSyncerConfig struct {
-	Client           *http.Client
-	NodeID           string
-	AuthToken        string
-	PolicyID         string
+	// AuthMode defaults to token. Certificate modes require Identity.
+	AuthMode httpauth.Mode
+	Identity *tlsutil.Identity
+	// PeerIdentity optionally binds a response to the host directory node ID.
+	PeerIdentity func(address string) string
+	Client       *http.Client
+	NodeID       string
+	AuthToken    string
+	PolicyID     string
+	// MaxRequestBytes declares the peer request limit (default 1 MiB).
+	// Gossip validates MaxPushBytes against it at construction.
+	MaxRequestBytes  int64
 	MaxResponseBytes int64
 }
 
 // HTTPSyncer implements Syncer over JSON/HTTP.
 type HTTPSyncer struct {
+	auth             *httpauth.Auth
+	peerIdentity     func(string) string
 	client           *http.Client
 	nodeID           string
 	authToken        string
 	policyID         string
 	maxResponseBytes int64
+	maxRequestBytes  int64
 }
 
 // NewHTTPSyncer creates an authenticated HTTP syncer.
@@ -48,8 +60,16 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("http syncer node id is required")
 	}
-	if cfg.AuthToken == "" {
-		return nil, fmt.Errorf("http syncer auth token is required")
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
+	if err != nil {
+		return nil, err
+	}
+	maxRequestBytes := cfg.MaxRequestBytes
+	if maxRequestBytes == 0 {
+		maxRequestBytes = defaultMaxRequestBytes
+	}
+	if maxRequestBytes < 0 {
+		return nil, fmt.Errorf("http syncer MaxRequestBytes must be positive")
 	}
 	maxResponseBytes := cfg.MaxResponseBytes
 	if maxResponseBytes == 0 {
@@ -62,22 +82,31 @@ func NewHTTPSyncer(cfg HTTPSyncerConfig) (*HTTPSyncer, error) {
 	if policyID == "" {
 		policyID = NewHLCLWWPolicy().ID()
 	}
-	client := cfg.Client
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+	client, err := auth.Client(cfg.Client)
+	if err != nil {
+		return nil, err
 	}
 	return &HTTPSyncer{
+		auth:             auth,
+		peerIdentity:     cfg.PeerIdentity,
 		client:           client,
 		nodeID:           cfg.NodeID,
 		authToken:        cfg.AuthToken,
 		policyID:         policyID,
 		maxResponseBytes: maxResponseBytes,
+		maxRequestBytes:  maxRequestBytes,
 	}, nil
 }
+
+// MaxRequestBytes returns the configured peer request limit.
+func (s *HTTPSyncer) MaxRequestBytes() int64 { return s.maxRequestBytes }
 
 // Push sends entries to a remote peer.
 func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.TimeQuality == "" {
+		req.TimeSample = TimeSample{SentPhysicalMS: SystemPhysicalClock{}.NowMS(), TimeQuality: TimeUnsynced}
+	}
 	if req.PolicyID == "" {
 		req.PolicyID = s.policyID
 	}
@@ -98,19 +127,39 @@ func (s *HTTPSyncer) Push(ctx context.Context, addr string, req PushRequest) (*P
 }
 
 // Pull retrieves entries from a remote peer.
+// Digest continuations are drained for callers using the entries-only seam.
 func (s *HTTPSyncer) Pull(ctx context.Context, addr string, req PullRequest) ([]Entry, error) {
-	resp, err := s.pull(ctx, addr, req)
-	if err != nil {
-		return nil, err
+	// Preserve the position convenience API: only an explicit paging caller can
+	// consume More/NextSincePosition. An unpaged oversize response must fail.
+	if req.StartKey == nil && len(req.Digest) == 0 {
+		resp, err := s.pull(ctx, addr, req)
+		if err != nil {
+			return nil, err
+		}
+		return resp.Entries, nil
 	}
-	return resp.Entries, nil
+	var entries []Entry
+	for {
+		resp, err := s.PullSnapshot(ctx, addr, req)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateDigestResponse(req, resp); err != nil {
+			return nil, err
+		}
+		entries = append(entries, resp.Entries...)
+		if !resp.More {
+			return entries, nil
+		}
+		req.AfterKey = resp.NextKey
+	}
 }
 
 // PullSnapshot performs a pull and returns the full response, including the
-// peer's GC horizon and paging cursor. A paged position pull (Limit > 0, no
-// digest) asks the peer to keep each page within this syncer's response limit.
+// peer's GC horizon and position or key cursor. Every page is bounded by the
+// smaller of MaxBytes and this syncer's response limit.
 func (s *HTTPSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
-	if req.MaxBytes == 0 && req.Limit > 0 && len(req.Digest) == 0 {
+	if req.MaxBytes == 0 || req.MaxBytes > s.maxResponseBytes {
 		req.MaxBytes = s.maxResponseBytes
 	}
 	return s.pull(ctx, addr, req)
@@ -118,6 +167,9 @@ func (s *HTTPSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequ
 
 func (s *HTTPSyncer) pull(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
 	req.ProtocolVersion = StateProtocolVersion
+	if req.TimeQuality == "" {
+		req.TimeSample = TimeSample{SentPhysicalMS: SystemPhysicalClock{}.NowMS(), TimeQuality: TimeUnsynced}
+	}
 	if req.PolicyID == "" {
 		req.PolicyID = s.policyID
 	}
@@ -142,7 +194,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if err != nil {
 		return fmt.Errorf("marshal %s %s request: %w", method, path, err)
 	}
-	url := buildPeerURL(addr, path)
+	url, err := s.auth.PeerURL(addr, path)
+	if err != nil {
+		return err
+	}
 	// Errors name the peer by its redacted URL and never repeat the bearer
 	// token, even if a peer echoes it back in an error body: callers log these
 	// errors and GossipEngine.ReplicationStatus reports them.
@@ -153,7 +208,9 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.authToken)
+	if err := s.auth.Prepare(req); err != nil {
+		return err
+	}
 	req.Header.Set("X-Outpost-Node-ID", s.nodeID)
 
 	resp, err := s.client.Do(req)
@@ -161,6 +218,10 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 		return fmt.Errorf("%s %s: %w", method, shown, err)
 	}
 	defer resp.Body.Close()
+	expected := ""
+	if s.peerIdentity != nil {
+		expected = s.peerIdentity(addr)
+	}
 	body, err := readLimitedResponseBody(resp, s.maxResponseBytes)
 	if err != nil {
 		return fmt.Errorf("read %s %s response: %w", method, shown, err)
@@ -168,13 +229,25 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if resp.StatusCode == http.StatusGone {
 		var gone resyncRequiredBody
 		if err := json.Unmarshal(body, &gone); err == nil && !gone.GCHorizon.isZero() {
-			return &ResyncRequiredError{Peer: redactedPeerURL(addr), Horizon: gone.GCHorizon}
+			if err := s.auth.MatchResponse(resp, gone.NodeID, expected); err != nil {
+				return err
+			}
+			if err := validateProtocolResponse(shown, "410", gone.ProtocolVersion); err != nil {
+				return err
+			}
+			if err := validatePolicyResponse(shown, "410", s.policyID, gone.PolicyID); err != nil {
+				return err
+			}
+			return &ResyncRequiredError{NodeID: gone.NodeID, TimeSample: gone.TimeSample, Peer: redactedPeerURL(addr), Horizon: gone.GCHorizon}
 		}
 	}
 	if resp.StatusCode >= 300 {
 		// A peer may echo the request credentials: the bearer token or the
 		// password of the URL it was reached at.
-		text := strings.ReplaceAll(strings.TrimSpace(string(body)), s.authToken, redactedSecret)
+		text := strings.TrimSpace(string(body))
+		if s.authToken != "" {
+			text = strings.ReplaceAll(text, s.authToken, redactedSecret)
+		}
 		text = redactPeerError(addr, text)
 		return fmt.Errorf("%s %s: status %d: %s", method, shown, resp.StatusCode, text)
 	}
@@ -184,7 +257,13 @@ func (s *HTTPSyncer) doJSON(ctx context.Context, method, addr, path string, reqB
 	if err := json.Unmarshal(body, respBody); err != nil {
 		return fmt.Errorf("decode %s %s response: %w", method, shown, err)
 	}
-	return nil
+	var metadata struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return fmt.Errorf("decode response identity: %w", err)
+	}
+	return s.auth.MatchResponse(resp, metadata.NodeID, expected)
 }
 
 func buildPeerURL(addr, path string) string {
@@ -196,6 +275,8 @@ func buildPeerURL(addr, path string) string {
 
 // HTTPHandlerConfig configures HTTP replication endpoints.
 type HTTPHandlerConfig struct {
+	AuthMode        httpauth.Mode
+	Identity        *tlsutil.Identity
 	NodeID          string
 	Engine          *GossipEngine
 	AuthToken       string
@@ -210,8 +291,12 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	if cfg.Engine == nil {
 		return nil, fmt.Errorf("http state handler engine is required")
 	}
-	if cfg.AuthToken == "" {
-		return nil, fmt.Errorf("http state handler auth token is required")
+	auth, err := httpauth.New(cfg.AuthMode, cfg.AuthToken, cfg.NodeID, cfg.Identity)
+	if err != nil {
+		return nil, err
+	}
+	if auth.CertificateMode() && cfg.Engine.nodeID != cfg.NodeID {
+		return nil, fmt.Errorf("http state handler engine node mismatch")
 	}
 	limit := cfg.MaxRequestBytes
 	if limit == 0 {
@@ -220,10 +305,16 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 	if limit < 0 {
 		return nil, fmt.Errorf("http state handler max request bytes must be >= 0")
 	}
+	if cfg.Engine.maxDigestBytes >= limit {
+		return nil, fmt.Errorf("gossip MaxDigestBytes must be below handler MaxRequestBytes")
+	}
+	if err := validatePushRequestLimit(cfg.Engine.maxPushBytes, limit); err != nil {
+		return nil, err
+	}
 	h := &httpHandler{
+		auth:            auth,
 		nodeID:          cfg.NodeID,
 		engine:          cfg.Engine,
-		authToken:       cfg.AuthToken,
 		maxRequestBytes: limit,
 	}
 	mux := http.NewServeMux()
@@ -233,9 +324,9 @@ func NewHTTPHandler(cfg HTTPHandlerConfig) (http.Handler, error) {
 }
 
 type httpHandler struct {
+	auth            *httpauth.Auth
 	nodeID          string
 	engine          *GossipEngine
-	authToken       string
 	maxRequestBytes int64
 }
 
@@ -266,7 +357,7 @@ func (h *httpHandler) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.engine.HandlePush(r.Context(), req)
 	if err != nil {
-		if writeResyncRequired(w, err) {
+		if h.writeResyncRequired(w, err) {
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -298,7 +389,7 @@ func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.engine.HandlePullResponse(r.Context(), req)
 	if err != nil {
-		if writeResyncRequired(w, err) {
+		if h.writeResyncRequired(w, err) {
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -309,18 +400,22 @@ func (h *httpHandler) handlePull(w http.ResponseWriter, r *http.Request) {
 
 // resyncRequiredBody is the 410 Gone body for ResyncRequiredError.
 type resyncRequiredBody struct {
-	Error     string    `json:"error"`
-	GCHorizon Timestamp `json:"gc_horizon"`
+	NodeID string `json:"node_id"`
+	TimeSample
+	ProtocolVersion ProtocolVersion `json:"protocol_version"`
+	PolicyID        string          `json:"policy_id"`
+	Error           string          `json:"error"`
+	GCHorizon       Timestamp       `json:"gc_horizon"`
 }
 
 // writeResyncRequired maps ResyncRequiredError to 410 Gone: the history needed
 // for an incremental exchange has been collected.
-func writeResyncRequired(w http.ResponseWriter, err error) bool {
+func (h *httpHandler) writeResyncRequired(w http.ResponseWriter, err error) bool {
 	var resync *ResyncRequiredError
 	if !errors.As(err, &resync) {
 		return false
 	}
-	writeJSON(w, http.StatusGone, resyncRequiredBody{Error: resync.Error(), GCHorizon: resync.Horizon})
+	writeJSON(w, http.StatusGone, resyncRequiredBody{NodeID: h.nodeID, TimeSample: h.engine.timeSample(), ProtocolVersion: StateProtocolVersion, PolicyID: h.engine.policy.ID(), Error: resync.Error(), GCHorizon: resync.Horizon})
 	return true
 }
 
@@ -329,27 +424,31 @@ func (h *httpHandler) preflight(w http.ResponseWriter, r *http.Request, method s
 		writeJSONError(w, http.StatusMethodNotAllowed, fmt.Sprintf("method %s not allowed", r.Method))
 		return false
 	}
-	const prefix = "Bearer "
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, prefix) ||
-		subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(h.authToken)) != 1 {
-		writeJSONError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+	if status := h.auth.Authorize(r); status != 0 {
+		writeJSONError(w, status, "HTTP authentication rejected")
 		return false
 	}
 	return true
 }
 
 func (h *httpHandler) identityMatches(w http.ResponseWriter, r *http.Request, source string) bool {
+	if !h.auth.MatchSource(r, source) {
+		writeJSONError(w, http.StatusForbidden, "source certificate identity mismatch")
+		return false
+	}
 	header := r.Header.Get("X-Outpost-Node-ID")
 	if source == "" || header == "" {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusBadRequest, "source node identity is required")
 		return false
 	}
 	if source != header {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusForbidden, "source node identity does not match request header")
 		return false
 	}
 	if source == h.nodeID {
+		h.auth.RejectClaim()
 		writeJSONError(w, http.StatusForbidden, "self-replication request rejected")
 		return false
 	}

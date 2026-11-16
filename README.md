@@ -97,10 +97,13 @@ See [docs/observation.md](docs/observation.md).
 ```bash
 git clone https://github.com/outpostos/OutpostNet.git && cd OutpostNet
 make build-agent        # standalone agent only
-make build              # all five components (agent, service, server, sidecar, controller)
+make build              # all components, including the offline state reset tool
 ```
 
 ## Quick Start
+
+The standalone examples below use legacy token authentication. For authenticated node
+identities, configure [group certificates and mutual TLS](docs/node-certificates.md) on both peers.
 
 ### Standalone Mode (Host-to-Host)
 
@@ -175,7 +178,7 @@ See [deploy/examples/](deploy/examples/) for complete examples including cross-c
 |---------|-------------|
 | TCP & UDP | TCP across nodes over the QUIC tunnel; UDP only node-local via server + sidecar (cross-node UDP not implemented) |
 | QUIC Tunnel | Encrypted transport with TLS 1.3 and multiplexed streams |
-| Token Auth | Shared-secret authentication between agents, no PKI needed |
+| Node authentication | Offline group CA certificates, mutual TLS, certificate-bound node IDs and same-group service authorization ([setup](docs/node-certificates.md)); legacy token mode remains available |
 | Auto-Reconnect | Exponential backoff with config persistence for offline recovery |
 | K8s Controller | Annotation-driven service exposure with sidecar auto-injection |
 | Peer Directory | Named-node addressing with stable local listen addresses |
@@ -190,7 +193,7 @@ also ships the Service layer's entry point:
 
 | Layer | What this repository provides |
 |-------|-------------------------------|
-| Net — communication and state primitives | QUIC tunnels and the peer directory (`pkg/tunnel`, `outpostnet-agent`); generic state replication primitives (`pkg/state`: durable store, gossip, tombstone GC, read-only replication status). OutpostMesh and OutpostLet embed `pkg/state`; this repository does not interpret their state |
+| Net — communication and state primitives | QUIC tunnels and the peer directory (`pkg/tunnel`, `outpostnet-agent`); generic state replication primitives (`pkg/state`: durable store, gossip, tombstone GC, read-only replication status), and durable direct-peer delivery (`pkg/delivery`: authenticated HTTP, Inbox/Outbox, deduplication, handoff receipts and local observation). OutpostMesh and OutpostLet embed `pkg/state`; this repository does not interpret their state |
 | Service — stable access | `outpostnet-service`: stable local entries for `<service>@<node_id>` ([docs](docs/service-layer.md)) |
 | Range — observation | `outpostnet-agent` and `outpostnet-service` expose loopback observation endpoints for OutpostRange ([docs](docs/observation.md)); upgrade Range before them |
 
@@ -212,12 +215,20 @@ own repositories and report their own replication status.
 ## Documentation
 
 - [Quick Start Guide](docs/quickstart.md)
+- [Node certificates and mutual TLS](docs/node-certificates.md)
+- [Replication/delivery HTTP authentication modes](docs/http-node-auth.md)
 - [Configuration Reference](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
 - [Service Layer (outpostnet-service)](docs/service-layer.md)
 - [Migrating agent imports/exports to outpostnet-service](docs/service-migration.md)
 - [Observation producers (Range)](docs/observation.md)
+- [Service directory counters and lease validity](docs/directory-observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
+- [Shared time reference and replication status clock](docs/time-reference.md)
+- [Resync loss archives, counters and early warnings](docs/resync-loss.md)
+- [Local clock alarm and offline state reset](docs/clock-reset.md)
+- [OS time source, quality and shared host reference](docs/os-time-source.md)
+- [Durable delivery library (`pkg/delivery`)](docs/delivery.md)
 - [Deployment Examples](deploy/examples/)
 
 ## Supported Platforms

@@ -1,0 +1,12 @@
+: Recorded from the same gateway: reconnect with an unusable resumeCursor falls back to a fresh
+: snapshot, followed by the EXPIRED delta of uid-c (note isLive stays true on EXPIRED).
+
+event: snapshot
+data: {"phase":"STREAM_PHASE_SNAPSHOT", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-b", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T08:43:31Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:33.296898796Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-b", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAY"}
+
+event: snapshot-complete
+data: {"phase":"STREAM_PHASE_SNAPSHOT_COMPLETE", "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAY"}
+
+event: delta
+data: {"phase":"STREAM_PHASE_DELTA", "eventType":"ENTITY_EVENT_TYPE_EXPIRED", "entity":{"entityId":"urn:outpostos:service-instance:node-a~echo~uid-c", "isLive":true, "createdTime":"2026-11-13T08:00:00Z", "expiryTime":"2026-11-13T07:43:35.620980982Z", "provenance":{"integrationName":"outpostlet", "sourceUpdateTime":"2026-11-13T07:43:33.622873630Z", "sourceId":"node-a"}, "serviceRegistration":{"serviceName":"echo", "instanceId":"uid-c", "nodeId":"node-a", "endpoints":[{"port":{"protocol":"ENDPOINT_PROTOCOL_TCP", "port":18080}, "weight":100}], "version":"1.0.0", "labels":{"tier":"edge"}, "healthState":"SERVICE_HEALTH_STATE_READY"}}, "cursor":"56dSDGJIvfxSmvFSrNIDvWyV40YAGaSEAAAAAAAAAAc"}
+

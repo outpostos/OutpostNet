@@ -31,6 +31,7 @@ type TunnelManager struct {
 	logger  *slog.Logger
 	metrics *Metrics
 
+	identity        *tlsutil.Identity
 	mu              sync.Mutex
 	servers         []*tunnel.Server
 	clients         []*tunnel.ManagedClient
@@ -193,6 +194,19 @@ func (tm *TunnelManager) setupRelay() {
 }
 
 func (tm *TunnelManager) buildTLSConfig() (*tls.Config, error) {
+	if tm.cfg.TLS.CAFile != "" {
+		if tm.cfg.TLS.Insecure {
+			return nil, fmt.Errorf("tls.insecure cannot be combined with group certificates")
+		}
+		id, err := tlsutil.LoadIdentity(tm.cfg.TLS.CertFile, tm.cfg.TLS.KeyFile, tm.cfg.TLS.CAFile, tm.cfg.NodeID, tm.logger)
+		if err != nil {
+			return nil, err
+		}
+		tm.mu.Lock()
+		tm.identity = id
+		tm.mu.Unlock()
+		return id.TLSConfig(true), nil
+	}
 	var cert tls.Certificate
 	var err error
 
@@ -216,6 +230,7 @@ func (tm *TunnelManager) startServer(ctx context.Context, tc agentconfig.TunnelC
 		ListenAddr: tc.ListenAddr,
 		TLS:        tlsCfg,
 		Token:      tm.cfg.Auth.Token,
+		Identity:   tm.identity,
 	}, srvLogger)
 
 	// Register all exports as routes on this server (Service export table).
@@ -270,11 +285,21 @@ func (tm *TunnelManager) startClient(ctx context.Context, tc agentconfig.TunnelC
 }
 
 func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel.ManagedClient {
+	return tm.makeManagedClient(remoteAddr, remoteName, "")
+}
+func (tm *TunnelManager) newPeerManagedClient(remoteAddr, nodeID string) *tunnel.ManagedClient {
+	return tm.makeManagedClient(remoteAddr, nodeID, nodeID)
+}
+func (tm *TunnelManager) makeManagedClient(remoteAddr, remoteName, expectedID string) *tunnel.ManagedClient {
+	id := tm.identity
 	return tunnel.NewManagedClient(tunnel.ManagedClientConfig{
 		ClientConfig: tunnel.ClientConfig{
-			ServerAddr: remoteAddr,
-			TLS:        tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
-			Token:      tm.cfg.Auth.Token,
+			ServerAddr:     remoteAddr,
+			TLS:            tlsutil.ClientTLSConfig(tm.cfg.TLS.Insecure),
+			Token:          tm.cfg.Auth.Token,
+			NodeID:         tm.cfg.NodeID,
+			Identity:       id,
+			ExpectedPeerID: expectedID,
 		},
 		InitialReconnectDelay: 1 * time.Second,
 		MaxReconnectDelay:     30 * time.Second,
@@ -282,7 +307,28 @@ func (tm *TunnelManager) newManagedClient(remoteAddr, remoteName string) *tunnel
 			tm.logger.Info("tunnel state changed", "remote", remoteName, "state", s)
 			tm.notifyLinks()
 		},
+		StreamHandler: tm.serveReverseStream,
 	}, tm.logger.With("tunnel", "client", "remote", remoteName))
+}
+
+// serveReverseStream routes a stream the remote side opened on a connection
+// this node dialed. It uses the same route table as the node's tunnel server
+// (every server carries the same export routes), so a peer reaches this
+// node's exports whichever side dialed.
+func (tm *TunnelManager) serveReverseStream(ctx context.Context, stream *quic.Stream) {
+	tm.mu.Lock()
+	var srv *tunnel.Server
+	if len(tm.servers) > 0 {
+		srv = tm.servers[0]
+	}
+	tm.mu.Unlock()
+	if srv == nil {
+		tm.logger.Warn("reverse stream rejected: no tunnel server route table on this node")
+		stream.CancelRead(0)
+		stream.Close()
+		return
+	}
+	srv.ServeStream(ctx, stream)
 }
 
 // serveImport serves a legacy static import (name + remote_region) through
@@ -345,12 +391,53 @@ func (tm *TunnelManager) StartDynamicImports(ctx context.Context) {
 // peer-directory tunnel client for nodeID. It is a transport operation: the
 // name is only the stream-header label; Service targets are mapped onto it by
 // service.NetOpener.
+//
+// When this node is the dialer for nodeID (it holds a peer-directory client)
+// the stream goes over that client, as before. Otherwise this node is the
+// accepting side, and the stream goes over the connection nodeID dialed into
+// one of this node's tunnel servers (ADR-0003 D5). ErrNoTunnel is returned
+// when neither exists.
 func (tm *TunnelManager) OpenPeerStream(ctx context.Context, nodeID, serviceName string) (io.ReadWriteCloser, error) {
-	mc, ok := tm.DynamicClient(nodeID)
-	if !ok {
-		return nil, fmt.Errorf("peer %q not in directory: %w", nodeID, ErrNoTunnel)
+	if mc, ok := tm.DynamicClient(nodeID); ok {
+		return openTrackedStream(ctx, mc, serviceName)
 	}
-	return openTrackedStream(ctx, mc, serviceName)
+	tm.mu.Lock()
+	servers := append([]*tunnel.Server(nil), tm.servers...)
+	tm.mu.Unlock()
+	var lastErr error
+	for _, srv := range servers {
+		stream, err := srv.OpenPeerStream(ctx, nodeID, serviceName)
+		if err == nil {
+			return stream, nil
+		}
+		if !errors.Is(err, tunnel.ErrNoPeerConn) {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("peer %q: no dialed tunnel and no accepted connection: %w", nodeID, ErrNoTunnel)
+}
+
+// AcceptedPeers returns the node_ids that dialed one of this node's tunnel
+// servers and declared their node_id, sorted and de-duplicated.
+func (tm *TunnelManager) AcceptedPeers() []string {
+	tm.mu.Lock()
+	servers := append([]*tunnel.Server(nil), tm.servers...)
+	tm.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, srv := range servers {
+		for _, id := range srv.AcceptedPeers() {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // OpenRegionStream opens a stream named serviceName on the configured client
@@ -400,7 +487,7 @@ func (tm *TunnelManager) AddOrUpdatePeerClient(ctx context.Context, nodeID, addr
 		return err
 	}
 
-	mc := tm.newManagedClient(addr, nodeID)
+	mc := tm.newPeerManagedClient(addr, nodeID)
 	tm.clients = append(tm.clients, mc)
 	tm.clientsByNode[nodeID] = mc
 	tm.mu.Unlock()
@@ -483,4 +570,21 @@ func (tm *TunnelManager) Clients() []*tunnel.ManagedClient {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.clients
+}
+
+// SecurityStatus returns process-lifetime certificate and claim counters.
+type SecurityStatus struct {
+	CertificateAuth bool `json:"certificate_auth"`
+	tlsutil.SecurityStats
+}
+
+func (tm *TunnelManager) SecurityStatus() SecurityStatus {
+	tm.mu.Lock()
+	id := tm.identity
+	tm.mu.Unlock()
+	stats := tlsutil.SecurityStats{}
+	if id != nil {
+		stats = id.Stats()
+	}
+	return SecurityStatus{id != nil, stats}
 }

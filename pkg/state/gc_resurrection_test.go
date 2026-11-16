@@ -88,9 +88,15 @@ func assertNotResurrected(t *testing.T, key string, nodes ...*loopNode) {
 // node-l keeps doomed=v1 and collects a key of its own, so HL < HA. node-a's
 // push is refused by node-l (beyond_gc_horizon) and node-a resyncs from node-l.
 func TestResyncFromLowerHorizonPeerDoesNotResurrectCollectedKey(t *testing.T) {
+	for _, budget := range []int64{0, 512, 680} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { runResyncFromLowerHorizonPeerDoesNotResurrectCollectedKey(t, budget) })
+	}
+}
+
+func runResyncFromLowerHorizonPeerDoesNotResurrectCollectedKey(t *testing.T, budget int64, clockPath ...string) {
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
-	net := newLoopNet()
+	net := newClockLoopNet(t, budget, clockPath)
 	a := newLoopNode(t, net, "node-a", clock, "node-l")
 	b := newLoopNode(t, net, "node-b", clock, "node-a")
 	l := newLoopNode(t, net, "node-l", clock, "node-c")
@@ -166,11 +172,11 @@ type divergentGCCluster struct {
 // later key of its own, so its horizon overtakes theirs (HL > HA = HB).
 // node-l already pushed doomed=v1 to node-a before the partition, so its push
 // cursor no longer carries it.
-func newDivergentGCCluster(t *testing.T) *divergentGCCluster {
+func newDivergentGCCluster(t *testing.T, budget int64, clockPath ...string) *divergentGCCluster {
 	t.Helper()
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
-	net := newLoopNet()
+	net := newClockLoopNet(t, budget, clockPath)
 	a := newLoopNode(t, net, "node-a", clock, "node-l", "node-b")
 	b := newLoopNode(t, net, "node-b", clock, "node-a")
 	l := newLoopNode(t, net, "node-l", clock, "node-a", "node-c")
@@ -247,7 +253,13 @@ func newDivergentGCCluster(t *testing.T) *divergentGCCluster {
 // Spec F1: both sides collected, node-l's horizon overtook node-a's, node-a's
 // push gets 410 and node-a resyncs from node-l.
 func TestResyncFromHigherHorizonPeerDoesNotResurrectCollectedKey(t *testing.T) {
-	cluster := newDivergentGCCluster(t)
+	for _, budget := range []int64{0, 512, 680} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { runResyncFromHigherHorizonPeerDoesNotResurrectCollectedKey(t, budget) })
+	}
+}
+
+func runResyncFromHigherHorizonPeerDoesNotResurrectCollectedKey(t *testing.T, budget int64, clockPath ...string) {
+	cluster := newDivergentGCCluster(t, budget, clockPath...)
 	assertNotResurrected(t, "doomed", cluster.a)
 
 	convergeLoopNodes(t, cluster.a, cluster.b, cluster.l, cluster.c)
@@ -259,7 +271,13 @@ func TestResyncFromHigherHorizonPeerDoesNotResurrectCollectedKey(t *testing.T) {
 // Spec F1 step 3: node-b, which also collected doomed, must not pick it up when
 // it resyncs from node-a after node-a's horizon moved past its own.
 func TestThirdPeerResyncingFromNodeIsNotInfected(t *testing.T) {
-	cluster := newDivergentGCCluster(t)
+	for _, budget := range []int64{0, 512, 680} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { runThirdPeerResyncingFromNodeIsNotInfected(t, budget) })
+	}
+}
+
+func runThirdPeerResyncingFromNodeIsNotInfected(t *testing.T, budget int64, clockPath ...string) {
+	cluster := newDivergentGCCluster(t, budget, clockPath...)
 	if cluster.b.store.GCHorizon().Compare(cluster.a.store.GCHorizon()) >= 0 {
 		t.Fatalf("setup: node-b must lag node-a's horizon")
 	}
@@ -274,4 +292,30 @@ func TestThirdPeerResyncingFromNodeIsNotInfected(t *testing.T) {
 	convergeLoopNodes(t, cluster.a, cluster.b, cluster.l, cluster.c)
 	assertNotResurrected(t, "doomed", cluster.a, cluster.b, cluster.l, cluster.c)
 	assertConvergedLiveState(t, cluster.a, cluster.b, cluster.l, cluster.c)
+}
+
+// ADR-0006 acceptance 6: repeat the complete 03b resurrection and refusal
+// scenarios with a future entry on each apply path, including paged digests.
+func TestClockAhead03bResurrectionSuite(t *testing.T) {
+	scenarios := []struct {
+		name string
+		run  func(*testing.T, int64, ...string)
+	}{
+		{"lower-horizon", runResyncFromLowerHorizonPeerDoesNotResurrectCollectedKey},
+		{"higher-horizon", runResyncFromHigherHorizonPeerDoesNotResurrectCollectedKey},
+		{"third-peer", runThirdPeerResyncingFromNodeIsNotInfected},
+		{"digest-410", runLaggingPeerIsForcedToResyncAndCannotResurrect},
+	}
+	for _, path := range []string{"push", "digest", "snapshot"} {
+		t.Run(path, func(t *testing.T) {
+			for _, budget := range []int64{0, 512, 680} {
+				t.Run(fmt.Sprint(budget), func(t *testing.T) {
+					for _, scenario := range scenarios {
+						t.Run(scenario.name, func(t *testing.T) { scenario.run(t, budget, path) })
+					}
+				})
+			}
+			t.Run("push-refusal", func(t *testing.T) { runLaggingPusherIsRefusedWithResyncRequired(t, path) })
+		})
+	}
 }

@@ -36,7 +36,7 @@ func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) 
 }
 
 func (s countingSyncer) PullSnapshot(ctx context.Context, addr string, req PullRequest) (*PullResponse, error) {
-	if req.SincePosition == 0 {
+	if req.SincePosition == 0 && req.StartKey == nil && len(req.Digest) == 0 {
 		// Every resync starts with the page at position 0.
 		s.snapshots.Add(1)
 	}

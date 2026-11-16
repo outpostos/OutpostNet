@@ -9,7 +9,9 @@ Public consumer surface:
 - `Store` is the common seam implemented by `MemoryStore` and `DurableStore`.
 - `Put`, `Delete`, `Get`, `ListEntries`, and `Observe` for local state.
 - `CompareAndSet` for atomic conditional mutation by `EntryIdentity`.
-- `LocalStatus` reports local recovery readiness and current local position.
+- `LocalStatus` reports local recovery readiness, current local position and
+  committed resync purge counts/latest archive path (`Resync`). See
+  [resync loss archives and early warning](../../docs/resync-loss.md).
 - `CheckConsumerPosition` distinguishes resumable positions from positions that
   require a snapshot or resync. It is local-position scoped; it is not a global
   "all peers synced" claim.
@@ -18,11 +20,155 @@ Public consumer surface:
 - `GossipEngine.ReplicationStatus` for a read-only, concurrency-safe view of
   local readiness and per-peer exchange results (see below).
 
+Concurrency (NET-12):
+
+- On one `GossipEngine`, `SyncOnce` and `AntiEntropyOnce` may run concurrently
+  with each other, inbound handlers and `ReplicationStatus`. Each round method
+  is non-reentrant: serialize calls to the same method. Custom stores, syncers,
+  peer providers and policy/clock callbacks must support concurrent use.
+- `Run` owns one push loop and one pull loop. Do not overlap it with manual
+  rounds or another `Run`. Slow push and digest exchanges do not block the
+  other loop. Maintenance follows pull rounds; cancellation joins both loops,
+  so transports must honor their context.
+- Push owns the outbound cursor; digest rounds always start fresh. Backoff is
+  shared: a completed success clears it, while a later failure sets it again.
+  Error history survives successes. A pull that started before a concurrent
+  failure cannot claim inbound catch-up, even when it finishes afterwards.
+  Refusal sets and push progress remain one atomic GC/vouching checkpoint.
+- See [concurrency acceptance evidence](../../docs/state-concurrency-net12.md)
+  for HTTP race tests, forced 410 resync, clock/refusal recovery and limitations.
+  State protocol **3.0** and durable record format **1** are unchanged.
+
 Identity model:
 
 - `ChangeID` identifies the original write and is preserved when forwarded.
 - `StateVersion` orders conflicting states through HLC plus writer identity.
 - `Entry.Position` is a local consumption cursor and is not serialized on the wire.
+
+Push paging and write limits (NET-7):
+
+- `GossipConfig.MaxPushBytes` defaults to 768 KiB of encoded JSON request,
+  including its envelope. Push walks local positions in order, acknowledging
+  and saving progress after each page. `MaxPushPagesPerRound` defaults to 16
+  per peer; remaining pages wait for the next round so other peers get a turn.
+  A transport or progress-save failure resumes from the last saved position.
+  A transient rejection stops at the confirmed prefix; `clock_offset` refusals
+  are skipped and tracked separately for GC/vouching (ADR-0006 D3/D4). A 410 or a
+  `beyond_gc_horizon` rejection still triggers snapshot resync.
+- A capped round only reports `OutboundRoundCaughtUp` when acknowledgements
+  cover the position read at its start (or there is nothing left to replicate).
+  Writes arriving during the round do not extend that target.
+- Both `MemoryStoreConfig.MaxEntryBytes` and `DurableStoreConfig.MaxEntryBytes`
+  default to 512 KiB. This bounds the **complete JSON encoding of an Entry**:
+  base64 value, escaped key, writer/change identity and version metadata count;
+  the node-local position does not. `Put` and successful-condition
+  `CompareAndSet` reject larger entries with `errors.Is(err, ErrEntryTooLarge)`
+  before persistence, visibility or notification. Tombstone mutations use the
+  same limit. Zero selects the default; negative limits are invalid.
+- `Apply` and durable recovery retain larger existing/remote entries for
+  compatibility. Each such entry is sent alone, even if it exceeds
+  `MaxPushBytes`. A warning and the per-peer `OversizedPushEntries` counter
+  report each attempted send (including retries); the counter resets with the
+  engine. If a legacy entry also exceeds the peer's HTTP request limit, that
+  page fails visibly and cannot advance until the operator raises the limit.
+- Construction requires `MaxPushBytes >= MaxEntryBytes + envelope overhead`
+  (including the largest GC horizon encoding) and strictly less than the HTTP
+  request limit. `HTTPSyncerConfig.MaxRequestBytes` declares that peer limit
+  (default 1 MiB); `NewGossipEngine` checks it, and `NewHTTPHandler` checks its
+  own `MaxRequestBytes` against the engine. Configure the sender for the
+  smallest peer limit; limits are not negotiated on the wire. Other Syncers
+  can expose `MaxRequestBytes() int64`, otherwise the 1 MiB default is assumed.
+- Both stores implement the optional `BytePageStore.ChangesSinceBytes` seam.
+  It seeks a maintained position index and copies only page payloads;
+  page reads do not sort or materialize the remaining tail. Existing custom
+  `Store` implementations remain compatible and are read one entry at a time.
+  Wrappers should forward `BytePageStore` and `MaxEntryBytes() int64` when they
+  change the store's default limit. Byte budgets count encoded entries plus
+  commas, excluding the array; a first oversized entry is returned alone.
+
+Digest anti-entropy paging (NET-8, ADR-0004 D2):
+
+- `GossipConfig.MaxDigestBytes` defaults to 768 KiB of **complete encoded
+  request**, including the range, digest, horizon and continuation envelope.
+  It must be positive and strictly below both the syncer's declared peer
+  request limit and the local handler's limit. Zero selects the default.
+- Each peer receives a fresh, complete local digest every round, sorted into
+  contiguous `[start_key, end_key)` intervals. `start_key` is explicitly
+  present (a Go `*string`); the first is the empty string. Empty `end_key`
+  means no upper bound. An empty requester sends one unbounded digest interval,
+  which still runs the GC handshake; it is never mistaken for a snapshot.
+- Every interval includes all local keys in its bounds, including tombstones.
+  Responders check only those bounds for collected values (410) and diff,
+  returning keys the requester lacks as well as newer entries. The GC check
+  repeats over the entire interval on each continuation, including keys before
+  the diff cursor. Sampling, truncation and spreading coverage across rounds
+  are forbidden; the proof is in [tombstone GC](../../docs/state-tombstone-gc.md).
+- Diff pages are sorted by key, capped at 256 entries by default and at
+  `PullRequest.MaxBytes` (default 1 MiB). `HTTPSyncer.PullSnapshot` caps that
+  budget at `MaxResponseBytes`, including JSON escaping, the `more` /
+  `next_key` envelope and the HTTP newline. The requester repeats the complete
+  interval digest with exclusive `after_key = next_key` until `more` is false,
+  then advances to the next digest interval. `HTTPSyncer.Pull` drains digest
+  continuations for callers using its entries-only convenience API.
+- A failed transfer, invalid continuation, apply error or 410/resync abandons
+  the round; the next attempt starts from the first interval with a fresh
+  digest. Already applied pages are ordinary merges; `LastPullTime` advances
+  only after every interval finishes. Clock-ahead entries are per-entry
+  refusals and do not fail the round or back off their forwarding peer.
+  Resync alone never counts as a pull.
+- A single digest record/envelope that cannot fit fails explicitly with
+  `DigestEntryTooLargeError`; a diff entry that cannot fit fails with
+  `PullEntryTooLargeError`. No oversized request is sent. A remote continuation
+  key larger than the reserved local key budget can also cause an explicit
+  digest size failure; raise the digest and peer limits in that case.
+- Custom Syncers used for anti-entropy must implement `SnapshotSyncer` to return
+  paging metadata for both digest and snapshot pulls. Missing support fails
+  visibly. The built-in stores use the optional `ReplicationReadStore` described below.
+  Custom stores without it retain the compatible `ListEntries` fallback.
+
+Replication memory and ordered reads (NET-11):
+
+- Both stores implement optional `ReplicationReadStore`: `DigestRange` returns
+  owned metadata in key order within `[start, end)` (empty end is unbounded),
+  `HasKey` checks presence without copying a value, and `DigestDiffPage` selects
+  differences with the store policy and copies only values fitting the encoded
+  response. Existing `Store` implementations remain source-compatible. Wrappers
+  should forward this interface to keep the optimization.
+- Key and position B-tree indexes contain only key/position references. Every
+  committed Put, CAS, Apply, resync batch, recovery and purge updates both indexes
+  under the entry lock; failed persistence never publishes index changes.
+  Updating an entry costs O(log key count); each push page seeks in O(log key
+  count) and visits only the page candidates it encodes.
+- Anti-entropy takes a complete ordered metadata snapshot per peer, then splits
+  it into the same NET-8 complete intervals. It never copies stored values to
+  build a digest. Responders snapshot shallow immutable references only inside
+  the requested interval; policy comparison and encoding run after unlocking,
+  and only transmitted values are copied. No per-page full-store sorting occurs.
+  Policy callbacks must treat entries as immutable, as for merge comparison.
+  Returned metadata (including raw JSON) and response values belong to callers.
+- Per-round allocation is O(key metadata + encoded digest requests + transmitted
+  differences), rather than O(retained value bytes times digest/diff pages).
+  Metadata snapshots are still O(key count), and a full-space diff may scan all
+  keys; this change does not promise constant-memory digests or Merkle trees.
+  Large policy metadata and actual differing payloads still cost their encoded
+  size. Custom stores using the fallback retain their previous memory costs.
+- `TestReplicationMemoryCeiling` exercises two replicas with 7,500 x 28 KiB values
+  plus 200,000 small keys, two peer exchanges per round and push pages. With a
+  soft Go memory limit it asserts sampled peak `HeapInuse` <= 2.5 times the
+  combined retained value bytes (1,076,200,000 bytes) and allocation <= 1.5 GiB
+  per round. Benchmarks compare 28/56 KiB values and 1k–200k push tails; see
+  [NET-11 measurements](../../docs/replication-memory-net11.md) for commands,
+  before/after results and measurement limits.
+
+**Protocol upgrade:** V2-NET-1b raises `StateProtocolVersion` to **3.0**
+(handshake time samples); NET-8 previously raised 1.0 to 2.0. See
+[time reference](../../docs/time-reference.md) for host wiring and trust limits.
+New/old majors reject each other (HTTP 426 for requests; response validation
+also rejects an old peer). Mixed clusters are unsupported. Stop all hosts
+embedding `pkg/state`, upgrade their pinned Net dependency and restart the
+whole keyspace together (including Mesh, Let and Range test consumers where
+applicable). Durable log format is unchanged. Consumer dependency upgrades and
+three-VM RANGE-2 acceptance are separate tickets.
 
 Durable store:
 
@@ -94,6 +240,12 @@ Tombstone GC and compaction (opt-in, see `docs/state-tombstone-gc.md`):
 
 Replication status (`GossipEngine.ReplicationStatus`):
 
+- `GossipConfig.Clock` supplies emitted timestamps (default `time.Now`); hosts
+  using a shared reference set `Clock: reference.Now`. The callback must be safe
+  for concurrent use. Round starts, success/error times and the displayed retry
+  deadline follow that reference; scheduling, backoff, RTT and catch-up event
+  ordering retain local monotonic time. See [time reference](../../docs/time-reference.md#replication-status-timestamps-net-14)
+  for clock-step and retry-deadline semantics.
 - One `PeerReplicationStatus` per peer the `PeerProvider` currently returns:
   `AcknowledgedPosition` (persisted `PeerProgressStore` value when available),
   `OutboundCaughtUp` (`AcknowledgedPosition >= Local.CurrentPosition`, with the
@@ -118,7 +270,7 @@ Replication status (`GossipEngine.ReplicationStatus`):
   `OutboundRoundTime` is the start of the latest caught-up round, kept after
   later failures: its age shows how fresh the claim is and, while the flag is
   false, since when the peer has been behind. Neither field gates tombstone GC
-  (that still uses the acknowledged position only), and `CaughtUp` remains
+  (that uses the non-refused acknowledgement prefix), and `CaughtUp` remains
   `OutboundCaughtUp && InboundCaughtUp`.
 - Reading the push-round fact: with no local writes a partitioned peer has
   nothing to be pushed, so `OutboundCaughtUp` and therefore
@@ -164,7 +316,11 @@ Policies:
 
 HTTP adapter:
 
-- Handlers require a non-empty bearer token and `X-Outpost-Node-ID`.
+- `AuthMode` selects `token` (default), `token+cert` (both required), or `cert`.
+  Certificate modes require HTTPS mutual TLS and bind request/response node IDs
+  to group certificates. All modes retain `X-Outpost-Node-ID` consistency checks.
+  See [HTTP node authentication](../../docs/http-node-auth.md) for host setup,
+  migration, fail-closed configuration and visible counters.
 - Request body size is bounded by `MaxRequestBytes` (default 1 MiB).
 - Client response body size is bounded by `MaxResponseBytes` (default 1 MiB) for
   both success and error responses; oversized responses fail instead of being
@@ -199,3 +355,32 @@ Boundaries:
   `/metadata/v1` (protocol v3) adapter lives in OutpostLet
   (`pkg/services/metadata/legacy_wire.go`, ticket 04) together with its removal
   condition; this package only speaks `/state/v1`.
+
+Clock refusal safety (V2-NET-1a, ADR-0006 D3/D4):
+
+- All three incoming paths (push, digest, resync snapshot) count and skip entries
+  beyond the five-minute HLC safety valve. Snapshot keys are held before apply;
+  accepted entries still commit as one atomic batch. Within-valve ahead entries
+  remain eligible and are marked. No forwarding peer backoff is charged for an
+  entry refusal. Missing/newer keys are reoffered by every anti-entropy round.
+- Push cursors pass clock refusals. Per-peer refused-position sets persist with
+  durable progress and survive compaction. GC and vouching use the prefix before
+  the earliest unresolved refusal; accepting that write or a replacement releases
+  it. `ReplicationStatus.Peers` reports the raw `AcknowledgedPosition`,
+  `RefusedPositions`, `LowestRefusedPosition` and safe `GCConfirmedPosition`.
+  Outstanding refusals suppress outbound caught-up/round caught-up claims.
+- Every incoming peer GC horizon is guarded against the same physical reference
+  as HLC admission, including requests, responses, 410s and all snapshot pages;
+  a future horizon is never used to purge or raise HLC. Collection also excludes
+  tombstones beyond that reference plus the safety valve.
+- `ReplicationStatus.Clocks`, store/engine `ClockStatus()` and warnings expose
+  `clock_suspect`: per-writer refusal/ahead counts and per-peer horizon refusal
+  counts. They are process-local observations, reset on recreation. Hosts map
+  these facts into their observation stream; this change adds no Range dependency.
+- V2-NET-1b adds time quality, bounded handshake samples, a shared host reference,
+  and conservative retention, raising the state protocol to **3.0**. See
+  [time reference configuration and acceptance](../../docs/time-reference.md).
+  V2-NET-1c adds local HLC alarms, runtime step protection, a one-time horizon
+  upgrade check and the offline `outpostnet-state-reset` command. See
+  [clock recovery and acceptance evidence](../../docs/clock-reset.md) and
+  [GC compatibility](../../docs/state-tombstone-gc.md#adr-0006-d3d4-clock-refusal-compatibility-v2-net-1a).

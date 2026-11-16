@@ -5,17 +5,26 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/btree"
 )
 
 // MemoryStoreConfig configures an in-memory state replica.
 type MemoryStoreConfig struct {
-	NodeID        string
-	Policy        MergePolicy
+	// ArchiveDir optionally retains resync purges on disk for an in-memory store.
+	ArchiveDir string
+	NodeID     string
+	Policy     MergePolicy
+	// MaxEntryBytes bounds a local entry's JSON encoding (default 512 KiB).
+	// Remote Apply and recovery preserve larger legacy entries.
+	MaxEntryBytes int64
 	PhysicalClock PhysicalClock
+	// TimeReference supplies HLC, admission/horizon guards and conservative retention.
+	// Configure it instead of PhysicalClock; share one reference across host stores.
+	TimeReference *TimeReference
 	// TombstoneRetention enables tombstone GC: CollectTombstones removes
 	// tombstones whose HLC wall time is at least this old. Zero (the default)
 	// keeps every tombstone. See docs/state-tombstone-gc.md.
@@ -33,19 +42,33 @@ var _ Store = (*MemoryStore)(nil)
 
 // NewMemoryStore creates a state replica.
 func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
+	if cfg.TimeReference != nil && cfg.PhysicalClock != nil {
+		return nil, fmt.Errorf("configure TimeReference or PhysicalClock, not both")
+	}
+	physical := cfg.PhysicalClock
+	if cfg.TimeReference != nil {
+		physical = cfg.TimeReference
+	}
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, physical, cfg.TombstoneRetention, cfg.MaxEntryBytes)
 	if err != nil {
 		return nil, err
 	}
+	core.archiveDir = cfg.ArchiveDir
 	return &MemoryStore{storeCore: core}, nil
 }
 
 type storeCore struct {
-	nodeID  string
-	policy  MergePolicy
-	entries map[string]Entry
-	clock   localClock
-	hlc     *hlcClock
+	archiveDir           string
+	wrapResyncArchive    func(durableLog) durableLog
+	syncResyncArchiveDir func(string) error
+	resync               ResyncStatus // guarded by mu
+	nodeID               string
+	policy               MergePolicy
+	entries              map[string]Entry
+	byKey                *btree.BTreeG[entryRef]
+	byPosition           *btree.BTreeG[entryRef]
+	clock                localClock
+	hlc                  *hlcClock
 	// ready reports whether this replica can serve local reads and resume a
 	// consumer position. Recovery runs to completion before a store constructor
 	// returns, so a published store starts ready; a lifecycle owner clears it when
@@ -53,13 +76,15 @@ type storeCore struct {
 	ready atomic.Bool
 
 	// retention is the minimum tombstone age before collection; 0 disables GC.
-	retention time.Duration
+	retention     time.Duration
+	maxEntryBytes int64
 	// replicated is set once a GossipEngine owns replication of this store, after
 	// which peer-blind collection is refused.
 	replicated atomic.Bool
 	// horizon and floor are guarded by mu. See GCHorizon and GCFloor.
-	horizon Timestamp
-	floor   uint64
+	clockStatus map[string]NodeClockStatus
+	horizon     Timestamp
+	floor       uint64
 	// adopted is the highest peer horizon adopted through a snapshot resync. A
 	// requester below it is not vouched for (removals done elsewhere). Guarded by
 	// mu.
@@ -78,20 +103,29 @@ type storeCore struct {
 	nextObsID   uint64
 }
 
-func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, retention time.Duration) (*storeCore, error) {
+func newStoreCore(nodeID string, policy MergePolicy, physical PhysicalClock, retention time.Duration, maxEntryBytes int64) (*storeCore, error) {
 	if nodeID == "" {
 		return nil, fmt.Errorf("state store node id is required")
 	}
 	if retention < 0 {
 		return nil, fmt.Errorf("state tombstone retention must not be negative")
 	}
+	if maxEntryBytes == 0 {
+		maxEntryBytes = defaultMaxEntryBytes
+	}
+	if maxEntryBytes < 0 {
+		return nil, fmt.Errorf("state max entry bytes must be positive")
+	}
 	core := &storeCore{
-		nodeID:    nodeID,
-		policy:    normalizePolicy(policy),
-		entries:   make(map[string]Entry),
-		hlc:       newHLCClock(physical),
-		observers: make(map[uint64]func(Entry)),
-		retention: retention,
+		maxEntryBytes: maxEntryBytes,
+		nodeID:        nodeID,
+		policy:        normalizePolicy(policy),
+		entries:       make(map[string]Entry),
+		byKey:         newKeyIndex(),
+		byPosition:    newPositionIndex(),
+		hlc:           newHLCClock(physical),
+		observers:     make(map[uint64]func(Entry)),
+		retention:     retention,
 	}
 	core.ready.Store(true)
 	return core, nil
@@ -121,6 +155,9 @@ func (s *storeCore) put(ctx context.Context, key string, mutation Mutation, pers
 	defer s.commitMu.Unlock()
 
 	entry := s.newLocalEntry(key, mutation)
+	if err := s.checkEntrySize(entry); err != nil {
+		return Entry{}, err
+	}
 	if err := s.policy.ValidateApply(entry); err != nil {
 		return Entry{}, err
 	}
@@ -130,7 +167,7 @@ func (s *storeCore) put(ctx context.Context, key string, mutation Mutation, pers
 		}
 	}
 	s.mu.Lock()
-	s.entries[key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return copyEntry(entry), nil
@@ -156,6 +193,10 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 		return copyEntry(current), false, nil
 	}
 	entry := s.newLocalEntry(key, mutation)
+	if err := s.checkEntrySize(entry); err != nil {
+		s.mu.Unlock()
+		return Entry{}, false, err
+	}
 	if err := s.policy.ValidateApply(entry); err != nil {
 		s.mu.Unlock()
 		return Entry{}, false, err
@@ -170,7 +211,7 @@ func (s *storeCore) compareAndSet(ctx context.Context, key string, expected Entr
 			return Entry{}, false, err
 		}
 	}
-	s.entries[key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return copyEntry(entry), true, nil
@@ -194,7 +235,7 @@ func (s *storeCore) ListEntries(ctx context.Context) ([]Entry, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return filterAndSortEntries(s.entries, 0, 0), nil
+	return s.positionEntriesLocked(0, 0), nil
 }
 
 // ChangesSince returns entries with local position greater than since.
@@ -204,7 +245,7 @@ func (s *storeCore) ChangesSince(ctx context.Context, since uint64, limit int) (
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return filterAndSortEntries(s.entries, since, limit), nil
+	return s.positionEntriesLocked(since, limit), nil
 }
 
 // Apply merges a remote entry. It preserves the original ChangeID and assigns a
@@ -229,6 +270,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 	if _, err := s.hlc.Update(incoming.Version.HLC); err != nil {
 		var offsetErr *ClockOffsetError
 		if errors.As(err, &offsetErr) {
+			s.observeClockEntry(incoming, true)
 			slog.Warn("state: remote HLC exceeds max clock offset",
 				"key", incoming.Key,
 				"peer", incoming.Version.WriterNodeID,
@@ -239,6 +281,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 		return false, fmt.Errorf("reject remote HLC for key %q from %q: %w", incoming.Key, incoming.Version.WriterNodeID, err)
 	}
 
+	s.observeClockEntry(incoming, false)
 	s.mu.Lock()
 	existing, found := s.entries[incoming.Key]
 	if found && s.policy.CompareEntries(incoming, existing) <= 0 {
@@ -262,7 +305,7 @@ func (s *storeCore) apply(ctx context.Context, incoming Entry, persist func(Entr
 			return false, err
 		}
 	}
-	s.entries[entry.Key] = entry
+	s.setEntryLocked(entry)
 	s.mu.Unlock()
 	s.notify(entry)
 	return true, nil
@@ -274,7 +317,9 @@ func (s *storeCore) CurrentPosition() uint64 { return s.clock.Current() }
 // LocalStatus reports local recovery readiness and the latest local position.
 // Ready is false once the replica has stopped serving local state.
 func (s *storeCore) LocalStatus() LocalStatus {
-	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.CurrentPosition()}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return LocalStatus{Ready: s.ready.Load(), CurrentPosition: s.clock.Current(), Resync: copyResyncStatus(s.resync)}
 }
 
 // CheckConsumerPosition reports whether a stored consumer position can resume.
@@ -332,7 +377,7 @@ func (s *storeCore) restoreEntry(entry Entry) error {
 	defer s.mu.Unlock()
 	existing, found := s.entries[entry.Key]
 	if !found || s.policy.CompareEntries(entry, existing) > 0 {
-		s.entries[entry.Key] = copyEntry(entry)
+		s.setEntryLocked(copyEntry(entry))
 	}
 	s.clock.SetAtLeast(maxUint64(entry.Position, entry.ChangeID.Counter))
 	s.hlc.Restore(entry.Version.HLC)
@@ -375,22 +420,15 @@ func (s *storeCore) notify(entry Entry) {
 	}
 }
 
-func filterAndSortEntries(entries map[string]Entry, since uint64, limit int) []Entry {
-	result := make([]Entry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Position > since {
-			result = append(result, copyEntry(entry))
+func (s *storeCore) positionEntriesLocked(since uint64, limit int) []Entry {
+	result := make([]Entry, 0)
+	s.byPosition.AscendGreaterOrEqual(entryRef{position: since}, func(ref entryRef) bool {
+		if ref.position <= since {
+			return true
 		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Position != result[j].Position {
-			return result[i].Position < result[j].Position
-		}
-		return result[i].Key < result[j].Key
+		result = append(result, copyEntry(s.entries[ref.key]))
+		return limit <= 0 || len(result) < limit
 	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
 	return result
 }
 

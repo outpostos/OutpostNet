@@ -4,6 +4,8 @@ All notable changes to OutpostNet will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-16
+
 Outpost OS four-layer refactor (Net state primitives / Service stable access / Range observation).
 
 ### Added

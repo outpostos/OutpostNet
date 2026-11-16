@@ -110,9 +110,55 @@ cmd/outpostnet-agent ──► internal/agent（旧入口的组合宿主：Net �
 
 ## 7. 已知限制
 
-- 动态路径沿用对等目录的角色规则：`node_id` 字典序小的一方拨号，且只有拨号方能打开服务流，因此消费方节点的 `node_id` 必须小于提供方；反向访问需要静态路径或后续改造。
+**V2-NET-3 更新（ADR-0008）**：配置 `tls.ca_file` 时，双向 TLS 以证书
+URI SAN 认证节点，握手声明必须匹配证书；同组允许服务流。反向流无需 token，
+动态拨号也校验目标节点身份。下述“自报身份/需要 token”只适用于未配置 CA 的
+旧模式。签发、配置、时间无关校验与安全计数见 [节点证书](node-certificates.md)。
+
+
+- 动态路径仍沿用对等目录的角色规则（`node_id` 字典序小的一方拨号），但**双方都能打开服务流**（P1-NET-5，ADR-0003 D5）：拨号方在 token 之后于同一认证流追加 `node_id` 声明（`[1B 版本=1][1B 长度 1–255][node_id]`），接受方回 `authOK` 后读取并把该连接登记为此 `node_id` 的反向通道；`TunnelManager.OpenPeerStream` 在本方不是拨号方时经该连接开流，拨号方用本节点隧道服务端的同一路由表处理反向流。同一 `node_id` 的新连接替换旧登记，连接关闭即注销；换地址（`PUT /v1/peers`）后在途反向流按现有契约随旧连接中断。
+  - 声明是**自报的**，只在共享 token 认证成功后被采信，**不构成节点认证**；持有 token 的一方可冒用任意 `node_id`。节点级认证与授权按架构 v0.1 §3.9 另行处理。
+  - 反向流需要配置 `auth.token`（无 token 时没有认证流，也就没有声明）；拨号方需要至少一个 `role: server` 隧道提供路由表，否则反向流被拒绝并记日志。
+  - 兼容：旧拨号方不发声明，接受方按旧行为处理（不能反向开流）；旧接受方不读取声明字节，新拨号方的正向访问不受影响。
 - `peers` 仅在启动时注入；运行期地址变化只通过 `PUT /v1/peers`（整表替换）。配置文件中 node_id/tunnels/imports/auth/tls/management/health_addr/peers 的变化需重启，watcher 只应用 exports 并对其余变化记录一条告警（`Host.sameRestartScope`）。比较对象是“重新套用同样命令行覆盖（`--node-id`、`--health-addr`）后的文件配置”与运行中配置，因此命令行覆盖本身不会导致每次 reload 误告警。
 - 端点切换期间（重连退避初始 1s）新连接会被入口立即关闭，不排队等待；应用需自行重试。
 - 不承诺在途连接无损迁移（见第 4 节）。
 - 本票只在单机多进程/同进程多监听上验证；多台物理机/真实网络下未验证。
 - `tunnel.ManagedClient.GracefulShutdown` 开始后不再接受新流（`OpenServiceStream`/`OpenRelayStream` 返回 `net.ErrClosed`），只等待已登记的在途流，超时后强制关闭。（票09b 已修复原 `sync.WaitGroup` 在等待期间被 `Add` 的竞态。）
+
+## 8. 逻辑服务目录（P1-NET-2，ADR-0003 D2）
+
+运行中目录的只读状态：管理 Unix socket 上 `GET /v1/directory`，含写者拒绝、
+租约过期等计数与逐节点租约有效性；同一计数也进入 Service 观测事件流。
+端点、字段及 V2-RANGE-3 取证方式见 [目录观测](directory-observation.md)。
+
+`internal/meshdirectory` 实现 `service.Directory`：订阅本节点 Mesh 网关 `GET /v1alpha1/entities:stream?filter.entityIdPrefix=urn:outpostos:`（SSE），用本地最小 JSON 结构体解码（**不**在 `go.mod` 引入 OutpostMesh，`gomod_test.go` 守护）。
+
+- 快照在 `SNAPSHOT_COMPLETE` 时原子替换；`DELTA` 按实体更新，`DELETED`/`EXPIRED`/`is_live=false` 移除（`EXPIRED` 事件中 `isLive` 仍为 true，按事件类型判断）。
+- 断线以 100ms 起、上限 5s 的指数退避重连并携带最后确认的 `resumeCursor`；游标不可用时 Mesh 回落为新快照，按首个快照处理。
+- V2-NET-2：同一 SSE 流按组件分派服务登记与节点租约。新式登记按本地单调钟上的租约序号前进、incarnation 匹配判定；过渡期旧式登记继续按 `expiry_time` 判定。详见 [租约目录说明与验证状态](v2-net2-directory-leases.md)。
+- 冷启动缓存 `<data-dir>/service-directory.json`：快照完成时与之后至多每 5s 写一次（临时文件 + fsync + rename）；启动时载入并标记 `Stale=true`，首个快照完成后清除；断线期间 `Stale=true`，缓存租约视为刚看到，最多再信任一个 `LeaseTTL`，旧式实例按 TTL 剔除；损坏的缓存告警后忽略。V2 缓存保存已校验的写者与 incarnation，拒绝缺少写者信息的 V1 缓存并等待新快照。
+- Mesh 的权重在端点上，实例取其首个 TCP 端点的权重。
+- 契约样本：`internal/meshdirectory/testdata/*.sse` 为真实网关（OutpostMesh f0ab178）录制的 SSE 输出；`-tags integration` 的 `TestRealMeshGateway` 对真实二进制验证（`OUTPOSTMESH_GATEWAY_BIN`）。
+- 本票只提供目录；入口与导出接入见 P1-NET-3 / P1-NET-4。
+
+## 9. 逻辑入口（P1-NET-3，ADR-0003 D3）
+
+`imports[].service` 不含 `@` 时为逻辑入口（如 `service: echo`），需要 `mesh.gateway_url`。入口用 `service.LogicalOpener` 代替 `NetOpener`：
+
+- 每个新连接：`Directory.Instances` → `Select`（先过滤后排序，见 `pkg/service/directory.go`）→ 依次尝试。本节点候选直拨 `127.0.0.1:<port>`；远端候选经 `TunnelManager.OpenConfirmedPeerStream`（拨号方或接受方连接均可，见 §7）。单次尝试上限 3s。
+- **判定点**：远端候选以“确认字节”为准。开流时流头 `NameLen` 置 bit 14，提供方 `tunnel.Server` 在拨通本地后端后先回 1 字节（`0` 已连接 / `1` 无路由 / `2` 后端拨号失败），之后才开始转发；带确认的流不走中继兜底。入口在 `OpenStream` 返回前不读取应用连接的任何字节，所以确认前的任何失败都换下一个候选，确认后的失败只关闭连接，不重发。
+- 被拒绝的流（无路由、后端拨号失败或流头读取失败）会完整结束收发两方向、释放 QUIC 流额度；同一对等连接在后端恢复后仍可开新流。
+- 无候选时立即关闭连接并计数：`no_candidate`（目录新鲜但无可用实例）、`all_unreachable`（有候选但都失败）、`directory_stale`（无可用实例且目录未同步或已断线）。目录 stale 时仍照常选择，成功计入 `ResolvedFromStale` 并记日志。计数见 `Host.LogicalStats`；观测事实 `ServiceAccessChanged` 的 backend 为实际选中的节点与地址（本地为 `127.0.0.1:<port>`，远端为 `<node_id>/<service>`），`no_candidate` / `directory_stale` 记为 `NO_BACKEND`，`all_unreachable` 记为 `UNREACHABLE`。实例 ID 与尝试次数只进日志，不在观测契约中。
+- 兼容：只有逻辑入口使用确认；旧版提供方不认识 bit 14，会把流当成超长名称关闭，入口记为不可达并换下一个候选。逻辑服务要求承载节点与消费节点都升级。`name@node` 与静态入口不变。
+
+## 10. 目录驱动导出（P1-NET-4，ADR-0003 D4）
+
+配置 `mesh.gateway_url` 后，`outpostnet-service` 按目录自动维护本节点的导出路由（`internal/servicehost/direxports.go`），远端逻辑入口无需本节点写静态 `exports`：
+
+- 对目录中每个服务，取 `node_id == 本节点` 的实例，按 `service.Select` 的过滤与排序取首个，导出 `<service_name> → 127.0.0.1:<port>`。订阅目录变更即时对账，另每 1s 兜底对账一次。
+- 实例变为 `DRAINING`/`NOT_READY`、`is_live=false`、节点租约失效或旧式 TTL 到期时路由移除；端口变化时路由原地改址，已建立的流保持原后端（路由只在开流时查找）。
+- 与静态 `exports` 同名时静态生效，并按服务名每分钟至多告警一次；静态导出移除后目录导出接管，目录登记也消失后路由删除，不残留。
+- 目录 stale（Mesh 不可达）时继续使用最后的目录内容，实例继续按节点租约或旧式 TTL 失效。
+- 路由表 = 静态导出 ∪ 目录导出（静态优先），`Host.ApplyExports` 与配置文件热更新只改静态部分；`Host.ExportRoutes` 返回当前生效的路由。
+

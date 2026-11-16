@@ -3,6 +3,7 @@ package observation
 import (
 	"context"
 	"errors"
+	"google.golang.org/protobuf/proto"
 	"io"
 	"net"
 	"net/http"
@@ -250,5 +251,28 @@ func TestServerIsLoopbackOnlyAndSpeaksTheRangeContract(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad after_seq status = %d", resp.StatusCode)
+	}
+}
+
+func TestEventLogBoundsRetainedBytes(t *testing.T) {
+	log := NewEventLog("node-a", observationv1alpha1.Component_COMPONENT_OUTPOSTSERVICE, 4096, nil, nil)
+	after := log.CurrentSeq()
+	for range 8 {
+		log.Append(&observationv1alpha1.Event{Body: &observationv1alpha1.Event_MetricSample{MetricSample: &observationv1alpha1.MetricSample{Name: strings.Repeat("x", 1<<20)}}})
+	}
+	backlog, _, cancel, err := log.SubscribeAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	var bytes int
+	for _, e := range backlog {
+		bytes += proto.Size(e)
+	}
+	if bytes > 4<<20 {
+		t.Fatalf("retained %d bytes, want at most 4 MiB", bytes)
+	}
+	if _, _, _, err := log.SubscribeAfter(after); !errors.Is(err, ErrEventGap) {
+		t.Fatalf("evicted cursor error = %v", err)
 	}
 }

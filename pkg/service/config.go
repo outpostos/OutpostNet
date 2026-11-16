@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -42,6 +43,30 @@ type Config struct {
 
 	// Peers seeds the peer directory at startup.
 	Peers []Peer `yaml:"peers,omitempty"`
+
+	// Mesh connects the Service layer to this node's OutpostMesh gateway
+	// for logical service resolution (ADR-0003). Required when any import
+	// names a logical service.
+	Mesh MeshConfig `yaml:"mesh,omitempty"`
+}
+
+// MeshConfig locates the local Mesh gateway and the directory cache.
+type MeshConfig struct {
+	// GatewayURL is the local Mesh REST base URL, e.g. http://127.0.0.1:8081.
+	GatewayURL string `yaml:"gateway_url,omitempty" json:"gateway_url,omitempty"`
+	// DirectoryCacheDir holds the cold-start directory cache
+	// (service-directory.json); empty disables the cache.
+	DirectoryCacheDir string `yaml:"directory_cache_dir,omitempty" json:"directory_cache_dir,omitempty"`
+}
+
+// logicalPlaceholderNode stands in for the node of a logical import while
+// the shared agentconfig validation (which only knows <service>@<node_id>)
+// runs; it never reaches a running host.
+const logicalPlaceholderNode = "logical.placeholder"
+
+// isLogicalImport reports whether an import names a logical service.
+func isLogicalImport(imp agentconfig.ImportConfig) bool {
+	return imp.Service != "" && !strings.Contains(imp.Service, "@")
 }
 
 // LoadConfig reads and validates a Service config file.
@@ -91,8 +116,40 @@ func ValidateConfig(cfg *Config) error {
 	if len(cfg.Relays) > 0 {
 		return fmt.Errorf("relays are not supported by outpostnet-service; configure relay forwarding on outpostnet-agent")
 	}
-	if err := agentconfig.ValidateConfig(&cfg.Config); err != nil {
+	// Logical imports (service without "@") are a Service feature the
+	// shared agentconfig schema does not know. Validate them here, and let
+	// agentconfig validate everything else with a placeholder node so that
+	// its error indices still match the file.
+	var logical []int
+	for i, imp := range cfg.Imports {
+		if !isLogicalImport(imp) {
+			continue
+		}
+		logical = append(logical, i)
+		if err := ValidateLogicalName(imp.Service); err != nil {
+			return fmt.Errorf("imports[%d].service: %w", i, err)
+		}
+		if imp.RemoteRegion != "" {
+			return fmt.Errorf("imports[%d] %q: a logical service has no remote_region", i, imp.Service)
+		}
+		if cfg.Mesh.GatewayURL == "" {
+			return fmt.Errorf("imports[%d] %q is a logical service: mesh.gateway_url is required", i, imp.Service)
+		}
+		cfg.Imports[i].Service = imp.Service + "@" + logicalPlaceholderNode
+	}
+	err := agentconfig.ValidateConfig(&cfg.Config)
+	for _, i := range logical {
+		cfg.Imports[i].Service = strings.TrimSuffix(cfg.Imports[i].Service, "@"+logicalPlaceholderNode)
+		cfg.Imports[i].RemoteRegion = ""
+	}
+	if err != nil {
 		return err
+	}
+	if cfg.Mesh.GatewayURL != "" {
+		u, err := url.Parse(cfg.Mesh.GatewayURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("mesh.gateway_url %q must be http(s)://host[:port]", cfg.Mesh.GatewayURL)
+		}
 	}
 	for i, e := range cfg.Exports {
 		if !strings.EqualFold(e.Protocol, "tcp") {
@@ -116,7 +173,7 @@ func ValidateConfig(cfg *Config) error {
 		}
 		// Static entries are bound to a configured client tunnel; without
 		// one every connection would fail at runtime.
-		if !tgt.Dynamic() && !clientRegions[tgt.Region] {
+		if !tgt.Logical && !tgt.Dynamic() && !clientRegions[tgt.Region] {
 			return fmt.Errorf("imports[%d] %q: remote_region %q has no client tunnel (add a tunnels entry with role: client and that remote_region, or use service: <name>@<node_id>)", i, imp.Name, tgt.Region)
 		}
 		// Port 0 asks the OS for a free port, so those never collide.
@@ -172,8 +229,11 @@ func (c *Config) EntryTargets() []Target {
 // static configured tunnel for remote_region.
 func entryTarget(imp agentconfig.ImportConfig) Target {
 	if imp.Service != "" {
-		if ref, err := ParseRef(imp.Service); err == nil {
-			return ref.Target()
+		if logical, name, node, err := ParseImportService(imp.Service); err == nil {
+			if logical {
+				return Target{Service: name, Logical: true}
+			}
+			return Target{Service: name, NodeID: node}
 		}
 	}
 	return Target{Service: imp.Name, Region: imp.RemoteRegion}

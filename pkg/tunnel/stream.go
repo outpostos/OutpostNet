@@ -31,6 +31,9 @@ type StreamHeader struct {
 	ServiceName string
 	HopCount    uint8
 	IsRelay     bool
+	// WantsConfirm is set by WriteConfirmedServiceHeader: the provider
+	// answers one status byte before forwarding (see confirm.go).
+	WantsConfirm bool
 }
 
 // WriteServiceHeader writes a standard service name header to a QUIC stream.
@@ -91,7 +94,11 @@ func ReadStreamHeader(r io.Reader) (StreamHeader, error) {
 	}
 
 	isRelay := nameLen&relayFlag != 0
-	nameLen &= ^relayFlag
+	wantsConfirm := nameLen&confirmFlag != 0
+	nameLen &^= relayFlag | confirmFlag
+	if isRelay && wantsConfirm {
+		return StreamHeader{}, fmt.Errorf("stream confirmation is not supported on relay headers")
+	}
 
 	if nameLen == 0 {
 		return StreamHeader{}, fmt.Errorf("empty service name")
@@ -106,8 +113,9 @@ func ReadStreamHeader(r io.Reader) (StreamHeader, error) {
 	}
 
 	hdr := StreamHeader{
-		ServiceName: string(buf),
-		IsRelay:     isRelay,
+		ServiceName:  string(buf),
+		IsRelay:      isRelay,
+		WantsConfirm: wantsConfirm,
 	}
 
 	if isRelay {

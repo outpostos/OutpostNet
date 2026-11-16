@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -116,13 +117,20 @@ func TestLocalStoreCollectsTombstonesOnlyAfterRetention(t *testing.T) {
 
 // loopNet routes in-process gossip between engines with a directional blocklist.
 type loopNet struct {
-	mu      sync.Mutex
-	engines map[string]*GossipEngine
-	blocked map[string]bool
+	clockAheadPath  string
+	clockInjections int
+	digestBytes     int64
+	mu              sync.Mutex
+	engines         map[string]*GossipEngine
+	blocked         map[string]bool
 }
 
-func newLoopNet() *loopNet {
-	return &loopNet{engines: make(map[string]*GossipEngine), blocked: make(map[string]bool)}
+func newLoopNet(budget ...int64) *loopNet {
+	var digestBytes int64
+	if len(budget) > 0 {
+		digestBytes = budget[0]
+	}
+	return &loopNet{digestBytes: digestBytes, engines: make(map[string]*GossipEngine), blocked: make(map[string]bool)}
 }
 
 func (n *loopNet) setBlocked(a, b string, blocked bool) {
@@ -145,6 +153,28 @@ func (n *loopNet) target(from, to string) (*GossipEngine, error) {
 	return engine, nil
 }
 
+func newClockLoopNet(t *testing.T, budget int64, path []string) *loopNet {
+	t.Helper()
+	net := newLoopNet(budget)
+	if len(path) > 0 {
+		net.clockAheadPath = path[0]
+	}
+	if net.clockAheadPath != "" {
+		t.Cleanup(func() {
+			if net.clockInjections == 0 {
+				t.Fatal("clock-ahead path was not exercised")
+			}
+		})
+	}
+	return net
+}
+
+func (n *loopNet) clockEntry(receiver *GossipEngine, key string) Entry {
+	n.clockInjections++
+	now := receiver.store.(interface{ TimeReferenceMS() int64 }).TimeReferenceMS()
+	return newEntryForTest(key, []byte("refused"), "clock-ahead-writer", 1, Timestamp{WallMS: now + 600_000})
+}
+
 type loopSyncer struct {
 	net  *loopNet
 	from string
@@ -154,6 +184,9 @@ func (s loopSyncer) Push(ctx context.Context, addr string, req PushRequest) (*Pu
 	engine, err := s.net.target(s.from, addr)
 	if err != nil {
 		return nil, err
+	}
+	if s.net.clockAheadPath == "push" {
+		req.Entries = append(req.Entries, s.net.clockEntry(engine, "\x00clock-ahead"))
 	}
 	return engine.HandlePush(ctx, req)
 }
@@ -171,7 +204,35 @@ func (s loopSyncer) PullSnapshot(ctx context.Context, addr string, req PullReque
 	if err != nil {
 		return nil, err
 	}
-	return engine.HandlePullResponse(ctx, req)
+	resp, err := engine.HandlePullResponse(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	path := "snapshot"
+	if req.StartKey != nil || len(req.Digest) > 0 {
+		path = "digest"
+	}
+	if s.net.clockAheadPath == path {
+		key := "\x00clock-ahead"
+		if path == "digest" {
+			if req.AfterKey != "" {
+				key = req.AfterKey + "\x00"
+			} else if req.StartKey != nil {
+				key = *req.StartKey + "\x00"
+			}
+			if !digestKeyInRange(key, req) {
+				return nil, fmt.Errorf("clock injection key outside interval")
+			}
+		}
+		resp.Entries = append(resp.Entries, s.net.clockEntry(engine, key))
+		if path == "digest" {
+			sort.Slice(resp.Entries, func(i, j int) bool { return resp.Entries[i].Key < resp.Entries[j].Key })
+			if resp.More {
+				resp.NextKey = resp.Entries[len(resp.Entries)-1].Key
+			}
+		}
+	}
+	return resp, nil
 }
 
 type loopNode struct {
@@ -186,10 +247,11 @@ func newLoopNode(t *testing.T, net *loopNet, id string, clock PhysicalClock, pee
 	node := &loopNode{id: id, store: mustGCMemoryStore(t, id, clock, testRetention)}
 	node.peers.Store(peers)
 	engine, err := NewGossipEngine(GossipConfig{
-		NodeID:       id,
-		Store:        node.store,
-		Syncer:       loopSyncer{net: net, from: id},
-		PeerProvider: PeerProviderFunc(func() []string { return node.peers.Load() }),
+		NodeID:         id,
+		Store:          node.store,
+		Syncer:         loopSyncer{net: net, from: id},
+		MaxDigestBytes: net.digestBytes,
+		PeerProvider:   PeerProviderFunc(func() []string { return node.peers.Load() }),
 	})
 	if err != nil {
 		t.Fatalf("NewGossipEngine: %v", err)
@@ -272,9 +334,14 @@ func TestReplicatedGCWaitsUntilEveryPeerAcknowledged(t *testing.T) {
 }
 
 func TestLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T) {
+	for _, budget := range []int64{0, 512, 680} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { runLaggingPeerIsForcedToResyncAndCannotResurrect(t, budget) })
+	}
+}
+func runLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T, budget int64, clockPath ...string) {
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
-	net := newLoopNet()
+	net := newClockLoopNet(t, budget, clockPath)
 	a := newLoopNode(t, net, "node-a", clock, "node-b", "node-l")
 	b := newLoopNode(t, net, "node-b", clock, "node-a")
 	l := newLoopNode(t, net, "node-l", clock, "node-a")
@@ -373,9 +440,13 @@ func TestLaggingPeerIsForcedToResyncAndCannotResurrect(t *testing.T) {
 }
 
 func TestLaggingPusherIsRefusedWithResyncRequired(t *testing.T) {
+	runLaggingPusherIsRefusedWithResyncRequired(t)
+}
+
+func runLaggingPusherIsRefusedWithResyncRequired(t *testing.T, clockPath ...string) {
 	ctx := context.Background()
 	clock := &fixedPhysicalClock{now: 1_000_000}
-	net := newLoopNet()
+	net := newClockLoopNet(t, 0, clockPath)
 	a := newLoopNode(t, net, "node-a", clock, "node-b")
 	newLoopNode(t, net, "node-b", clock)
 	l := newLoopNode(t, net, "node-l", clock, "node-a")
@@ -444,6 +515,10 @@ func TestLaggingPusherIsRefusedWithResyncRequired(t *testing.T) {
 	if err := l.sync(t); err != nil {
 		t.Fatalf("node-l second sync: %v", err)
 	}
+	if err := l.antiEntropy(t); err != nil {
+		t.Fatal(err)
+	}
+	assertNotResurrected(t, "doomed", a, l)
 }
 
 func TestDurableStorePersistsGCHorizonFloorAndCounters(t *testing.T) {

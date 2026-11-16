@@ -46,6 +46,9 @@ type Target struct {
 	NodeID string
 	// Region selects the static configured-tunnel path.
 	Region string
+	// Logical marks a logical service name resolved per connection through
+	// the service directory (ADR-0003 D3); it needs a LogicalOpener.
+	Logical bool
 }
 
 // Dynamic reports whether the target uses the peer-directory path.
@@ -53,6 +56,9 @@ func (t Target) Dynamic() bool { return t.NodeID != "" }
 
 // String renders the target for logs.
 func (t Target) String() string {
+	if t.Logical {
+		return t.Service + " (logical)"
+	}
 	if t.Dynamic() {
 		return t.Service + "@" + t.NodeID
 	}
@@ -72,6 +78,12 @@ func (t Target) Validate() error {
 	}
 	if t.NodeID != "" && t.Region != "" {
 		return fmt.Errorf("target %q: node_id and region are mutually exclusive", t.Service)
+	}
+	if t.Logical {
+		if t.NodeID != "" || t.Region != "" {
+			return fmt.Errorf("target %q: a logical target has no node_id or region", t.Service)
+		}
+		return ValidateLogicalName(t.Service)
 	}
 	return nil
 }
@@ -107,6 +119,9 @@ func NetOpener(n NetStreams) StreamOpener {
 	return StreamOpenerFunc(func(ctx context.Context, t Target) (io.ReadWriteCloser, error) {
 		if err := t.Validate(); err != nil {
 			return nil, err
+		}
+		if t.Logical {
+			return nil, fmt.Errorf("target %s needs a LogicalOpener", t)
 		}
 		if t.Dynamic() {
 			return n.OpenPeerStream(ctx, t.NodeID, t.Service)

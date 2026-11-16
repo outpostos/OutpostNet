@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 	"github.com/quic-go/quic-go"
 )
 
@@ -35,7 +36,7 @@ func NewClient(cfg ClientConfig, logger *slog.Logger) *Client {
 }
 
 // Connect establishes the QUIC connection to the tunnel server.
-// If a token is configured, it performs the auth handshake before returning.
+// With Identity or a token, it completes the auth handshake before returning.
 func (c *Client) Connect(ctx context.Context) error {
 	conn, err := dialAndAuth(ctx, c.cfg)
 	if err != nil {
@@ -49,7 +50,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// dialAndAuth dials the tunnel server and, if a token is configured,
+// dialAndAuth dials the tunnel server and, if Identity or a token is configured,
 // performs the client-side auth handshake before returning the connection.
 // The connection is closed and an error returned on any failure.
 func dialAndAuth(ctx context.Context, cfg ClientConfig) (*quic.Conn, error) {
@@ -58,7 +59,15 @@ func dialAndAuth(ctx context.Context, cfg ClientConfig) (*quic.Conn, error) {
 		return nil, err
 	}
 
-	if cfg.Token == "" {
+	if cfg.Identity != nil {
+		peerID, err := tlsutil.NodeID(conn.ConnectionState().TLS.PeerCertificates[0])
+		if err != nil || (cfg.ExpectedPeerID != "" && peerID != cfg.ExpectedPeerID) {
+			cfg.Identity.RejectClaim()
+			conn.CloseWithError(1, "peer identity mismatch")
+			return nil, fmt.Errorf("tunnel peer certificate identity mismatch")
+		}
+	}
+	if cfg.Token == "" && cfg.Identity == nil {
 		return conn, nil
 	}
 
@@ -80,7 +89,19 @@ func dialAndAuth(ctx context.Context, cfg ClientConfig) (*quic.Conn, error) {
 		conn.CloseWithError(1, "auth failed")
 		return nil, fmt.Errorf("write auth token: %w", err)
 	}
+	nodeID := cfg.NodeID
+	if cfg.Identity != nil && nodeID == "" {
+		nodeID = cfg.Identity.NodeID()
+	}
+	if nodeID != "" {
+		if err := writePeerHello(stream, nodeID); err != nil {
+			conn.CloseWithError(1, "auth failed")
+			return nil, err
+		}
+	}
 
+	// Finish the declaration so the acceptor can reject an absent claim.
+	stream.Close()
 	resp := make([]byte, 1)
 	if _, err := io.ReadFull(stream, resp); err != nil {
 		conn.CloseWithError(1, "auth failed")

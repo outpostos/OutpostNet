@@ -58,6 +58,11 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
 
 ## 3. Service 层报告的本地事实（`service_access_changed` 116、快照字段 20）
 
+NET-15 adds directory counters and lease validity as existing 109 `MetricSample`
+events on the Service stream. The local management socket also exposes
+`GET /v1/directory`; metric names, field meanings and V2-RANGE-3 collection are
+documented in [directory-observation.md](directory-observation.md).
+
 来源：`outpostnet-service` 的每个稳定入口（`imports[]`）。每个应用连接到达入口时，入口按当前隧道状态打开一条流——
 这就是“经入口的真实连接”。观测包装入口使用的 `StreamOpener` 与返回的流，只读结果，不改变转发。
 
@@ -118,6 +123,25 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
 - 并发安全：只在引擎锁内复制每 peer 状态，不持锁调用 Store。
 - 不泄露凭据：`pkg/state` 的全部日志与导出 API 返回的错误只以“密码已遮蔽”的 peer 地址出现；任何 `Syncer` 的每 peer 错误在返回、记日志、进状态前去掉地址里的密码；`HTTPSyncer` 把 bearer token 与对端回显的 URL 密码替换为 `[REDACTED]`。脱敏收敛在 `pkg/state/redact.go`。
 - `pkg/state` 不依赖 OutpostRange；映射到 proto 由宿主完成。
+
+### OS time-source observations (V2-NET-1d)
+
+Agents sample their shared `TimeReference` once a second using the existing
+`MetricSample` event body. `net_time_quality` has value 1 and labels `quality`,
+`source`, `source_state`; synchronized source observations additionally report
+`net_time_source_uncertainty_seconds`, and a measured signed offset reports
+`net_time_source_offset_seconds`. Unknown measurements are omitted. These samples
+belong to the event timeline, not Snapshot fields. No Range contract upgrade is
+needed. Public `TimeStatus.Source` and store/engine `TimeSource` provide the same
+source facts for embedding hosts; see [source mapping and tests](os-time-source.md).
+
+### Resync loss samples (NET-16)
+
+The shared `state.ReplicationMetrics(scope, status)` mapping and Net
+`Reporter.UpdateReplication` adapter use existing MetricSample events for purge
+counts, relative archive path, and pre-retention warnings. Embedded Mesh/Let
+replicas require producer wiring after upgrading Net; standalone Net processes
+have no replica to sample. See [resync loss operations](resync-loss.md).
 
 ## 5. 快照与“只发变化”
 
@@ -205,3 +229,53 @@ Net 复制一栏在 Range 中显示 missing 是真实情况。
   `observation endpoint unavailable; continuing without observation API ... address already in use`。
 - 干净检出：`git clone` 本分支到临时目录，使用全新 `GOMODCACHE`（经 SSH 拉取私有 OutpostRange），
   `go build ./...` 与核心包测试通过，go.mod 无 `replace`。
+
+## 11. Reliable delivery metrics (NET-10)
+
+`pkg/delivery` exposes `DeliveryStatus()` in the same host-owned manner as
+`pkg/state.ReplicationStatus`. It remains independent of the Range module.
+`internal/observation.Reporter.UpdateDelivery(statuses...)` maps these local
+facts into the existing **109 `MetricSample`** event body; it adds no proto
+fields or exporter. A host embedding delivery calls this on its observation
+sampling tick with its Inbox and Outbox snapshots. Net agent/service do not
+construct delivery boxes, so they do not emit invented delivery facts. External
+embedding hosts (including Mesh) own the equivalent mapping in their observation
+producer; their runtime wiring is outside NET-10.
+
+Every sample has `peer_node_id` and `box` (`inbox`/`outbox`) labels. Source node,
+component, time and sequence come from the existing event log. No message ID,
+mailbox, payload, endpoint address, token or error text becomes a metric label.
+
+| Metric | Local fact |
+| --- | --- |
+| `delivery_pending_envelopes`, `delivery_pending_bytes` | Durable pending envelopes and JSON-encoded bytes |
+| `delivery_pending_receipts`, `delivery_pending_receipt_bytes` | Receipts waiting for confirmation and encoded bytes |
+| `delivery_oldest_pending_seconds` | Oldest known enqueue age, including receipts; zero when queue empty; omitted when pending legacy entries have no known timestamp |
+| `delivery_send_success_total`, `delivery_send_failure_total` | Actual batch attempts; full or invalid/failed responses count as failures; skipped backoff polls do not count |
+| `delivery_unknown_peer_total` | Destination missing from existing membership/identity mapping |
+| `delivery_duplicate_total` | Receiver deduplication hits |
+| `delivery_expired_total` | Expired arrivals plus locally committed expiry transitions |
+| `delivery_rejected_total` | Invalid envelope/receipt admission results and committed Outbox rejections |
+| `delivery_inbox_full_total`, `delivery_outbox_full_total` | Receiver admission refusals / local Send quota refusals |
+
+Queue gauges survive box recovery; counters describe this process and reset on
+reopen. Samples use the existing bounded, nonblocking timeline and its gap/slow
+subscriber behavior. The current observation Snapshot contract has no generic
+metric field: these samples are events, emitted on each host sampling tick,
+not added to snapshot fields 15–20. Range must derive metric projections from
+the timeline. `TestDeliveryMetricSamplesUseLocalFacts` verifies the real box
+status → MetricSample mapping and secret-free proto JSON. Delivery HTTP tests
+capture error/log redaction, including echoed tokens, credential-bearing peer
+URLs, malformed responses, client failures and redirects.
+
+## OBS-LOSS retention budget
+
+Net/Service retain at most 4,096 events and 4 MiB of protobuf-encoded events,
+whichever is reached first. Slow subscribers still cannot block product writes.
+The byte budget excludes Go object overhead and SSE/JSON encoding overhead.
+At 18 directory samples per second (nine counters and three metrics for each
+of three leases), the count budget covers about 227 seconds before other facts.
+Directory samples are coalesced on the one-second tick; lease/time quality and
+reliable-delivery samples already use periodic ticks. A cursor older than the
+retained window receives HTTP 410; skipped history must be marked incomplete
+by the Range agent (OutpostRange#63).

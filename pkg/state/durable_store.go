@@ -79,10 +79,16 @@ type durableLog interface {
 
 // DurableStoreConfig configures a file-backed state replica.
 type DurableStoreConfig struct {
-	Dir           string
-	NodeID        string
-	Policy        MergePolicy
+	Dir    string
+	NodeID string
+	Policy MergePolicy
+	// MaxEntryBytes bounds a local entry's JSON encoding (default 512 KiB).
+	// Remote Apply and recovery preserve larger legacy entries.
+	MaxEntryBytes int64
 	PhysicalClock PhysicalClock
+	// TimeReference supplies HLC, admission/horizon guards and conservative retention.
+	// Configure it instead of PhysicalClock; share one reference across host stores.
+	TimeReference *TimeReference
 	// TombstoneRetention enables tombstone GC; see MemoryStoreConfig. Zero (the
 	// default) keeps every tombstone.
 	TombstoneRetention time.Duration
@@ -104,7 +110,9 @@ type DurableStoreConfig struct {
 
 	// compactionHook runs before each compaction step (compactStep*). Tests use it
 	// to inject step failures and to capture crash images of the directory.
-	compactionHook func(step string) error
+	compactionHook       func(step string) error
+	wrapResyncArchive    func(durableLog) durableLog
+	syncResyncArchiveDir func(string) error
 }
 
 // DurableStore is a file-backed Store. Each accepted local or remote state
@@ -116,8 +124,10 @@ type DurableStore struct {
 	logFile      durableLog
 	lockFile     *os.File
 	peerProgress map[string]uint64
-	// peerNodes maps a peer address to the node ID that last acknowledged a push
-	// there. Guarded by mu, like peerProgress.
+	// peerRefused tracks unresolved refusals in the same records as progress.
+	peerRefused map[string][]refusedPosition
+	// peerNodes maps an address to the node that answered its latest push.
+	// Both maps are guarded by mu, like peerProgress.
 	peerNodes     map[string]string
 	preAppendHook func(durableRecord) error
 	wrapLog       func(durableLog) durableLog
@@ -145,22 +155,25 @@ var (
 )
 
 type durableManifest struct {
-	FormatVersion int    `json:"format_version"`
-	NodeID        string `json:"node_id"`
-	PolicyID      string `json:"policy_id"`
+	FormatVersion        int    `json:"format_version"`
+	NodeID               string `json:"node_id"`
+	PolicyID             string `json:"policy_id"`
+	ClockRecoveryVersion int    `json:"clock_recovery_version,omitempty"`
 }
 
 type durableRecord struct {
-	FormatVersion int    `json:"format_version"`
-	Sequence      uint64 `json:"sequence"`
-	Type          string `json:"type"`
-	Entry         *Entry `json:"entry,omitempty"`
+	Resync        *ResyncStatus `json:"resync,omitempty"`
+	FormatVersion int           `json:"format_version"`
+	Sequence      uint64        `json:"sequence"`
+	Type          string        `json:"type"`
+	Entry         *Entry        `json:"entry,omitempty"`
 	// Batch holds the entries of a batch record with their local positions.
 	Batch    []durableBatchEntry `json:"batch,omitempty"`
 	Peer     string              `json:"peer,omitempty"`
 	Position uint64              `json:"position,omitempty"`
 	// PeerNodeID is the node ID that answered at Peer (peer_progress records).
-	PeerNodeID string `json:"peer_node_id,omitempty"`
+	PeerNodeID string             `json:"peer_node_id,omitempty"`
+	Refused    *[]refusedPosition `json:"refused_positions,omitempty"`
 	// Purge fields: the horizon and floor after the purge and the exact entry
 	// identities it removed.
 	Horizon *Timestamp     `json:"horizon,omitempty"`
@@ -191,10 +204,21 @@ type CompactionResult struct {
 
 // NewDurableStore opens or creates a durable state replica.
 func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
+	return openDurableStore(cfg, false)
+}
+
+func openDurableStore(cfg DurableStoreConfig, offlineReset bool) (*DurableStore, error) {
 	if strings.TrimSpace(cfg.Dir) == "" {
 		return nil, fmt.Errorf("state durable store dir is required")
 	}
-	core, err := newStoreCore(cfg.NodeID, cfg.Policy, cfg.PhysicalClock, cfg.TombstoneRetention)
+	if cfg.TimeReference != nil && cfg.PhysicalClock != nil {
+		return nil, fmt.Errorf("configure TimeReference or PhysicalClock, not both")
+	}
+	physical := cfg.PhysicalClock
+	if cfg.TimeReference != nil {
+		physical = cfg.TimeReference
+	}
+	core, err := newStoreCore(cfg.NodeID, cfg.Policy, physical, cfg.TombstoneRetention, cfg.MaxEntryBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -219,27 +243,48 @@ func NewDurableStore(cfg DurableStoreConfig) (*DurableStore, error) {
 		lockFile:      lockFile,
 		peerProgress:  make(map[string]uint64),
 		peerNodes:     make(map[string]string),
+		peerRefused:   make(map[string][]refusedPosition),
 		preAppendHook: cfg.preAppendHook,
 		wrapLog:       cfg.wrapLog,
 
 		compactionHook:       cfg.compactionHook,
 		compactionMinRecords: cfg.CompactionMinRecords,
 	}
+	core.archiveDir = cfg.Dir
+	core.wrapResyncArchive = cfg.wrapResyncArchive
+	core.syncResyncArchiveDir = cfg.syncResyncArchiveDir
 	core.purgeHook = store.appendPurge
 	core.batchHook = store.appendBatch
+	if _, err := os.Stat(filepath.Join(cfg.Dir, clockRebuildPending)); !errors.Is(err, os.ErrNotExist) {
+		_ = store.Close()
+		if err != nil {
+			return nil, fmt.Errorf("check clock rebuild marker: %w", err)
+		}
+		return nil, ErrClockRebuildIncomplete
+	}
 	if err := store.openManifest(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
-	if err := store.discardCompactionTemp(); err != nil {
-		_ = store.Close()
-		return nil, err
+	if !offlineReset {
+		if err := store.discardCompactionTemp(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	// recoverLog also repairs an unconfirmed tail record and reports the append
 	// offset left behind, so it must run before the log is opened for appending.
-	if err := store.recoverLog(); err != nil {
+	// Offline reset must not change any state file until its archive is durable.
+	if err := store.recoverLog(!offlineReset); err != nil {
 		_ = store.Close()
 		return nil, err
+	}
+	if !offlineReset {
+		if err := store.checkClockUpgrade(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		store.hlc.ClockSuspect()
 	}
 	var logFile durableLog
 	logFile, err = os.OpenFile(filepath.Join(cfg.Dir, durableLogFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -314,7 +359,7 @@ func (s *DurableStore) SavePeerProgress(ctx context.Context, peer string, positi
 	if strings.TrimSpace(peer) == "" {
 		return fmt.Errorf("state peer progress peer is required")
 	}
-	return s.appendPeerProgress(peer, "", position)
+	return s.appendPeerProgress(peer, "", position, nil)
 }
 
 func (s *DurableStore) openManifest() error {
@@ -385,9 +430,13 @@ func writeManifest(path string, manifest durableManifest) error {
 // the record was never confirmed. A corrupt or sequence-regressed record that is
 // terminated (necessarily a record from an earlier, confirmed write) still
 // refuses the directory.
-func (s *DurableStore) recoverLog() error {
+func (s *DurableStore) recoverLog(repairTail bool) error {
 	path := filepath.Join(s.dir, durableLogFile)
-	opened, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	mode := os.O_RDONLY
+	if repairTail {
+		mode = os.O_RDWR
+	}
+	opened, err := os.OpenFile(path, mode, 0o600)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -408,6 +457,9 @@ func (s *DurableStore) recoverLog() error {
 			break
 		}
 		if errors.Is(err, io.EOF) && len(line) > 0 {
+			if !repairTail {
+				break
+			}
 			if truncErr := s.truncateLogTail(handle, offset); truncErr != nil {
 				return errors.Join(fmt.Errorf("%w at line %d", ErrDurableLogTruncated, lineNo), truncErr)
 			}
@@ -497,8 +549,19 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 			s.peerProgress[record.Peer] = record.Position
 		}
 		s.setPeerNodeLocked(record.Peer, record.PeerNodeID)
+		if record.Refused != nil {
+			for _, r := range *record.Refused {
+				if r.Position == 0 || strings.TrimSpace(r.Key) == "" {
+					return fmt.Errorf("invalid refused position in peer progress")
+				}
+			}
+			s.peerRefused[record.Peer] = append([]refusedPosition(nil), (*record.Refused)...)
+		}
 		return nil
 	case durableRecordSnapshot:
+		if record.Resync != nil {
+			s.storeCore.resync = copyResyncStatus(*record.Resync)
+		}
 		s.clock.SetAtLeast(record.Counter)
 		s.hlc.Restore(timestampValue(record.HLC))
 		s.storeCore.mu.Lock()
@@ -507,7 +570,7 @@ func (s *DurableStore) replayRecord(record durableRecord) error {
 		return nil
 	case durableRecordPurge:
 		s.storeCore.mu.Lock()
-		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed, Adopted: timestampValue(record.Adopted)})
+		s.storeCore.applyPurgeLocked(purgeSet{Horizon: timestampValue(record.Horizon), Floor: record.Floor, Removed: record.Removed, Adopted: timestampValue(record.Adopted), Resync: record.Resync})
 		s.storeCore.mu.Unlock()
 		return nil
 	default:
@@ -542,21 +605,26 @@ func (s *DurableStore) appendPurge(set purgeSet) error {
 		Horizon: timestampPtr(set.Horizon),
 		Floor:   set.Floor,
 		Removed: append([]removedEntry(nil), set.Removed...),
+		Resync:  set.Resync,
 		Adopted: timestampPtr(set.Adopted),
 	}, func() {})
 }
 
-func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64) error {
+func (s *DurableStore) appendPeerProgress(peer, nodeID string, position uint64, refused *[]refusedPosition) error {
 	return s.appendRecord(durableRecord{
 		Type:       durableRecordPeerProgress,
 		Peer:       peer,
 		Position:   position,
 		PeerNodeID: nodeID,
+		Refused:    refused,
 	}, func() {
 		if position > s.peerProgress[peer] {
 			s.peerProgress[peer] = position
 		}
 		s.setPeerNodeLocked(peer, nodeID)
+		if refused != nil {
+			s.peerRefused[peer] = append([]refusedPosition(nil), (*refused)...)
+		}
 	})
 }
 
@@ -575,14 +643,17 @@ func (s *DurableStore) setPeerNodeLocked(peer, nodeID string) {
 
 // savePeerAck durably records an acknowledged push position together with the
 // node ID that answered at peer.
-func (s *DurableStore) savePeerAck(ctx context.Context, peer, nodeID string, position uint64) error {
+func (s *DurableStore) savePeerAck(ctx context.Context, peer, nodeID string, position uint64, refused []refusedPosition) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(peer) == "" {
 		return fmt.Errorf("state peer progress peer is required")
 	}
-	return s.appendPeerProgress(peer, nodeID, position)
+	if refused == nil {
+		refused = []refusedPosition{}
+	}
+	return s.appendPeerProgress(peer, nodeID, position, &refused)
 }
 
 // peersAnsweringAs returns the peer addresses whose latest acknowledged push
@@ -738,10 +809,11 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	s.storeCore.commitMu.Lock()
 	defer s.storeCore.commitMu.Unlock()
 	s.storeCore.mu.RLock()
-	entries := filterAndSortEntries(s.storeCore.entries, 0, 0)
+	entries := s.storeCore.positionEntriesLocked(0, 0)
 	horizon := s.storeCore.horizon
 	floor := s.storeCore.floor
 	adopted := s.storeCore.adopted
+	resync := copyResyncStatus(s.storeCore.resync)
 	s.storeCore.mu.RUnlock()
 	counter := s.clock.Current()
 	hlc := s.hlc.Current()
@@ -764,6 +836,7 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 		Horizon: timestampPtr(horizon),
 		Floor:   floor,
 		Adopted: timestampPtr(adopted),
+		Resync:  &resync,
 	})
 	for index := range entries {
 		entry := entries[index]
@@ -775,7 +848,8 @@ func (s *DurableStore) Compact(ctx context.Context) (CompactionResult, error) {
 	}
 	sort.Strings(peers)
 	for _, peer := range peers {
-		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer], PeerNodeID: s.peerNodes[peer]})
+		refused := append([]refusedPosition{}, s.peerRefused[peer]...)
+		records = append(records, durableRecord{Type: durableRecordPeerProgress, Peer: peer, Position: s.peerProgress[peer], PeerNodeID: s.peerNodes[peer], Refused: &refused})
 	}
 	sequence := s.nextSeq
 	for index := range records {
@@ -908,4 +982,13 @@ func syncDir(dir string) error {
 	syncErr := handle.Sync()
 	closeErr := handle.Close()
 	return errors.Join(syncErr, closeErr)
+}
+
+func (s *DurableStore) peerRefusals(ctx context.Context, peer string) ([]refusedPosition, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]refusedPosition(nil), s.peerRefused[peer]...), nil
 }

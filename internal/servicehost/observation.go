@@ -1,13 +1,29 @@
 package servicehost
 
 import (
+	"context"
 	"errors"
 	"net"
+	"time"
 
 	"github.com/outpostos/OutpostNet/internal/agent"
+	"github.com/outpostos/OutpostNet/internal/meshdirectory"
 	"github.com/outpostos/OutpostNet/internal/observation"
 	"github.com/outpostos/OutpostNet/pkg/service"
 )
+
+func runDirectoryObservation(ctx context.Context, obs *agent.Observation, dir *meshdirectory.Directory) {
+	ticker := time.NewTicker(observation.DefaultSampleInterval)
+	defer ticker.Stop()
+	for {
+		obs.Reporter.UpdateDirectory(dir.Status())
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 // EnableObservation makes Run serve the OutpostRange observation API on the
 // loopback addr (stream component OUTPOSTSERVICE). Call before Run. Any
@@ -35,6 +51,9 @@ func observedOpener(o *agent.Observation, tm *agent.TunnelManager, target servic
 	entry := o.Reporter.ServiceEntry(target.String())
 	return entry.Wrap(next, observation.OpenerConfig{
 		Resolve: func(t service.Target) (observation.Backend, bool) {
+			if t.Logical {
+				return observation.Backend{}, false // reported by the opened stream
+			}
 			if t.Dynamic() {
 				mc, ok := tm.DynamicClient(t.NodeID)
 				if !ok {
@@ -48,6 +67,8 @@ func observedOpener(o *agent.Observation, tm *agent.TunnelManager, target servic
 			}
 			return observation.Backend{Address: mc.ServerAddr()}, true
 		},
-		NoBackend: func(err error) bool { return errors.Is(err, agent.ErrNoTunnel) },
+		NoBackend: func(err error) bool {
+			return errors.Is(err, agent.ErrNoTunnel) || errors.Is(err, service.ErrNoCandidate) || errors.Is(err, service.ErrDirectoryStale)
+		},
 	}), entry
 }

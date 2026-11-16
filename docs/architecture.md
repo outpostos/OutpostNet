@@ -8,8 +8,9 @@ Service stable access, observed by Range). Responsibilities in this repository:
 
 | Area | Component | Responsibility |
 |------|-----------|----------------|
-| Net: communication | `pkg/tunnel`, `outpostnet-agent` (`internal/agent`) | QUIC connections, token auth, stream headers, reconnect and address change, relay, peer directory (`PUT/GET /v1/peers`) |
+| Net: communication | `pkg/tunnel`, `outpostnet-agent` (`internal/agent`) | QUIC connections, group mutual TLS / legacy token auth, stream headers, reconnect and address change, relay, peer directory (`PUT/GET /v1/peers`) |
 | Net: state primitives | `pkg/state` (library) | Opaque-entry replication: `Store` (memory or durable), `GossipEngine` push/pull and anti-entropy, tombstone GC with GC horizon and resync, compaction, `ReplicationStatus`. Consumers (OutpostMesh, OutpostLet) embed it and own the meaning of their keys; see [pkg/state/README.md](../pkg/state/README.md) and [state-tombstone-gc.md](state-tombstone-gc.md) |
+| Net: reliable delivery | `pkg/delivery` (library) | Durable direct-peer Outbox/Inbox, bounded deduplication, expiry, quotas and optional consumer handoff receipts. Separate from state replication; in-memory and authenticated HTTP transports, host-owned peer resolution, read-only delivery status and observation metric mapping. See [delivery.md](delivery.md) |
 | Service | `outpostnet-service` (`pkg/service`, `internal/servicehost`) | Stable local entries for `<service>@<node_id>` on top of the Net host; see [service-layer.md](service-layer.md) |
 | Observation | `internal/observation` in `outpostnet-agent` and `outpostnet-service` | Loopback snapshot/SSE endpoints reporting Net peer links (111) and Service access (116) to OutpostRange; see [observation.md](observation.md) |
 | Node-local / Kubernetes | `outpostnet-server`, `outpostnet-sidecar`, `outpostnet-controller` | Same-host multi-application routing over a Unix socket, and annotation-driven sidecar injection; not part of the cross-node four-layer path |
@@ -19,6 +20,48 @@ existing deployments (OutpostLet's e2e environment uses it); new stable-entry
 deployments use `outpostnet-service` (moving an existing agent's entries:
 [service-migration.md](service-migration.md)). Upgrade OutpostRange before the
 components that report to it ([observation.md](observation.md) section 7).
+
+## State replication limits
+
+`pkg/state` sends ordinary push in position order as JSON pages, bounded by
+`GossipConfig.MaxPushBytes` (768 KiB by default, including the envelope) and
+`MaxPushPagesPerRound` (16 per peer per round). Every acknowledged page saves
+its cursor before the next is sent. Failed transfers resume after confirmed
+pages; a capped round yields to the next peer. The push-round caught-up fact
+only covers the local position read at the start of that round.
+
+Memory and durable stores bound local writes by `MaxEntryBytes` (512 KiB of
+encoded entry, including base64 and metadata); `Put`/`CompareAndSet` return
+`ErrEntryTooLarge` before committing larger entries. Remote Apply and recovery
+preserve legacy entries: oversized entries travel alone and emit a warning
+and a per-peer `OversizedPushEntries` count. They may exceed the page budget;
+an entry above the peer's HTTP request limit still fails visibly and requires
+a larger configured request limit.
+
+Startup validates that a page can hold the store's largest local entry plus
+the envelope and remains strictly below the HTTP request limit (default
+1 MiB). The syncer's `MaxRequestBytes` declares the smallest peer limit;
+the local handler also validates its own limit. There is no limit negotiation.
+Store page reads copy page payloads instead of the whole backlog. See
+[state configuration and semantics](../pkg/state/README.md) for the exact
+encoding budget, optional store interfaces and counter lifetime.
+
+Digest anti-entropy sends contiguous key intervals within each round, bounded
+by `GossipConfig.MaxDigestBytes` (768 KiB including the request envelope).
+Intervals cover the entire key space at every peer: first start is empty,
+last end is unbounded, and each digest is complete within its half-open bounds.
+Diff responses page by encoded `MaxBytes` and an exclusive key cursor; the
+requester finishes each interval before advancing. Any failed page or resync
+abandons the round; the next round starts over. Pull success is recorded only
+after every interval completes. Collected-value checks run over the complete
+interval on every continuation (see the [GC proof](state-tombstone-gc.md)).
+
+V2-NET-1b raises the state protocol to **3.0** (NET-8 introduced 2.0); old/new
+majors reject each other. The [shared time reference](time-reference.md) supplies
+HLCs, horizon guards and delivery clocks, with separate conservative retention.
+Upgrade the whole cluster of hosts embedding `pkg/state` together, including
+consumer dependency pins. Durable format is unchanged. Per-entry rejection
+and 410 snapshot resync retain their existing semantics.
 
 ## Core Concept
 
@@ -82,7 +125,9 @@ imports:
 
 - Built on QUIC (quic-go implementation), with TLS 1.3 encryption
 - Native stream multiplexing — one QUIC connection carries multiple service streams
-- Optional token authentication (both ends configure the same `auth.token`)
+- Tunnel tokens are optional; configured group credentials enable mutual TLS
+- Embedded state/delivery HTTP adapters support `token`, `token+cert` and `cert`
+  modes with certificate-bound identity ([HTTP authentication](http-node-auth.md))
 - Automatic recovery on network changes (QUIC protocol feature)
 
 ### Peer Directory Management API
@@ -100,7 +145,7 @@ Imports can use `service: <name>@<node_id>` to bind a stable local `listen_addr`
 | One binary, two roles | Simplifies deployment, reduces cognitive overhead (like frp but simpler) |
 | QUIC as tunnel protocol | Native multiplexing, built-in TLS, resilient under mobile/unstable networks |
 | Configuration persistence | Edge nodes have unreliable networks; agent auto-recovers tunnels on restart |
-| Token auth instead of certificates | Lowers deployment barrier, no PKI infrastructure to manage |
+| Offline node certificates | Group mutual TLS and certificate-bound identities per ADR-0008; [configuration and legacy compatibility](node-certificates.md) |
 
 ---
 

@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -54,4 +55,63 @@ func readAuthToken(r io.Reader) (string, error) {
 		return "", fmt.Errorf("read token: %w", err)
 	}
 	return string(buf), nil
+}
+
+// Peer declaration (ADR-0003 D5). After the token, a dialer that knows its
+// node_id appends one declaration on the same auth stream:
+//
+//	[1B version = peerHelloV1][1B node_id length (1-255)][node_id bytes]
+//
+// The acceptor reads it only after answering authOK, so an old dialer (which
+// sends nothing after the token and closes its side once it has the answer)
+// is seen as "no declaration", and an old acceptor never reads the extra
+// bytes. The node_id is self-reported under a shared token: it labels the
+// connection for reverse streams, it does not authenticate the node.
+const (
+	peerHelloV1      byte = 1
+	maxPeerNodeIDLen      = 255
+)
+
+// writePeerHello writes the dialer's node_id declaration.
+func writePeerHello(w io.Writer, nodeID string) error {
+	if nodeID == "" {
+		return fmt.Errorf("empty node_id")
+	}
+	if len(nodeID) > maxPeerNodeIDLen {
+		return fmt.Errorf("node_id too long: %d > %d", len(nodeID), maxPeerNodeIDLen)
+	}
+	buf := make([]byte, 0, 2+len(nodeID))
+	buf = append(buf, peerHelloV1, byte(len(nodeID)))
+	buf = append(buf, nodeID...)
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("write peer declaration: %w", err)
+	}
+	return nil
+}
+
+// readPeerHello reads an optional node_id declaration. A clean end of stream
+// before the first byte means the dialer sent none (older version) and
+// returns "", nil.
+func readPeerHello(r io.Reader) (string, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(r, hdr[:1]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read peer declaration: %w", err)
+	}
+	if hdr[0] != peerHelloV1 {
+		return "", fmt.Errorf("unsupported peer declaration version %d", hdr[0])
+	}
+	if _, err := io.ReadFull(r, hdr[1:2]); err != nil {
+		return "", fmt.Errorf("read peer declaration length: %w", err)
+	}
+	if hdr[1] == 0 {
+		return "", fmt.Errorf("empty node_id in peer declaration")
+	}
+	id := make([]byte, hdr[1])
+	if _, err := io.ReadFull(r, id); err != nil {
+		return "", fmt.Errorf("read peer declaration node_id: %w", err)
+	}
+	return string(id), nil
 }
