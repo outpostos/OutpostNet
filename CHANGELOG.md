@@ -4,6 +4,9 @@ All notable changes to OutpostNet will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `make release` now pins the controller's injected `--sidecar-image=outpostnet-sidecar:<VERSION>` argument in `outpostnet-k8s.yaml`. Kustomize's `images:` transformer only rewrites `image:` fields, never container args, so the v3.0.0 manifest shipped `--sidecar-image=outpostnet-sidecar:latest` (non-reproducible installs; Kubernetes defaults `:latest` to `imagePullPolicy: Always`). `release-verify` now fails if any `outpostnet-*` image ref is not pinned to `$(VERSION)`.
+
 ## [3.0.0] - 2026-11-16
 
 Outpost OS four-layer refactor (Net state primitives / Service stable access / Range observation).

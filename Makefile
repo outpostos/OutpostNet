@@ -46,7 +46,12 @@ RELEASE_LDFLAGS = -ldflags "-s -w -X $(VERSION_PKG).gitVersion=$(VERSION) -X $(V
 # Release artifacts
 RELEASE_DIR = $(BUILD_DIR)/release
 K8S_MANIFEST = outpostnet-k8s.yaml
-K8S_IMAGES = outpostnet-controller outpostnet-server outpostnet-sidecar
+# Images rewritten by kustomize's `images:` transformer. The sidecar is not
+# listed here: it is never referenced via an `image:` field, only as the
+# controller's --sidecar-image argument, which the transformer cannot rewrite.
+# release-manifest pins that argument separately (see SIDECAR_IMAGE_ARG).
+K8S_IMAGES = outpostnet-controller outpostnet-server
+SIDECAR_IMAGE_ARG = --sidecar-image=outpostnet-sidecar
 KUSTOMIZE ?= kubectl kustomize
 
 .PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release
@@ -228,6 +233,10 @@ release-manifest:
 	@$(KUSTOMIZE) $(RELEASE_DIR)/kustomize > $(RELEASE_DIR)/$(K8S_MANIFEST).tmp
 	@mv $(RELEASE_DIR)/$(K8S_MANIFEST).tmp $(RELEASE_DIR)/$(K8S_MANIFEST)
 	@rm -rf $(RELEASE_DIR)/kustomize
+	@echo "Pinning injected sidecar image ($(SIDECAR_IMAGE_ARG):$(VERSION))..."
+	@sed -E 's#($(SIDECAR_IMAGE_ARG):)[^[:space:]"]+#\1$(VERSION)#' \
+		$(RELEASE_DIR)/$(K8S_MANIFEST) > $(RELEASE_DIR)/$(K8S_MANIFEST).tmp
+	@mv $(RELEASE_DIR)/$(K8S_MANIFEST).tmp $(RELEASE_DIR)/$(K8S_MANIFEST)
 	@echo "Kubernetes manifest written to $(RELEASE_DIR)/$(K8S_MANIFEST)"
 
 release-checksums:
@@ -245,6 +254,29 @@ release-checksums:
 
 release-verify:
 	@cd $(RELEASE_DIR) && sha256sum -c SHA256SUMS
+	@echo "Verifying $(K8S_MANIFEST) pins every outpostnet image ref to $(VERSION)..."
+	@manifest=$(RELEASE_DIR)/$(K8S_MANIFEST); \
+	if grep -nE 'outpostnet-[a-z]+:latest' "$$manifest"; then \
+		echo "error: $(K8S_MANIFEST) still has unpinned outpostnet image refs (^) instead of $(VERSION)" >&2; \
+		exit 1; \
+	fi; \
+	grep -qE -- "$(SIDECAR_IMAGE_ARG):$(VERSION)$$" "$$manifest" || { \
+		echo "error: $(K8S_MANIFEST) does not pin $(SIDECAR_IMAGE_ARG) to $(VERSION)" >&2; \
+		exit 1; \
+	}; \
+	refs=$$(grep -oE '(image: *|--sidecar-image=)(outpostnet-[a-z]+:[^[:space:]"]+)' "$$manifest" | sed -E 's/^(image: *|--sidecar-image=)//'); \
+	if [ -z "$$refs" ]; then \
+		echo "error: no outpostnet image refs found in $(K8S_MANIFEST)" >&2; \
+		exit 1; \
+	fi; \
+	bad=$$(printf '%s\n' "$$refs" | grep -vE -- ":$(VERSION)$$" || true); \
+	if [ -n "$$bad" ]; then \
+		echo "error: $(K8S_MANIFEST) has outpostnet image refs not pinned to $(VERSION):" >&2; \
+		printf '  %s\n' $$bad >&2; \
+		exit 1; \
+	fi; \
+	echo "All outpostnet image refs pinned to $(VERSION):"; \
+	printf '  %s\n' "$$refs"
 
 # Help
 help:
