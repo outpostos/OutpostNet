@@ -32,8 +32,11 @@ The bootstrap peer file uses the same full array as Net `PUT /v1/peers`:
 
 Publish the same peer set to the file (atomic rename) and the Net management API.
 Tunnel ports are discarded for time service: all group nodes use UDP 123 and TCP
-4460. This node is omitted; every other node becomes an NTS `server`. All resolved
-IP addresses become exact `allow` rules; no subnet or wildcard is accepted.
+4460 by default. Select group-wide non-default ports with `--ntp-port`/`--ntske-port`
+(all nodes must use the same values); the fragment then emits the matching
+daemon-level `port`/`ntsport` and per-source overrides. This node is omitted; every
+other node becomes an NTS `server`. All resolved IP addresses become exact `allow`
+rules; no subnet or wildcard is accepted.
 DNS is refreshed on every render; failure preserves the last applied config and
 reports an error. Prefer IP endpoints for disconnected bootstrap without DNS.
 
@@ -48,6 +51,9 @@ outpostnet-agent chrony --config agent.yaml --peers peers.json \
 # Continue monitoring peer data, DNS results, CA/certificate/key contents (5s).
 outpostnet-agent chrony --config agent.yaml --peers peers.json \
   --output /etc/chrony/conf.d/outpostnet.conf --apply --watch
+# Group-wide non-default NTP/NTS-KE ports (every node must match).
+outpostnet-agent chrony --config agent.yaml --peers peers.json \
+  --ntp-port 1234 --ntske-port 4461
 ```
 
 `--watch` also supports `--socket` for deployments whose peer authority is the
@@ -145,11 +151,12 @@ TMPDIR=/tmp go test -race -count=1 ./cmd/outpostnet-agent/app ./internal/chrony 
 OUTPOSTNET_CHRONY_TEST=1 go test -race -count=1 -v ./internal/chrony
 ```
 
-Golden tests cover orphan/NTS/CA/access/step/date policy and both GNSS templates.
+Golden tests cover orphan/NTS/CA/access/step/date policy, both GNSS templates and
+non-default NTP/NTS-KE ports.
 CLI tests cover SAN issuance and inspect, key mismatch, live peer API, watch
-replacement, unchanged input, certificate-content changes and parse/restart
-failure retry. The Linux test parses generated configs and runs three isolated
-chronyd processes: two under the group CA and a foreign-CA server. It asserts a
+replacement, unchanged input, certificate-content changes, non-default port flags
+and parse/restart failure retry. The Linux test parses generated configs and runs
+three isolated chronyd processes: two under the group CA and a foreign-CA server. It asserts a
 group NTS source is selected with cookies despite a future notBefore, foreign key establishment gets no
 cookies, non-peer access is denied, and the unchanged time-source parser accepts
 actual follower tracking. Test processes use a private executable copy to keep

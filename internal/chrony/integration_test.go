@@ -112,7 +112,7 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 			}
 			return p
 		}
-		cfg := chrony.Config{NodeID: n.id, CAFile: write("ca.pem", pem), CertFile: write("node.pem", cert), KeyFile: write("node.key", key)}
+		cfg := chrony.Config{NodeID: n.id, CAFile: write("ca.pem", pem), CertFile: write("node.pem", cert), KeyFile: write("node.key", key), NTPPort: ntpPort, NTSKEPort: ntsPort}
 		if n.id == "a" {
 			for _, g := range []chrony.GNSS{{Driver: "SHM", Parameter: "0", PPS: "/dev/pps0"}, {Driver: "SOCK", Parameter: "/run/chrony.clk.ttyS0.sock", PPS: "/dev/pps0"}} {
 				variant := cfg
@@ -132,10 +132,11 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Test-only port and poll overrides; leave all rendered trust/access/orphan
-		// directives intact. The foreign source cannot be used even though IP-allowed.
-		text := strings.ReplaceAll(string(data), " iburst nts ", fmt.Sprintf(" port %d ntsport %d minpoll 0 maxpoll 0 iburst nts ", ntpPort, ntsPort))
-		text += fmt.Sprintf("bindaddress %s\nbindacqaddress %s\nport %d\nntsport %d\ncmdport 0\nbindcmdaddress %s\npidfile %s\n", n.ip, n.ip, ntpPort, ntsPort, n.socket, filepath.Join(n.dir, "pid"))
+		// Ports already come from cfg; inject only test-only poll timing and the
+		// per-process bind/control sockets. Trust/access/orphan directives stay
+		// intact. The foreign source cannot be used even though IP-allowed.
+		text := strings.ReplaceAll(string(data), " iburst nts ", " minpoll 0 maxpoll 0 iburst nts ")
+		text += fmt.Sprintf("bindaddress %s\nbindacqaddress %s\ncmdport 0\nbindcmdaddress %s\npidfile %s\n", n.ip, n.ip, n.socket, filepath.Join(n.dir, "pid"))
 		n.conf = write("chrony.conf", []byte(text))
 		parsed, err := exec.Command(daemon, "-p", "-f", n.conf).CombinedOutput()
 		if err != nil {
