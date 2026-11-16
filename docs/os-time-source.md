@@ -15,6 +15,9 @@ constructor call sites live in their own repositories; they are not changed by
 this Net PR. Injected clocks and custom time sources keep using the explicit
 `NewTimeReference` / `UpdateSource` boundary.
 
+The optional [group chrony/NTS generator](group-time-sync.md) configures the OS
+service; this read-only adapter and its quality mapping remain unchanged.
+
 ## Configuration
 
 `OSTimeSourceConfig` is an embedding API, not a new agent YAML section. The agent

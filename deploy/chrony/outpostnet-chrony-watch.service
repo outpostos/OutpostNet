@@ -1,0 +1,14 @@
+[Unit]
+Description=Maintain Outpost group chrony peer and certificate configuration
+Requires=outpostnet-chrony-render.service
+Wants=chrony.service outpostnet-time-ready.service
+After=outpostnet-chrony-render.service chrony.service outpostnet-time-ready.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/outpostnet-agent chrony --config /etc/outpostnet/agent.yaml --peers /etc/outpostnet/peers.json --output /etc/chrony/conf.d/outpostnet.conf --apply --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

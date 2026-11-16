@@ -1,0 +1,16 @@
+[Unit]
+Description=Wait for chrony correction before TLS consumers start
+Requires=chrony.service
+After=chrony.service
+Wants=time-sync.target
+Before=time-sync.target
+
+[Service]
+Type=oneshot
+# At most 120 attempts, 0.5 second remaining correction, 2 second interval.
+ExecStart=/usr/bin/chronyc waitsync 120 0.5 0 2
+TimeoutStartSec=250
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

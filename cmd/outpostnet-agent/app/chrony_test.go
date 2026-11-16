@@ -84,20 +84,28 @@ func TestChronyCLIWatchAppliesPeerAndCertificateChangesAndRetries(t *testing.T) 
 	cmd := NewAgentCommand()
 	cmd.SetArgs([]string{"chrony", "--config", config, "--peers", peers, "--output", output, "--watch", "--interval", "20ms", "--apply"})
 	// Avoid reading the command's buffers concurrently with its watch loop.
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
+	var diagnostics bytes.Buffer
+	cmd.SetOut(&diagnostics)
+	cmd.SetErr(&diagnostics)
 	done := make(chan error, 1)
 	go func() { done <- cmd.ExecuteContext(ctx) }()
 	wait := func(f func() bool) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
+			select {
+			case err := <-done:
+				t.Fatalf("watch exited: %v; %s", err, diagnostics.String())
+			default:
+			}
 			if f() {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		t.Fatal("watch did not converge")
+		cancel()
+		<-done
+		t.Fatalf("watch did not converge: %s", diagnostics.String())
 	}
 	count := func() int {
 		b, _ := os.ReadFile(filepath.Join(dir, "restarts"))

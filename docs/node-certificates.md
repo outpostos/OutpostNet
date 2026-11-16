@@ -27,6 +27,12 @@ certificate details. `list` reads `.pem`/`.crt` certificates, nonrecursively; ke
 private keys in `.key` files. Distribute only the group **public** CA and each
 node's own certificate/key to that node. Keep the CA private key offline.
 
+## NTS server SANs
+
+`cert issue --ip 192.0.2.1 --dns node-a.example.net` adds repeatable IP/DNS SANs
+while retaining the node URI. `cert inspect` and `cert list` show these public names.
+See [group chrony/NTS](group-time-sync.md) for certificate requirements and startup ordering.
+
 ## Configure both peers
 
 Both `outpostnet-agent` and `outpostnet-service` accept:
