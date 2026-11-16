@@ -26,7 +26,7 @@ Host A exports a local service. Host B imports it as a local port. Traffic flows
 
 ## Install
 
-### Standalone Agent (v2.0)
+### Standalone Agent
 
 ```bash
 # Linux amd64
@@ -46,7 +46,7 @@ curl -sL https://github.com/outpostos/OutpostNet/releases/download/v3.0.1/outpos
 sudo mv outpostnet-agent-v3.0.1-darwin-amd64 /usr/local/bin/outpostnet-agent
 ```
 
-### Kubernetes (v2.0)
+### Kubernetes
 
 ```bash
 kubectl apply -f https://github.com/outpostos/OutpostNet/releases/download/v3.0.1/outpostnet-k8s.yaml
