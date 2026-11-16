@@ -41,6 +41,40 @@ func TestRenderGroupNTSGolden(t *testing.T) {
 	}
 }
 
+func TestRenderNonDefaultPortsGolden(t *testing.T) {
+	cfg := chrony.Config{NodeID: "node-a", CAFile: "/etc/outpostnet/group.pem", CertFile: "/etc/outpostnet/node.pem", KeyFile: "/etc/outpostnet/node.key", NTPPort: 1234, NTSKEPort: 4461}
+	peers := []chrony.Peer{{NodeID: "node-c", Addr: "[2001:db8::3]:4242"}, {NodeID: "node-a", Addr: "192.0.2.1:4242"}, {NodeID: "node-b", Addr: "node-b.example.net:4242"}}
+	resolve := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("2001:db8::2")}, nil
+	}
+	got, err := chrony.Render(context.Background(), cfg, peers, resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/non-default-ports.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("config differs:\n%s", got)
+	}
+}
+
+func TestRenderOrphanOnlyGolden(t *testing.T) {
+	cfg := chrony.Config{NodeID: "node-a", CAFile: "/etc/outpostnet/group.pem", CertFile: "/etc/outpostnet/node.pem", KeyFile: "/etc/outpostnet/node.key"}
+	got, err := chrony.Render(context.Background(), cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/orphan-only.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("config differs:\n%s", got)
+	}
+}
+
 func TestRenderRejectsUnsafeInput(t *testing.T) {
 	base := chrony.Config{NodeID: "a", CAFile: "/etc/group.pem", CertFile: "/etc/node.pem", KeyFile: "/etc/node.key"}
 	for _, addr := range []string{"0.0.0.0:4242", "[::]:4242", "192.0.2.0/24:4242", "evil\nallow all:4242", "-x:4242", "192.0.2.1:0", "missing-port"} {
@@ -58,6 +92,18 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 	base.KeyFile = "/etc/key\nallow all"
 	if _, err := chrony.Render(context.Background(), base, nil, nil); err == nil {
 		t.Fatal("accepted injected path")
+	}
+	for _, port := range []int{-1, 65536} {
+		cfg := base
+		cfg.NTPPort = port
+		if _, err := chrony.Render(context.Background(), cfg, nil, nil); err == nil {
+			t.Fatalf("accepted NTP port %d", port)
+		}
+		cfg = base
+		cfg.NTSKEPort = port
+		if _, err := chrony.Render(context.Background(), cfg, nil, nil); err == nil {
+			t.Fatalf("accepted NTS-KE port %d", port)
+		}
 	}
 }
 
