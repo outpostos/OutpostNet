@@ -4,8 +4,15 @@ All notable changes to OutpostNet will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-16
+
+Patch release shipping the fix for the v3.0.0 Kubernetes manifest.
+
 ### Fixed
 - `make release` now pins the controller's injected `--sidecar-image=outpostnet-sidecar:<VERSION>` argument in `outpostnet-k8s.yaml`. Kustomize's `images:` transformer only rewrites `image:` fields, never container args, so the v3.0.0 manifest shipped `--sidecar-image=outpostnet-sidecar:latest` (non-reproducible installs; Kubernetes defaults `:latest` to `imagePullPolicy: Always`). `release-verify` now fails if any `outpostnet-*` image ref is not pinned to `$(VERSION)`.
+
+### Note
+- The published v3.0.0 assets are unchanged. Re-cut as 3.0.1 because mutating the v3.0.0 manifest would invalidate its `SHA256SUMS`.
 
 ## [3.0.0] - 2026-11-16
 
