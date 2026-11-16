@@ -45,6 +45,9 @@ before being written as IP/DNS SANs. They do not change tunnel authentication, s
 certificates without SANs and already-issued credentials stay valid. `cert inspect`
 appends `dns=` and `ip=` when those SANs are present.
 
+See [group chrony/NTS](group-time-sync.md) for the renderer, GNSS templates and
+startup ordering for K3s/Let.
+
 ## Configure both peers
 
 Both `outpostnet-agent` and `outpostnet-service` accept:

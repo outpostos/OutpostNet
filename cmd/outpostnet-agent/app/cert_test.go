@@ -2,6 +2,8 @@ package app
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
 	"io"
 	"os"
@@ -93,5 +95,55 @@ func TestCertificateCLIRejectsInvalidNodeAndLoadsIssuedCredentials(t *testing.T)
 	}
 	if _, err := tlsutil.LoadIdentity(cert, key, ca, "node-a", nil); err == nil {
 		t.Fatal("loaded malformed CA")
+	}
+}
+
+func TestCertificateCLIWithNTSSANs(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) (string, error) {
+		cmd := NewAgentCommand()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		return out.String(), err
+	}
+	ca, caKey := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca.key")
+	if _, err := run("cert", "ca", "--cert", ca, "--key", caKey); err != nil {
+		t.Fatal(err)
+	}
+	cert, key := filepath.Join(dir, "node.pem"), filepath.Join(dir, "node.key")
+	args := []string{"cert", "issue", "--ca", ca, "--ca-key", caKey, "--node-id", "node-a", "--cert", cert, "--key", key}
+	for _, bad := range [][]string{{"--san", ""}, {"--san", "bad name"}, {"--san", "*.example.net"}} {
+		if _, err := run(append(append([]string{}, args...), bad...)...); err == nil {
+			t.Fatal("invalid SAN accepted")
+		}
+	}
+	if _, err := run(append(args, "--san", "192.0.2.1", "--san", "2001:db8::1", "--san", "node-a.example.net")...); err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"192.0.2.1", "2001:db8::1", "node-a.example.net"} {
+		if err := leaf.VerifyHostname(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, err := tlsutil.NodeID(leaf); err != nil || id != "node-a" {
+		t.Fatalf("identity: %s %v", id, err)
+	}
+	if _, err := tlsutil.LoadIdentity(cert, key, ca, "node-a", nil); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run("cert", "inspect", cert)
+	if err != nil || !strings.Contains(out, "node-a.example.net") || !strings.Contains(out, "2001:db8::1") {
+		t.Fatalf("inspect SANs: %s %v", out, err)
 	}
 }

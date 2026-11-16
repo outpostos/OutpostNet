@@ -1,0 +1,14 @@
+[Unit]
+Description=Render Outpost group time configuration before chrony starts
+Wants=network-online.target
+After=network-online.target
+Before=chrony.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/outpostnet-agent chrony --config /etc/outpostnet/agent.yaml --peers /etc/outpostnet/peers.json --output /etc/chrony/conf.d/outpostnet.conf
+ExecStartPost=/usr/sbin/chronyd -p -f /etc/chrony/chrony.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -59,7 +59,7 @@ func normalizeSANs(dnsNames []string, ips []net.IP) ([]string, []net.IP, error) 
 	seenNames := make(map[string]struct{}, len(dnsNames))
 	for _, raw := range dnsNames {
 		name := strings.TrimSuffix(strings.TrimSpace(raw), ".")
-		if !validDNSName(name) {
+		if !ValidDNSName(name) {
 			return nil, nil, fmt.Errorf("invalid DNS SAN %q", raw)
 		}
 		key := strings.ToLower(name)
@@ -88,8 +88,8 @@ func normalizeSANs(dnsNames []string, ips []net.IP) ([]string, []net.IP, error) 
 	return names, addrs, nil
 }
 
-// validDNSName accepts RFC 1123 hostname labels, but not IP literals.
-func validDNSName(name string) bool {
+// ValidDNSName accepts RFC 1123 hostname labels, but not IP literals.
+func ValidDNSName(name string) bool {
 	if name == "" || len(name) > 253 || net.ParseIP(name) != nil {
 		return false
 	}

@@ -160,6 +160,12 @@ validation semantics and `GET /v1/security` counters.
 | `--persistence-dir <path>` | `/var/lib/outpostnet` | Persistence directory (overrides config) |
 | `--observation-addr <addr>` | `127.0.0.1:17960` | Loopback OutpostRange observation endpoint; empty disables it. Needs `node_id` ([observation.md](observation.md)) |
 
+### Group chrony/NTS subcommand
+
+`outpostnet-agent chrony` uses the agent node/TLS settings plus a Net peer file
+or management socket to render, apply, or watch group time configuration. See
+[group time sync](group-time-sync.md) for flags, GNSS and systemd ordering.
+
 ### Health Check Endpoints
 
 | Endpoint | Description |

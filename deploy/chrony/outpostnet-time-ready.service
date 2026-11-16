@@ -1,0 +1,16 @@
+[Unit]
+Description=Wait for chrony correction before TLS consumers start
+Requires=chrony.service
+After=chrony.service
+Wants=time-sync.target
+Before=time-sync.target
+
+[Service]
+Type=oneshot
+# Allow newer chrony's 300s orphan activation delay: at most 360 attempts, 0.5 second remaining correction, 2 second interval.
+ExecStart=/usr/bin/chronyc waitsync 360 0.5 0 2
+TimeoutStartSec=730
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
