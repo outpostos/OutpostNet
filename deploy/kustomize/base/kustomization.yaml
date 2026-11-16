@@ -11,10 +11,12 @@ resources:
   - server-configmap.yaml
   - server-daemonset.yaml
 
+# `images:` rewrites only `image:` fields. The injected sidecar is referenced
+# solely as the controller's `--sidecar-image` argument, so it cannot be pinned
+# here; `make release-manifest` rewrites that argument when it renders the
+# release manifest.
 images:
   - name: outpostnet-controller
     newTag: v2.0.0
   - name: outpostnet-server
-    newTag: v2.0.0
-  - name: outpostnet-sidecar
     newTag: v2.0.0

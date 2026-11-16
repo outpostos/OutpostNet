@@ -104,7 +104,7 @@ This target:
 2. Cross-compiles all 6 components (`RELEASE_COMPONENTS`) for all 4 platforms (`RELEASE_PLATFORMS`) with `CGO_ENABLED=0` (static linking)
 3. Strips debug symbols (`-s -w`) for smaller binaries
 4. Packages each binary as `<component>-<VERSION>-<os>-<arch>.tar.gz`
-5. Generates `outpostnet-k8s.yaml` from `deploy/kustomize/base`, pinning every image tag to `<VERSION>` (`kubectl` must be on `PATH`, or set `KUSTOMIZE` to another kustomize-compatible command)
+5. Generates `outpostnet-k8s.yaml` from `deploy/kustomize/base`, pinning every `image:` tag **and** the controller's injected `--sidecar-image=outpostnet-sidecar:` argument to `<VERSION>` (`kubectl` must be on `PATH`, or set `KUSTOMIZE` to another kustomize-compatible command). The argument is rewritten after rendering: kustomize's `images:` transformer only edits `image:` fields, never container args.
 6. Writes `SHA256SUMS` covering every archive and `outpostnet-k8s.yaml`
 7. Outputs everything to `build/release/`
 
@@ -120,10 +120,12 @@ ls build/release/*.tar.gz | wc -l
 tar xzf build/release/outpostnet-agent-v1.X.Y-linux-amd64.tar.gz
 ./outpostnet-agent-v1.X.Y-linux-amd64 --version
 
-# Verify the manifest renders offline, its image tags, and the checksums
+# Verify the manifest renders offline, its image refs, and the checksums.
+# Cover both image: fields and the controller's injected --sidecar-image arg.
 kubectl kustomize deploy/kustomize/base > /dev/null
-grep -E "image: outpostnet-.*v1.X.Y" build/release/outpostnet-k8s.yaml
-make release-verify          # runs: (cd build/release && sha256sum -c SHA256SUMS)
+grep -E "(image: outpostnet-|--sidecar-image=outpostnet-sidecar:)" build/release/outpostnet-k8s.yaml
+! grep -E "outpostnet-[a-z]+:latest" build/release/outpostnet-k8s.yaml
+make release-verify          # sha256sum -c + asserts every outpostnet ref is pinned to $(VERSION)
 ```
 
 Expected output includes: git version, commit hash, build date, Go version, platform, and one `OK` line per checksummed file.
@@ -182,7 +184,7 @@ After pushing the landing page changes, verify [net.outpostos.com](https://net.o
 - [ ] All 24 artifact download links work
 - [ ] Binary extracts and runs `--version` on at least one platform
 - [ ] `SHA256SUMS` is attached and `sha256sum -c SHA256SUMS` passes after downloading every asset
-- [ ] `outpostnet-k8s.yaml` is attached and its image tags match the release version
+- [ ] `outpostnet-k8s.yaml` is attached and every image ref matches the release version — both `image:` fields and the controller's `--sidecar-image=` argument, with no `:latest` refs
 
 ```bash
 # In a directory containing all downloaded release assets:
