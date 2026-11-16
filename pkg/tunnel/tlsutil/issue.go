@@ -10,18 +10,28 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"net/url"
+	"strings"
 	"time"
 )
 
 // GenerateCA generates an offline group CA, valid for twenty years.
 func GenerateCA(now time.Time) (certPEM, keyPEM []byte, err error) {
-	return issue(nil, nil, "", now)
+	return issue(nil, nil, "", now, nil, nil)
 }
 
 // IssueNode issues a ten-year node certificate with both TLS usages. The CA
 // key is needed only by the offline issuing tool, never on running nodes.
 func IssueNode(ca tls.Certificate, nodeID string, now time.Time) (certPEM, keyPEM []byte, err error) {
+	return IssueNodeWithSANs(ca, nodeID, now, nil, nil)
+}
+
+// IssueNodeWithSANs issues a node certificate that additionally carries the
+// given DNS and IP subject alternative names. Node identity still comes only
+// from the urn:outpostos:node: URI, so existing certificates remain valid;
+// these names exist so NTS servers can be verified by IP or DNS (ADR-0006 D7).
+func IssueNodeWithSANs(ca tls.Certificate, nodeID string, now time.Time, dnsNames []string, ips []net.IP) (certPEM, keyPEM []byte, err error) {
 	if len(ca.Certificate) == 0 {
 		return nil, nil, fmt.Errorf("missing CA")
 	}
@@ -36,10 +46,67 @@ func IssueNode(ca tls.Certificate, nodeID string, now time.Time) (certPEM, keyPE
 	if !parent.IsCA || parent.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return nil, nil, fmt.Errorf("issuer is not a signing CA")
 	}
-	return issue(parent, signer, nodeID, now)
+	dnsNames, ips, err = normalizeSANs(dnsNames, ips)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issue(parent, signer, nodeID, now, dnsNames, ips)
 }
 
-func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, now time.Time) ([]byte, []byte, error) {
+// normalizeSANs validates and canonicalizes extra subject alternative names.
+func normalizeSANs(dnsNames []string, ips []net.IP) ([]string, []net.IP, error) {
+	names := make([]string, 0, len(dnsNames))
+	seenNames := make(map[string]struct{}, len(dnsNames))
+	for _, raw := range dnsNames {
+		name := strings.TrimSuffix(strings.TrimSpace(raw), ".")
+		if !validDNSName(name) {
+			return nil, nil, fmt.Errorf("invalid DNS SAN %q", raw)
+		}
+		key := strings.ToLower(name)
+		if _, dup := seenNames[key]; dup {
+			return nil, nil, fmt.Errorf("duplicate DNS SAN %q", raw)
+		}
+		seenNames[key] = struct{}{}
+		names = append(names, name)
+	}
+	addrs := make([]net.IP, 0, len(ips))
+	seenAddrs := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		if ip == nil {
+			return nil, nil, fmt.Errorf("invalid IP SAN")
+		}
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		key := ip.String()
+		if _, dup := seenAddrs[key]; dup {
+			return nil, nil, fmt.Errorf("duplicate IP SAN %q", key)
+		}
+		seenAddrs[key] = struct{}{}
+		addrs = append(addrs, ip)
+	}
+	return names, addrs, nil
+}
+
+// validDNSName accepts RFC 1123 hostname labels, but not IP literals.
+func validDNSName(name string) bool {
+	if name == "" || len(name) > 253 || net.ParseIP(name) != nil {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, now time.Time, dnsNames []string, ips []net.IP) ([]byte, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -61,6 +128,8 @@ func issue(parent *x509.Certificate, signer *ecdsa.PrivateKey, nodeID string, no
 		cert.KeyUsage = x509.KeyUsageDigitalSignature
 		cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
 		cert.URIs = []*url.URL{uri}
+		cert.DNSNames = dnsNames
+		cert.IPAddresses = ips
 		cert.Subject = pkix.Name{}
 		cert.NotAfter = now.AddDate(10, 0, 0)
 		if got, err := NodeID(cert); err != nil || got != nodeID {

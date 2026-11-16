@@ -5,8 +5,10 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil"
@@ -16,6 +18,7 @@ import (
 func newCertificateCommand() *cobra.Command {
 	root := &cobra.Command{Use: "cert", Short: "Provision and inspect offline group/node certificates"}
 	var certFile, keyFile, caFile, caKey, nodeID string
+	var sans []string
 	ca := &cobra.Command{Use: "ca", Short: "Create a group CA (never overwrites files)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		cert, key, err := tlsutil.GenerateCA(time.Now())
 		if err != nil {
@@ -32,7 +35,8 @@ func newCertificateCommand() *cobra.Command {
 		if err != nil {
 			return fmt.Errorf("load signing CA: %w", err)
 		}
-		cert, key, err := tlsutil.IssueNode(ca, nodeID, time.Now())
+		dnsNames, ips := splitSANs(sans)
+		cert, key, err := tlsutil.IssueNodeWithSANs(ca, nodeID, time.Now(), dnsNames, ips)
 		if err != nil {
 			return err
 		}
@@ -43,6 +47,7 @@ func newCertificateCommand() *cobra.Command {
 	issue.Flags().StringVar(&caFile, "ca", "", "Group CA certificate PEM")
 	issue.Flags().StringVar(&caKey, "ca-key", "", "Group CA private key PEM (offline issuer only)")
 	issue.Flags().StringVar(&nodeID, "node-id", "", "Node identity")
+	issue.Flags().StringArrayVar(&sans, "san", nil, "Extra subject alternative name (IP address or DNS name), repeatable")
 	for _, name := range []string{"cert", "key", "ca", "ca-key", "node-id"} {
 		issue.MarkFlagRequired(name)
 	}
@@ -68,6 +73,19 @@ func newCertificateCommand() *cobra.Command {
 	}}
 	root.AddCommand(ca, issue, inspect, list)
 	return root
+}
+
+// splitSANs classifies --san values as IP addresses or DNS names. Validation
+// and canonicalization happen in tlsutil so library callers get the same rules.
+func splitSANs(values []string) (dnsNames []string, ips []net.IP) {
+	for _, v := range values {
+		if ip := net.ParseIP(strings.TrimSpace(v)); ip != nil {
+			ips = append(ips, ip)
+			continue
+		}
+		dnsNames = append(dnsNames, v)
+	}
+	return dnsNames, ips
 }
 
 func writeCredentialPair(certFile, keyFile string, cert, key []byte) error {
@@ -127,7 +145,18 @@ func inspectCertificate(cmd *cobra.Command, path string) error {
 			return err
 		}
 		id, _ := tlsutil.NodeID(cert)
-		fmt.Fprintf(cmd.OutOrStdout(), "%s node_id=%s ca=%t not_before=%s not_after=%s\n", filepath.Base(path), id, cert.IsCA, cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339))
+		line := fmt.Sprintf("%s node_id=%s ca=%t not_before=%s not_after=%s", filepath.Base(path), id, cert.IsCA, cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339))
+		if len(cert.DNSNames) > 0 {
+			line += " dns=" + strings.Join(cert.DNSNames, ",")
+		}
+		if len(cert.IPAddresses) > 0 {
+			addrs := make([]string, len(cert.IPAddresses))
+			for i, ip := range cert.IPAddresses {
+				addrs[i] = ip.String()
+			}
+			line += " ip=" + strings.Join(addrs, ",")
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), line)
 	}
 	if !found {
 		return fmt.Errorf("no certificate in %s", filepath.Base(path))
