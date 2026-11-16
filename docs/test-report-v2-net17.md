@@ -39,6 +39,13 @@ a private executable copy, mode 0700 private directories, the current user, and
 `-U -x` with high loopback ports. It passes as both root and an unprivileged user.
 No installed binary, AppArmor policy, service, or system clock is changed.
 
+CI's chrony 4.8 introduced a 300s default orphan activation delay. The initial
+30s process test correctly observed authenticated but unsynchronized responses.
+The fixture now parses the original generated policy first and then shortens only
+its orphan delay (if supported), like its port/poll overrides. Production retains
+chrony's default; the startup example allows 720s before failing. The adjusted
+fixture passes on both 4.2 and locally built 4.8 without installing the 4.8 build.
+
 An initial Linux archive included Apple resource-fork files (`._*.go`); existing
 source-boundary tests rejected them. Generated metadata was removed only from the
 isolated validation copy, and the full suite was rerun from a Python tarfile

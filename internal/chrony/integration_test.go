@@ -141,6 +141,15 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse: %s %v", parsed, err)
 		}
+		// New chrony releases wait 300s before enabling an orphan reference.
+		// Parse the generated policy above unchanged; shorten only this fixture's
+		// timing when the version supports waitunsynced (older versions activate
+		// immediately). Trust, access, authentication and certificate rules stay intact.
+		fast := strings.Replace(text, "local stratum 10 orphan\n", "local stratum 10 orphan waitunsynced 0\n", 1)
+		fastFile := write("fast-orphan.conf", []byte(fast))
+		if _, err := exec.Command(daemon, "-p", "-f", fastFile).CombinedOutput(); err == nil {
+			n.conf = fastFile
+		}
 		n.cmd = exec.Command(daemon, "-U", "-x", "-d", "-u", account.Username, "-f", n.conf)
 		n.cmd.Stdout = &n.log
 		n.cmd.Stderr = &n.log
@@ -170,7 +179,7 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	if !strings.Contains(sources, "^,*,127.0.0.2,") {
-		t.Fatalf("group source not selected:\nsources=%s\nauthdata=%s", sources, auth)
+		t.Fatalf("group source not selected:\nsources=%s\nauthdata=%s\nntpdata=%s\nserverstats=%s\nclients=%s", sources, auth, query(nodes[1], "ntpdata 127.0.0.2"), query(nodes[0], "serverstats"), query(nodes[0], "clients"))
 	}
 	// authdata CSV: address, mode, key-id, type, keylen, last, attempts,
 	// NAK, cookies, cookie-length. Both rows must report NTS, only group gets cookies.

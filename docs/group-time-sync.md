@@ -130,7 +130,7 @@ Apply the consumer drop-in to **both** `k3s.service` and the deployed Let servic
 `Requires` plus `After` on `outpostnet-time-ready.service` prevents TLS consumers
 from starting when synchronization times out. `After=time-sync.target` alone
 does not wait for a correction. The wait checks remaining correction ≤0.5s and
-fails after about 240s; it does not prove UTC accuracy in orphan mode.
+fails after about 720s (allowing newer chrony's 300s orphan activation delay); it does not prove UTC accuracy in orphan mode.
 
 This startup gate does not stop workloads on later source loss. At runtime the
 existing time-reference quality/holdover reporting continues. Do not tie the
@@ -155,6 +155,10 @@ cookies, non-peer access is denied, and the unchanged time-source parser accepts
 actual follower tracking. Test processes use a private executable copy to keep
 distribution AppArmor path rules from restricting temporary test files; the
 installed daemon/profile remain untouched. CI installs chrony and runs this test.
+
+The process fixture shortens polling and, where supported, orphan activation
+delay; it parses the original generated policy unchanged first. Production keeps
+the distribution's orphan activation default.
 
 The tests never change the host clock or VM services. Wrong-clock K3s boot,
 VM certificate removal, and four-node orphan convergence (ADR acceptance 11–14)
