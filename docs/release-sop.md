@@ -114,7 +114,7 @@ The `release` target removes stale `*.tar.gz` files from `build/release/` first,
 ### 2.3 Verify Artifacts
 
 ```bash
-# Count: should be 20
+# Count: should be 24 (6 components x 4 platforms)
 ls build/release/*.tar.gz | wc -l
 
 # Spot-check: extract and verify version
