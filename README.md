@@ -48,6 +48,11 @@ sudo mv outpostnet-agent-v3.0.1-darwin-amd64 /usr/local/bin/outpostnet-agent
 
 ### Kubernetes
 
+> **Requires OutpostOS org access — not yet available to external users.** This path
+> depends on the private module `github.com/outpostos/OutpostRange` (deploy-key gated)
+> and on unqualified images that are not published to a public registry. Outside the
+> `outpostos` organization, use the [standalone agent](#standalone-agent) install above.
+
 ```bash
 kubectl apply -f https://github.com/outpostos/OutpostNet/releases/download/v3.0.1/outpostnet-k8s.yaml
 ```
@@ -86,6 +91,10 @@ restores the newline. Base images come from Huawei SWR (`swr.cn-east-3.myhuaweic
 Where `proxy.golang.org` is unreachable add `--build-arg GOPROXY=<module proxy>`.
 
 Build from source:
+
+> **Requires OutpostOS org access — not yet available to external users**, for the same
+> reason as the [Kubernetes](#kubernetes) install: the private observation contract
+> module `github.com/outpostos/OutpostRange` (deploy-key gated).
 
 Building from source needs the private observation contract module
 `github.com/outpostos/OutpostRange`: set `GOPRIVATE=github.com/outpostos
