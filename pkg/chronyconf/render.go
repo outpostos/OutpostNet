@@ -147,7 +147,7 @@ func Render(cfg Config) (Result, error) {
 	}
 	sort.Strings(unauth)
 
-	sources := renderSources(cfg.NodeID, peers, unauth, cfg.NTPPort)
+	sources := renderSources(cfg.NodeID, peers, unauth, cfg.NTPPort, cfg.NTSKEPort)
 	main := renderMain(cfg, allow)
 	if cfg.split() {
 		return Result{Main: main, Sources: strings.TrimPrefix(sources, "\n"), Warnings: warnings}, nil
@@ -466,6 +466,9 @@ func renderMain(cfg Config, allow []string) string {
 	fmt.Fprintf(&b, "ntsserverkey %s\n", cfg.KeyFile)
 	fmt.Fprintf(&b, "ntsdumpdir %s\n", cfg.DumpDir)
 	fmt.Fprintf(&b, "ntsport %d\n", cfg.NTSKEPort)
+	if cfg.NTPPort != DefaultNTPPort {
+		fmt.Fprintf(&b, "port %d\n", cfg.NTPPort)
+	}
 
 	b.WriteString("\n# Trust only the group CA for NTS peers; the system CA set is disabled.\n")
 	b.WriteString("nosystemcert\n")
@@ -515,7 +518,7 @@ func renderMain(cfg Config, allow []string) string {
 	return b.String()
 }
 
-func renderSources(nodeID string, peers []Peer, unauthenticated []string, ntpPort int) string {
+func renderSources(nodeID string, peers []Peer, unauthenticated []string, ntpPort, ntskePort int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n# NTP sources for node %s (reload with `chronyc reload sources`).\n", nodeID)
 	b.WriteString("# Group peers are served over NTS with the group CA set defined above.\n")
@@ -523,11 +526,14 @@ func renderSources(nodeID string, peers []Peer, unauthenticated []string, ntpPor
 		b.WriteString("# No group peers are configured.\n")
 	}
 	for _, p := range peers {
-		port := ""
+		opts := ""
 		if ntpPort != DefaultNTPPort {
-			port = fmt.Sprintf(" port %d", ntpPort)
+			opts += fmt.Sprintf(" port %d", ntpPort)
 		}
-		fmt.Fprintf(&b, "server %s nts iburst certset 1%s\n", p.Host, port)
+		if ntskePort != DefaultNTSKEPort {
+			opts += fmt.Sprintf(" ntsport %d", ntskePort)
+		}
+		fmt.Fprintf(&b, "server %s nts iburst certset 1%s\n", p.Host, opts)
 	}
 	if len(unauthenticated) > 0 {
 		b.WriteString("\n# Unauthenticated NTP sources explicitly configured by the operator.\n")

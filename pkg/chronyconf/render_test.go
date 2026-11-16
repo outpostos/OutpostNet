@@ -123,6 +123,16 @@ func TestRenderGolden(t *testing.T) {
 			},
 			golden: "unauthenticated.golden",
 		},
+		{
+			name: "non-default-ports",
+			mutate: func(c *Config) {
+				c.Peers = peers[:1]
+				c.Allow = []string{"10.0.0.0/24"}
+				c.NTPPort = 10123
+				c.NTSKEPort = 14460
+			},
+			golden: "non-default-ports.golden",
+		},
 	}
 
 	for _, tc := range tests {

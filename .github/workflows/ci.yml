@@ -71,3 +71,33 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+
+  # Real two-process NTS time exchange between node-a (NTS server) and node-b
+  # (NTS client) in separate network namespaces, then a foreign-CA rejection.
+  # Needs root for network namespaces and chrony >= 4.3 with NTS support.
+  timesync-integration:
+    name: NTS time-sync integration
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install chrony and iproute2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chrony iproute2
+
+      # pkg/chronyconf has no private-module dependencies, so this job needs no
+      # deploy key and works for fork PRs too.
+      - name: Build integration test binary
+        run: go test -tags integration -c -o "$RUNNER_TEMP/nts-integration.test" ./pkg/chronyconf
+
+      - name: Run NTS exchange under root
+        run: |
+          sudo env OUTPOSTNET_NTS_REQUIRE=1 "$RUNNER_TEMP/nts-integration.test" \
+            -test.run '^TestNTSSyncIntegration$' -test.v -test.timeout 10m

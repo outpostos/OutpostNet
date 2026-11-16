@@ -54,7 +54,7 @@ K8S_IMAGES = outpostnet-controller outpostnet-server
 SIDECAR_IMAGE_ARG = --sidecar-image=outpostnet-sidecar
 KUSTOMIZE ?= kubectl kustomize
 
-.PHONY: all build clean test test-verbose test-cover lint fmt vet tidy help release
+.PHONY: all build clean test test-verbose test-cover test-timesync-integration lint fmt vet tidy help release
 .PHONY: release-archives release-manifest release-checksums release-verify
 
 # `release` runs its prerequisites in order: fmt, vet, archives, manifest, checksums.
@@ -115,6 +115,13 @@ test-cover:
 	$(GOTEST) -v -race -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+# NTS time-sync end-to-end test: two chronyd processes in network namespaces.
+# Needs Linux, root, chrony >= 4.3 and iproute2. Skips cleanly when
+# prerequisites are absent; set OUTPOSTNET_NTS_REQUIRE=1 to fail on skip (CI).
+test-timesync-integration:
+	@echo "Running NTS time-sync integration test..."
+	$(GOTEST) -tags integration -count=1 -timeout 5m -run '^TestNTSSyncIntegration$$' -v ./pkg/chronyconf/
 
 # Code quality targets
 fmt:
@@ -295,6 +302,7 @@ help:
 	@echo "  test            - Run all tests"
 	@echo "  test-verbose    - Run tests with verbose output"
 	@echo "  test-cover      - Run tests with coverage report"
+	@echo "  test-timesync-integration - Run the NTS multi-process sync test (Linux, root, chrony >= 4.3)"
 	@echo ""
 	@echo "  fmt             - Format code"
 	@echo "  vet             - Run go vet"
