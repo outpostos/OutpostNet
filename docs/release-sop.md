@@ -87,12 +87,9 @@ git status
 
 # Create annotated tag
 git tag -a v1.X.Y -m "OutpostNet v1.X.Y"
-
-# Verify version injection
-go run ./cmd/outpostnet-agent version
 ```
 
-The version package (`pkg/version`) injects `gitVersion`, `gitCommit`, and `buildDate` via `-ldflags` at build time.
+The version package (`pkg/version`) injects `gitVersion`, `gitCommit`, and `buildDate` via `-ldflags` at build time. `go run` does not pass those flags, so it prints `v0.0.0-dev` and cannot validate the injected metadata — verify it on the built artifact instead (see 2.3).
 
 ### 2.2 Build All Artifacts
 
@@ -117,9 +114,9 @@ The `release` target removes stale `*.tar.gz` files from `build/release/` first,
 # Count: should be 24 (6 components x 4 platforms)
 ls build/release/*.tar.gz | wc -l
 
-# Spot-check: extract and verify version
+# Spot-check: extract and verify the injected version metadata
 tar xzf build/release/outpostnet-agent-v1.X.Y-linux-amd64.tar.gz
-./outpostnet-agent-v1.X.Y-linux-amd64 version
+./outpostnet-agent-v1.X.Y-linux-amd64 --version
 
 # Verify the manifest renders offline, its image tags, and the checksums
 kubectl kustomize deploy/kustomize/base > /dev/null
@@ -128,6 +125,8 @@ make release-verify          # runs: (cd build/release && sha256sum -c SHA256SUM
 ```
 
 Expected output includes: git version, commit hash, build date, Go version, platform, and one `OK` line per checksummed file.
+
+Use `--version` for every component except `outpostnet-state-reset`. The five Cobra-based components (agent, server, sidecar, controller, service) all accept `--version`; `outpostnet-state-reset` parses its arguments with the stdlib `flag` package and defines no version flag or subcommand, so `outpostnet-state-reset --version` exits non-zero with `flag provided but not defined: -version` — verify its build metadata another way. Only agent, server, sidecar, and controller also accept a `version` subcommand; `outpostnet-service` does not, so `outpostnet-service version` is parsed as an ordinary start and fails with `Error: --config is required`.
 
 ## Phase 3: Publish
 
