@@ -57,6 +57,12 @@ jobs:
           echo "GOPRIVATE=github.com/outpostos" >> "$GITHUB_ENV"
           echo "GONOSUMDB=github.com/outpostos" >> "$GITHUB_ENV"
 
+      - name: Install chrony for NTS integration
+        run: sudo apt-get update && sudo apt-get install -y chrony
+
+      - name: Real chrony NTS and config parsing
+        run: OUTPOSTNET_CHRONY_TEST=1 go test -race -count=1 -v ./internal/chrony
+
       - name: Format check
         run: make fmt && git diff --exit-code
 
