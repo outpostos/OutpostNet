@@ -97,7 +97,11 @@ A restart begins a new initial-update window. Routine changes do not grant
 unlimited steps within a running daemon. Persisted NTS cookies are deliberately
 not configured; CA rotation starts fresh key establishment.
 
-Orphan convergence provides agreement without absolute UTC. The existing
+Orphan convergence provides agreement without absolute UTC. **Known limit:** if
+the whole group restarts together and a wrong-clock node has the lowest orphan
+reference ID, that node can become the orphan reference and the group can converge
+to its wrong time. An RTC makes this unlikely; the boot gate's LOCAL dwell cannot
+establish absolute UTC or prevent this election outcome. The existing
 [V2-NET-1d adapter](os-time-source.md) continues reporting local/orphan tracking
 as unsynchronized; followers can report synchronized chrony with an identified
 upstream and bounded error. This ticket changes no quality policy.
@@ -137,8 +141,18 @@ sudo install -D -m 0755 deploy/chrony/outpostnet-time-ready /usr/local/libexec/o
 
 The gate polls `chronyc -n -c tracking` every 2s for at most 720s (including
 query time, measured with a monotonic clock). It passes for a synchronized
-source with absolute remaining correction ≤0.5s, or an active local orphan
-reference (`7F7F0101`, normal leap status). Source authentication relies on the
+source with absolute remaining correction ≤0.5s, or a local orphan reference
+(`7F7F0101`, normal leap status) observed continuously for **at least 60s** by
+default (`--local-dwell`). The dwell must allow at least several iburst/NTS-KE
+rounds so reachable authenticated peers can correct a wrong boot clock. Chrony
+4.2–4.5 reports LOCAL/Normal immediately when unsynchronized with `local` enabled;
+the gate's dwell is what prevents that first report from releasing a wrong-clock
+node on chrony <4.8. The rule applies to every chrony version, independently of
+chrony's own orphan activation delay. A poll showing a source clears the LOCAL
+dwell and uses the normal correction rule, including waiting for a large
+correction to fall to ≤0.5s. An invalid report, absent reference or failed query
+also clears the dwell; separated LOCAL intervals do not accumulate.
+Source authentication relies on the
 rendered group-only NTS / `authselectmode require` policy above; configured local
 GNSS refclocks remain usable. Do not run the gate against an unrelated chrony
 configuration. Orphan readiness means local agreement, does not prove UTC
@@ -162,7 +176,18 @@ policy also applies when chrony fails to start. Missing/failed/hung queries and
 malformed tracking never count as readiness. `After=time-sync.target` alone
 does not wait for a correction. Inspect `journalctl -u outpostnet-time-ready`;
 a successful unit can mean either readiness or the reported timeout policy.
-For manual checks, the script supports `--timeout`, `--interval`,
+The same environment file can configure the minimum continuous LOCAL dwell in
+seconds, for example (60s is also the default):
+
+```ini
+OUTPOSTNET_TIME_LOCAL_DWELL=60
+```
+
+Choose a dwell long enough for several iburst/NTS-KE rounds on the deployment's
+links. It must fit within the gate's timeout for LOCAL to pass; it does not extend
+the timeout or change the configured timeout action. Dwell values must be finite
+and greater than zero.
+For manual checks, the script supports `--timeout`, `--interval`, `--local-dwell`,
 `--on-timeout start|fail`, `--chronyc`, and a local command `--socket`.
 After changing policy, use `systemctl daemon-reload` and restart the gate before
 retrying blocked consumers; it is a oneshot with `RemainAfterExit=yes`.
@@ -190,11 +215,16 @@ cookies, non-peer access is denied, and the unchanged time-source parser accepts
 actual follower tracking. Test processes use a private executable copy to keep
 distribution AppArmor path rules from restricting temporary test files; the
 installed daemon/profile remain untouched. CI installs chrony and runs this test.
-The same three-process fixture checks that the orphan leader and NTS follower
-pass the boot gate, then disables the foreign process's local reference and
+The same three-process fixture checks that the orphan leader passes as
+`local orphan reference` after a shortened test dwell, while the NTS follower
+passes as `synchronized source` with the default dwell longer than its timeout.
+It then disables the foreign process's local reference and
 checks that it waits until the bound and fails. `TestTimeReady*` exercises both
 timeout actions (including the default), correction/leap boundaries, invalid
 reports/options and missing, failed or hung queries through the script CLI.
+Scripted tracking tests cover LOCAL followed by large then small source correction
+(only the last passes as `synchronized source`), sustained LOCAL past its dwell,
+and interruption/reset of the continuous LOCAL interval.
 
 The process fixture shortens polling and, where supported, orphan activation
 delay; it parses the original generated policy unchanged first. Production keeps

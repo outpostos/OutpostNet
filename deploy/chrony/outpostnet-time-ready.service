@@ -10,8 +10,9 @@ Type=oneshot
 # Architect proposal, pending LF's ADR-0006 D7 ruling: start and report on timeout.
 # Override with OUTPOSTNET_TIME_TIMEOUT_ACTION=fail in the optional environment file.
 Environment=OUTPOSTNET_TIME_TIMEOUT_ACTION=start
+Environment=OUTPOSTNET_TIME_LOCAL_DWELL=60
 EnvironmentFile=-/etc/outpostnet/time-ready.env
-ExecStart=/usr/local/libexec/outpostnet-time-ready --on-timeout ${OUTPOSTNET_TIME_TIMEOUT_ACTION}
+ExecStart=/usr/local/libexec/outpostnet-time-ready --on-timeout ${OUTPOSTNET_TIME_TIMEOUT_ACTION} --local-dwell ${OUTPOSTNET_TIME_LOCAL_DWELL}
 TimeoutStartSec=730
 RemainAfterExit=yes
 

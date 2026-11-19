@@ -215,7 +215,13 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 	// Boot readiness includes an active orphan without promoting its time quality.
 	for _, n := range nodes[:2] {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := timeReadyCommand(ctx, "--socket", n.socket, "--timeout", "3", "--on-timeout", "fail").CombinedOutput()
+		args := []string{"--socket", n.socket, "--timeout", "3", "--interval", "0.1", "--on-timeout", "fail"}
+		if n.id == "a" {
+			args = append(args, "--local-dwell", "0.3") // Shorten only the leader's fixture dwell.
+		}
+		// The follower keeps the default 60s dwell, longer than this timeout:
+		// it must pass through the synchronized-source branch, including on 4.2–4.5.
+		out, err := timeReadyCommand(ctx, args...).CombinedOutput()
 		cancel()
 		if err != nil {
 			t.Fatalf("%s boot gate: %s %v", n.id, out, err)
@@ -227,6 +233,7 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("%s boot gate: expected %q: %s", n.id, want, out)
 		}
+		t.Logf("%s boot gate: %s", n.id, strings.TrimSpace(string(out)))
 	}
 	tracking := query(nodes[1], "tracking")
 	observation, err := state.ParseChronyTracking(tracking)

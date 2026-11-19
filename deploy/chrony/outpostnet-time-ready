@@ -55,6 +55,8 @@ def main():
                         help="elapsed seconds to wait (default: 720)")
     parser.add_argument("--interval", type=positive_seconds, default=2,
                         help="poll interval in seconds (default: 2)")
+    parser.add_argument("--local-dwell", type=positive_seconds, default=60,
+                        help="continuous LOCAL seconds before readiness (default: 60)")
     parser.add_argument("--on-timeout", choices=("start", "fail"), default="start",
                         help="start consumers and report, or fail (default: start)")
     parser.add_argument("--chronyc", default="/usr/bin/chronyc")
@@ -65,21 +67,35 @@ def main():
         command += ["-h", args.socket]
     command += ["tracking"]
     deadline = time.monotonic() + args.timeout
+    local_since = None
     reason = "no tracking sample"
     while time.monotonic() < deadline:
+        ready = ""
         try:
             result = subprocess.run(command, capture_output=True, text=True,
                                     env={**os.environ, "LC_ALL": "C"},
                                     timeout=min(1, max(0.001, deadline - time.monotonic())))
             if result.returncode == 0:
                 ready, reason = readiness(result.stdout)
-                if ready and time.monotonic() < deadline:
-                    print("outpostnet-time-ready: ready: " + ready, flush=True)
-                    return 0
             else:
                 reason = "chronyc query failed"
         except (OSError, subprocess.SubprocessError, UnicodeError):
             reason = "chronyc unavailable or query timed out"
+        now = time.monotonic()
+        if ready == "local orphan reference":
+            # Older chrony reports LOCAL immediately, before NTS can correct a
+            # wrong boot clock. Allow several iburst/NTS-KE rounds first.
+            if local_since is None:
+                local_since = now
+            if now - local_since < args.local_dwell:
+                ready, reason = "", "local orphan reference dwell incomplete"
+        else:
+            # A source (even with a large correction), invalid sample or query
+            # failure breaks the continuously observed LOCAL interval.
+            local_since = None
+        if ready and now < deadline:
+            print("outpostnet-time-ready: ready: " + ready, flush=True)
+            return 0
         time.sleep(min(args.interval, max(0, deadline - time.monotonic())))
     action = "starting consumers; time readiness unconfirmed" if args.on_timeout == "start" else "keeping consumers down"
     print("outpostnet-time-ready: WARNING: timeout: " + reason + "; " + action,
