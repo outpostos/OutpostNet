@@ -1,14 +1,17 @@
 [Unit]
 Description=Wait for chrony correction before TLS consumers start
-Requires=chrony.service
+Wants=chrony.service
 After=chrony.service
 Wants=time-sync.target
 Before=time-sync.target
 
 [Service]
 Type=oneshot
-# Allow newer chrony's 300s orphan activation delay: at most 360 attempts, 0.5 second remaining correction, 2 second interval.
-ExecStart=/usr/bin/chronyc waitsync 360 0.5 0 2
+# Architect proposal, pending LF's ADR-0006 D7 ruling: start and report on timeout.
+# Override with OUTPOSTNET_TIME_TIMEOUT_ACTION=fail in the optional environment file.
+Environment=OUTPOSTNET_TIME_TIMEOUT_ACTION=start
+EnvironmentFile=-/etc/outpostnet/time-ready.env
+ExecStart=/usr/local/libexec/outpostnet-time-ready --on-timeout ${OUTPOSTNET_TIME_TIMEOUT_ACTION}
 TimeoutStartSec=730
 RemainAfterExit=yes
 

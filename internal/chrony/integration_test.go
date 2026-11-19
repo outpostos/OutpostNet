@@ -212,10 +212,38 @@ func TestChronyRealNTSGroupAndForeignCA(t *testing.T) {
 	if err != nil || local.Synchronized {
 		t.Fatalf("orphan leader must remain unsynchronized: %+v %v", local, err)
 	}
+	// Boot readiness includes an active orphan without promoting its time quality.
+	for _, n := range nodes[:2] {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := timeReadyCommand(ctx, "--socket", n.socket, "--timeout", "3", "--on-timeout", "fail").CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("%s boot gate: %s %v", n.id, out, err)
+		}
+		want := "ready: local orphan reference"
+		if n.id == "b" {
+			want = "ready: synchronized source"
+		}
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("%s boot gate: expected %q: %s", n.id, want, out)
+		}
+	}
 	tracking := query(nodes[1], "tracking")
 	observation, err := state.ParseChronyTracking(tracking)
 	if err != nil || !observation.Synchronized {
 		t.Fatalf("unchanged time-source adapter: %+v %v, %s", observation, err, tracking)
+	}
+	// Reuse the foreign-CA process as a node with no reference at all. Its
+	// group peers are unauthenticated to it; disable only its local fallback.
+	if out := query(nodes[2], "local off"); !strings.Contains(out, "200") {
+		t.Fatalf("disable fixture local reference: %s", out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	out, err := timeReadyCommand(ctx, "--socket", nodes[2].socket, "--timeout", "1", "--interval", "0.1", "--on-timeout", "fail").CombinedOutput()
+	if err == nil || ctx.Err() != nil || time.Since(started) < time.Second || !strings.Contains(string(out), "WARNING: timeout:") {
+		t.Fatalf("no-reference gate must wait and fail at bound: %s %v", out, err)
 	}
 	t.Logf("group selected, NTS cookies obtained, foreign CA has zero cookies; non-peer access denied; adapter reports %s", observation.State)
 }

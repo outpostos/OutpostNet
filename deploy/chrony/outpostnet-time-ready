@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Bounded boot gate for the group chrony policy; never changes the clock."""
+
+import argparse
+import csv
+import math
+import os
+import subprocess
+import sys
+import time
+
+
+def positive_seconds(value):
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
+    return value
+
+
+def readiness(report):
+    # chronyc -c tracking: refid, address, stratum, reference time,
+    # system correction, ..., leap status (14 columns in chrony 4.2+).
+    rows = list(csv.reader(report.splitlines()))
+    if len(rows) != 1 or len(rows[0]) != 14:
+        return "", "invalid tracking report"
+    fields = rows[0]
+    try:
+        refid = int(fields[0], 16)
+        stratum = int(fields[2])
+        correction = float(fields[4])
+    except ValueError:
+        return "", "invalid tracking report"
+    if not 0 <= refid <= 0xFFFFFFFF or not math.isfinite(correction):
+        return "", "invalid tracking report"
+    if refid == 0 or fields[13] == "Not synchronised":
+        return "", "no synchronized reference"
+    if not 1 <= stratum <= 15:
+        return "", "invalid tracking report"
+    if refid == 0x7F7F0101:
+        if fields[13] == "Normal":
+            return "local orphan reference", ""
+        return "", "local orphan reference not active"
+    if fields[13] not in ("Normal", "Insert second", "Delete second"):
+        return "", "no synchronized reference"
+    if abs(correction) > 0.5:
+        return "", "remaining correction exceeds 0.5s"
+    # Authentication is enforced by the required rendered group policy:
+    # authselectmode require, group-CA NTS only, optional local GNSS refclock.
+    return "synchronized source (correction <= 0.5s)", ""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timeout", type=positive_seconds, default=720,
+                        help="elapsed seconds to wait (default: 720)")
+    parser.add_argument("--interval", type=positive_seconds, default=2,
+                        help="poll interval in seconds (default: 2)")
+    parser.add_argument("--on-timeout", choices=("start", "fail"), default="start",
+                        help="start consumers and report, or fail (default: start)")
+    parser.add_argument("--chronyc", default="/usr/bin/chronyc")
+    parser.add_argument("--socket", help="local chronyd command socket")
+    args = parser.parse_args()
+    command = [args.chronyc, "-n", "-c"]
+    if args.socket:
+        command += ["-h", args.socket]
+    command += ["tracking"]
+    deadline = time.monotonic() + args.timeout
+    reason = "no tracking sample"
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    env={**os.environ, "LC_ALL": "C"},
+                                    timeout=min(1, max(0.001, deadline - time.monotonic())))
+            if result.returncode == 0:
+                ready, reason = readiness(result.stdout)
+                if ready and time.monotonic() < deadline:
+                    print("outpostnet-time-ready: ready: " + ready, flush=True)
+                    return 0
+            else:
+                reason = "chronyc query failed"
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            reason = "chronyc unavailable or query timed out"
+        time.sleep(min(args.interval, max(0, deadline - time.monotonic())))
+    action = "starting consumers; time readiness unconfirmed" if args.on_timeout == "start" else "keeping consumers down"
+    print("outpostnet-time-ready: WARNING: timeout: " + reason + "; " + action,
+          file=sys.stderr, flush=True)
+    return 0 if args.on_timeout == "start" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
