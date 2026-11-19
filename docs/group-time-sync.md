@@ -35,7 +35,9 @@ Tunnel ports are discarded for time service: all group nodes use UDP 123 and TCP
 4460. This node is omitted; every other node becomes an NTS `server`. All resolved
 IP addresses become exact `allow` rules; no subnet or wildcard is accepted.
 DNS is refreshed on every render; failure preserves the last applied config and
-reports an error. Prefer IP endpoints for disconnected bootstrap without DNS.
+reports an error. **Use IP peer endpoints for boot without DNS.** An unresolved
+DNS peer makes the bootstrap renderer fail and prevents chrony from starting;
+the renderer does not skip peers or relax its security policy.
 
 ```sh
 # Render only; no service control or clock changes.
@@ -95,7 +97,11 @@ A restart begins a new initial-update window. Routine changes do not grant
 unlimited steps within a running daemon. Persisted NTS cookies are deliberately
 not configured; CA rotation starts fresh key establishment.
 
-Orphan convergence provides agreement without absolute UTC. The existing
+Orphan convergence provides agreement without absolute UTC. **Known limit:** if
+the whole group restarts together and a wrong-clock node has the lowest orphan
+reference ID, that node can become the orphan reference and the group can converge
+to its wrong time. An RTC makes this unlikely; the boot gate's LOCAL dwell cannot
+establish absolute UTC or prevent this election outcome. The existing
 [V2-NET-1d adapter](os-time-source.md) continues reporting local/orphan tracking
 as unsynchronized; followers can report synchronized chrony with an identified
 upstream and bounded error. This ticket changes no quality policy.
@@ -123,14 +129,68 @@ claims of tested GNSS hardware. GNSS can be jammed/spoofed; group NTS sources re
 ## Service ordering example
 
 [deploy/chrony](../deploy/chrony/) supplies a bootstrap renderer, watcher, chrony
-drop-in, finite `chronyc waitsync` gate before `time-sync.target`, and consumer
+drop-in, finite [time-ready script](../deploy/chrony/outpostnet-time-ready) before `time-sync.target`, and consumer
 drop-in. Adapt paths and distribution service names, install the bootstrap
 peer file/credentials, create the fragment directory, then install/enable units.
 Apply the consumer drop-in to **both** `k3s.service` and the deployed Let service.
-`Requires` plus `After` on `outpostnet-time-ready.service` prevents TLS consumers
-from starting when synchronization times out. `After=time-sync.target` alone
-does not wait for a correction. The wait checks remaining correction ≤0.5s and
-fails after about 720s (allowing newer chrony's 300s orphan activation delay); it does not prove UTC accuracy in orphan mode.
+Install Python 3 and the script alongside the units:
+
+```sh
+sudo install -D -m 0755 deploy/chrony/outpostnet-time-ready /usr/local/libexec/outpostnet-time-ready
+```
+
+The gate polls `chronyc -n -c tracking` every 2s for at most 720s (including
+query time, measured with a monotonic clock). It passes for a synchronized
+source with absolute remaining correction ≤0.5s, or a local orphan reference
+(`7F7F0101`, normal leap status) observed continuously for **at least 60s** by
+default (`--local-dwell`). The dwell must allow at least several iburst/NTS-KE
+rounds so reachable authenticated peers can correct a wrong boot clock. Chrony
+4.2–4.5 reports LOCAL/Normal immediately when unsynchronized with `local` enabled;
+the gate's dwell is what prevents that first report from releasing a wrong-clock
+node on chrony <4.8. The rule applies to every chrony version, independently of
+chrony's own orphan activation delay. A poll showing a source clears the LOCAL
+dwell and uses the normal correction rule, including waiting for a large
+correction to fall to ≤0.5s. An invalid report, absent reference or failed query
+also clears the dwell; separated LOCAL intervals do not accumulate.
+Source authentication relies on the
+rendered group-only NTS / `authselectmode require` policy above; configured local
+GNSS refclocks remain usable. Do not run the gate against an unrelated chrony
+configuration. Orphan readiness means local agreement, does not prove UTC
+accuracy, and does not promote the orphan to `SYNCED` in Outpost's time adapter.
+
+**Default timeout action: start consumers and report.** This implements the
+architect's proposal for ADR-0006 D7, **pending LF's ruling**. A timeout prints a
+warning to stderr (the service journal), explicitly reports that time readiness
+is unconfirmed, and exits 0 so consumers may start. Third-party TLS can still
+fail if the system clock remains wrong. To keep consumers down,
+create `/etc/outpostnet/time-ready.env` containing:
+
+```ini
+OUTPOSTNET_TIME_TIMEOUT_ACTION=fail
+```
+
+`fail` reports the timeout and exits 1; the consumer drop-in's `Requires` plus
+`After` then blocks K3s/Let. `start` explicitly selects the default. Invalid
+options fail with exit 2. The gate uses `Wants=chrony.service` so its timeout
+policy also applies when chrony fails to start. Missing/failed/hung queries and
+malformed tracking never count as readiness. `After=time-sync.target` alone
+does not wait for a correction. Inspect `journalctl -u outpostnet-time-ready`;
+a successful unit can mean either readiness or the reported timeout policy.
+The same environment file can configure the minimum continuous LOCAL dwell in
+seconds, for example (60s is also the default):
+
+```ini
+OUTPOSTNET_TIME_LOCAL_DWELL=60
+```
+
+Choose a dwell long enough for several iburst/NTS-KE rounds on the deployment's
+links. It must fit within the gate's timeout for LOCAL to pass; it does not extend
+the timeout or change the configured timeout action. Dwell values must be finite
+and greater than zero.
+For manual checks, the script supports `--timeout`, `--interval`, `--local-dwell`,
+`--on-timeout start|fail`, `--chronyc`, and a local command `--socket`.
+After changing policy, use `systemctl daemon-reload` and restart the gate before
+retrying blocked consumers; it is a oneshot with `RemainAfterExit=yes`.
 
 This startup gate does not stop workloads on later source loss. At runtime the
 existing time-reference quality/holdover reporting continues. Do not tie the
@@ -155,6 +215,16 @@ cookies, non-peer access is denied, and the unchanged time-source parser accepts
 actual follower tracking. Test processes use a private executable copy to keep
 distribution AppArmor path rules from restricting temporary test files; the
 installed daemon/profile remain untouched. CI installs chrony and runs this test.
+The same three-process fixture checks that the orphan leader passes as
+`local orphan reference` after a shortened test dwell, while the NTS follower
+passes as `synchronized source` with the default dwell longer than its timeout.
+It then disables the foreign process's local reference and
+checks that it waits until the bound and fails. `TestTimeReady*` exercises both
+timeout actions (including the default), correction/leap boundaries, invalid
+reports/options and missing, failed or hung queries through the script CLI.
+Scripted tracking tests cover LOCAL followed by large then small source correction
+(only the last passes as `synchronized source`), sustained LOCAL past its dwell,
+and interruption/reset of the continuous LOCAL interval.
 
 The process fixture shortens polling and, where supported, orphan activation
 delay; it parses the original generated policy unchanged first. Production keeps
