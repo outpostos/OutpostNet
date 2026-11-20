@@ -26,7 +26,7 @@ import (
 
 func newChronyCommand() *cobra.Command {
 	var configFile, peersFile, output, unit, sock, pps, socket string
-	var shm int
+	var shm, ntpPort, ntskePort int
 	var apply, watch bool
 	var interval time.Duration
 	cmd := &cobra.Command{Use: "chrony", Short: "Render or maintain group chrony/NTS configuration", Args: cobra.NoArgs}
@@ -41,6 +41,8 @@ func newChronyCommand() *cobra.Command {
 	cmd.Flags().IntVar(&shm, "gnss-shm", -1, "Configured gpsd SHM unit (0-255)")
 	cmd.Flags().StringVar(&sock, "gnss-sock", "", "Configured gpsd chrony SOCK path")
 	cmd.Flags().StringVar(&pps, "pps", "", "Optional PPS device; requires a configured GNSS receiver")
+	cmd.Flags().IntVar(&ntpPort, "ntp-port", 123, "Group-wide NTP UDP port (listen and per-source)")
+	cmd.Flags().IntVar(&ntskePort, "ntske-port", 4460, "Group-wide NTS-KE TCP port (listen and per-source)")
 	cmd.MarkFlagRequired("config")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
@@ -59,6 +61,9 @@ func newChronyCommand() *cobra.Command {
 		if !strings.HasSuffix(unit, ".service") || strings.HasPrefix(unit, "-") || strings.ContainsAny(unit, "/ \t\r\n") {
 			return fmt.Errorf("invalid chrony service unit")
 		}
+		if ntpPort < 1 || ntpPort > 65535 || ntskePort < 1 || ntskePort > 65535 {
+			return fmt.Errorf("NTP and NTS-KE ports must be 1-65535")
+		}
 		gnss := chrony.GNSS{PPS: pps}
 		if shm >= 0 {
 			gnss.Driver = "SHM"
@@ -74,7 +79,7 @@ func newChronyCommand() *cobra.Command {
 		update := func() error {
 			probe, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			data, digest, err := renderChrony(probe, configFile, peersFile, socket, gnss)
+			data, digest, err := renderChrony(probe, configFile, peersFile, socket, gnss, ntpPort, ntskePort)
 			if err != nil {
 				return err
 			}
@@ -117,7 +122,7 @@ func newChronyCommand() *cobra.Command {
 	return cmd
 }
 
-func renderChrony(ctx context.Context, configFile, peersFile, socket string, gnss chrony.GNSS) ([]byte, [32]byte, error) {
+func renderChrony(ctx context.Context, configFile, peersFile, socket string, gnss chrony.GNSS, ntpPort, ntskePort int) ([]byte, [32]byte, error) {
 	var zero [32]byte
 	cfg, err := agentconfig.LoadConfig(configFile)
 	if err != nil {
@@ -169,7 +174,7 @@ func renderChrony(ctx context.Context, configFile, peersFile, socket string, gns
 	if err := json.Unmarshal(b, &peers); err != nil || strings.TrimSpace(string(b)) == "null" {
 		return nil, zero, fmt.Errorf("Net peers must be a JSON array")
 	}
-	data, err := chrony.Render(ctx, chrony.Config{NodeID: cfg.NodeID, CAFile: cfg.TLS.CAFile, CertFile: cfg.TLS.CertFile, KeyFile: cfg.TLS.KeyFile, GNSS: gnss}, peers, nil)
+	data, err := chrony.Render(ctx, chrony.Config{NodeID: cfg.NodeID, CAFile: cfg.TLS.CAFile, CertFile: cfg.TLS.CertFile, KeyFile: cfg.TLS.KeyFile, GNSS: gnss, NTPPort: ntpPort, NTSKEPort: ntskePort}, peers, nil)
 	if err != nil {
 		return nil, zero, err
 	}

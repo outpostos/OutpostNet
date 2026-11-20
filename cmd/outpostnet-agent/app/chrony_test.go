@@ -63,6 +63,38 @@ func TestChronyCLIRenderAndRejectInvalidCredentials(t *testing.T) {
 	}
 }
 
+func TestChronyCLINonDefaultPorts(t *testing.T) {
+	_, config, peers := chronyFixture(t)
+	run := func(extra ...string) (string, error) {
+		c := NewAgentCommand()
+		c.SetArgs(append([]string{"chrony", "--config", config, "--peers", peers}, extra...))
+		var b bytes.Buffer
+		c.SetOut(&b)
+		c.SetErr(&b)
+		err := c.Execute()
+		return b.String(), err
+	}
+	out, err := run("--ntp-port", "1234", "--ntske-port", "4461")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\nport 1234\n",
+		"\nntsport 4461\n",
+		"server 192.0.2.2 port 1234 ntsport 4461 iburst nts certset 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if out, err := run("--ntp-port", "0"); err == nil {
+		t.Fatalf("accepted invalid NTP port: %s", out)
+	}
+	if out, err := run("--ntske-port", "70000"); err == nil {
+		t.Fatalf("accepted invalid NTS-KE port: %s", out)
+	}
+}
+
 func TestChronyCLIWatchAppliesPeerAndCertificateChangesAndRetries(t *testing.T) {
 	dir, config, peers := chronyFixture(t)
 	// External process boundaries; no real host service is touched.
