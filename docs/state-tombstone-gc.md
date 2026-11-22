@@ -189,9 +189,13 @@ answers a push or digest pull from requester `Q` (horizon `H_Q`, node ID
   at the same address: the push progress it inherits was acknowledged by the
   state that is gone. Such a requester is refused on its first exchange and
   adopts `H_R` (`TestWipedRequesterWithSameIdentityIsRefusedOnFirstExchange`).
-  The cost in a healthy cluster is one resync per node, once in its lifetime:
+  With serial exchanges this costs one resync per other node at startup:
   when the first node of a fresh cluster collects, every node that has not
   collected yet adopts its horizon instead; a horizon never returns to zero.
+  NET-HOL-1 allows concurrent pushes: several peers may refuse requests carrying
+  horizon zero before the first adoption finishes, so those already-started
+  exchanges can each resync. This does not change the zero-horizon rule or
+  acknowledgement gate; subsequent fresh requests carry the adopted horizon.
 
 The digest check (case 2 above) and the per-entry `beyond_gc_horizon` rejection
 are unchanged and apply to vouched requesters as well.
@@ -269,11 +273,15 @@ collected tombstone before any node collected it (the GC gate), no node holds a
 value below another node's horizon for a key the other lacks, no push entry is
 refused and no resync adopts anything. Once every member has a non-zero horizon,
 every lower-horizon request comes from a vouched member, so no 410 is sent and
-no resync runs. Before that, each member that has not collected yet resyncs
-once from the first collector (the zero-horizon condition above):
-`TestHealthyStaggeredGCNeverForcesResync` measures 1 (two replicas) and 2 (three
-replicas) such resyncs in the first 24 rounds and 0 in the remaining 576 (memory)
-or 96 (`DurableStore`) rounds.
+no resync runs. Before that, members with horizon zero adopt a collecting
+peer's horizon through snapshot resync (the zero-horizon condition above).
+The original serial `TestHealthyStaggeredGCNeverForcesResync` measured 1 (two
+replicas) and 2 (three replicas) such resyncs in the first 24 rounds and 0 in
+the remaining 576 (memory) or 96 (`DurableStore`) rounds. With NET-HOL-1's
+concurrent peers, the harness requires each startup snapshot to match a
+zero-horizon refusal and bounds them by the possible in-flight first-adoption
+requests (at most 1 / 3 for its serial node traversal). The requirement of
+**zero resyncs after warm-up** is unchanged; see [NET-HOL-1 evidence](state-peer-push-net-hol-1.md).
 
 **Residual (unchanged class).** Vouching relies on push progress, which is keyed
 by peer address: if a different node takes over an address, the node ID learned

@@ -27,7 +27,10 @@ components that report to it ([observation.md](observation.md) section 7).
 `GossipConfig.MaxPushBytes` (768 KiB by default, including the envelope) and
 `MaxPushPagesPerRound` (16 per peer per round). Every acknowledged page saves
 its cursor before the next is sent. Failed transfers resume after confirmed
-pages; a capped round yields to the next peer. The push-round caught-up fact
+pages; a capped round waits for that peer's next tick. Periodic pushes run
+independently per peer, with at most one unfinished round per peer, so a slow
+or unreachable peer does not hold up another peer's next tick. The push-round
+caught-up fact
 only covers the local position read at the start of that round.
 
 Memory and durable stores bound local writes by `MaxEntryBytes` (512 KiB of

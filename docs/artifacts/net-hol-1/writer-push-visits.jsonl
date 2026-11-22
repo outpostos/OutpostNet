@@ -1,0 +1,6 @@
+{"kind": "push", "monotonic_ns": 316768196632424, "node": "node1", "start_position": 918975, "time": 1795370109.930194, "time_utc": "2026-11-22T17:55:09.930194+00:00", "value": "node4"}
+{"kind": "push", "monotonic_ns": 316778198832169, "node": "node1", "start_position": 918978, "time": 1795370119.9326353, "time_utc": "2026-11-22T17:55:19.932635+00:00", "value": "node0"}
+{"kind": "push", "monotonic_ns": 316778202455910, "node": "node1", "start_position": 918978, "time": 1795370119.936079, "time_utc": "2026-11-22T17:55:19.936079+00:00", "value": "node3"}
+{"kind": "push", "monotonic_ns": 316788203437672, "node": "node1", "start_position": 918985, "time": 1795370129.9368656, "time_utc": "2026-11-22T17:55:29.936866+00:00", "value": "node4"}
+{"kind": "push", "monotonic_ns": 316798203852582, "node": "node1", "start_position": 918990, "time": 1795370139.937121, "time_utc": "2026-11-22T17:55:39.937121+00:00", "value": "node0"}
+{"kind": "push", "monotonic_ns": 316798208920104, "node": "node1", "start_position": 918990, "time": 1795370139.942085, "time_utc": "2026-11-22T17:55:39.942085+00:00", "value": "node3"}

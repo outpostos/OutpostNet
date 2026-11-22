@@ -86,6 +86,8 @@ supported by the baseline; no extra locking or protocol changes were needed.
 
 These are local library and HTTP tests. No VM deployment, operating-system clock
 changes, power-loss validation, cross-repository dependency upgrades or Range
-2+2 scenario are part of NET-12. The contract permits one push and one pull at a
-time; it does not add parallel rounds of the same kind or parallelize peers
-within either loop.
+2+2 scenario are part of NET-12. NET-12 did not parallelize peers within either
+loop. [NET-HOL-1](state-peer-push-net-hol-1.md) subsequently adds independent
+periodic push rounds per peer and concurrent manual push fanout. Each peer
+still has at most one unfinished push round; the pull loop and manual round
+non-reentrancy contract remain unchanged.

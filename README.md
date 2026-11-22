@@ -234,6 +234,7 @@ own repositories and report their own replication status.
 - [Service directory counters and lease validity](docs/directory-observation.md)
 - [State primitives (`pkg/state`)](pkg/state/README.md) and [tombstone GC / compaction](docs/state-tombstone-gc.md)
 - [Shared time reference and replication status clock](docs/time-reference.md)
+- [Independent periodic peer pushes and NET-HOL-1 evidence](docs/state-peer-push-net-hol-1.md)
 - [Resync loss archives, counters and early warnings](docs/resync-loss.md)
 - [Local clock alarm and offline state reset](docs/clock-reset.md)
 - [OS time source, quality and shared host reference](docs/os-time-source.md)
