@@ -1,0 +1,25 @@
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers/durable=false
+    gossip_peer_push_test.go:103: during-blackholes-0 delivered in 199.353088ms (interval 200ms + processing 100ms)
+    gossip_peer_push_test.go:103: during-blackholes-1 delivered in 199.101346ms (interval 200ms + processing 100ms)
+    gossip_peer_push_test.go:103: during-blackholes-2 delivered in 200.319894ms (interval 200ms + processing 100ms)
+2026/11/22 11:14:44 WARN state gossip: peer sync failed peer=http://127.0.0.1:57024 operation=push err="POST http://127.0.0.1:57024/state/v1/push: Post \"http://127.0.0.1:57024/state/v1/push\": context canceled" retryAt=2026-11-22T12:14:44.109-08:00
+2026/11/22 11:14:44 WARN state gossip: peer sync failed peer=http://127.0.0.1:57023 operation=push err="POST http://127.0.0.1:57023/state/v1/push: Post \"http://127.0.0.1:57023/state/v1/push\": context canceled" retryAt=2026-11-22T12:14:44.109-08:00
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers/durable=true
+    gossip_peer_push_test.go:103: during-blackholes-0 delivered in 203.889028ms (interval 200ms + processing 100ms)
+    gossip_peer_push_test.go:103: during-blackholes-1 delivered in 198.639987ms (interval 200ms + processing 100ms)
+    gossip_peer_push_test.go:103: during-blackholes-2 delivered in 200.173163ms (interval 200ms + processing 100ms)
+2026/11/22 11:14:45 WARN state gossip: peer sync failed peer=http://127.0.0.1:57032 operation=push err="POST http://127.0.0.1:57032/state/v1/push: Post \"http://127.0.0.1:57032/state/v1/push\": context canceled" retryAt=2026-11-22T12:14:45.115-08:00
+2026/11/22 11:14:45 WARN state gossip: peer sync failed peer=http://127.0.0.1:57033 operation=push err="POST http://127.0.0.1:57033/state/v1/push: Post \"http://127.0.0.1:57033/state/v1/push\": context canceled" retryAt=2026-11-22T12:14:45.115-08:00
+--- PASS: TestGossipRunPushIsolatesBlackholedPeers (1.83s)
+    --- PASS: TestGossipRunPushIsolatesBlackholedPeers/durable=false (0.81s)
+    --- PASS: TestGossipRunPushIsolatesBlackholedPeers/durable=true (1.02s)
+=== RUN   TestGossipSyncOncePeersProgressIndependently
+2026/11/22 11:14:45 WARN state gossip: peer sync failed peer=blackhole-a operation=push err="unreachable blackhole-a" retryAt=2026-11-22T12:14:45.771-08:00
+2026/11/22 11:14:45 WARN state gossip: peer sync failed peer=blackhole-b operation=push err="unreachable blackhole-b" retryAt=2026-11-22T12:14:45.771-08:00
+--- PASS: TestGossipSyncOncePeersProgressIndependently (0.06s)
+=== RUN   TestGossipSyncOnceLocalFailureCancelsAndJoins
+2026/11/22 11:14:45 WARN state gossip: peer sync failed peer=two operation=push err="context canceled" retryAt=2026-11-22T12:14:45.791-08:00
+--- PASS: TestGossipSyncOnceLocalFailureCancelsAndJoins (0.03s)
+PASS
+ok  	github.com/outpostos/OutpostNet/pkg/state	3.485s

@@ -26,10 +26,19 @@ Concurrency (NET-12):
   with each other, inbound handlers and `ReplicationStatus`. Each round method
   is non-reentrant: serialize calls to the same method. Custom stores, syncers,
   peer providers and policy/clock callbacks must support concurrent use.
-- `Run` owns one push loop and one pull loop. Do not overlap it with manual
-  rounds or another `Run`. Slow push and digest exchanges do not block the
-  other loop. Maintenance follows pull rounds; cancellation joins both loops,
+- `Run` owns the push timer and one pull loop. On each push tick it starts
+  concurrent rounds for idle peers outside backoff. A peer with an unfinished
+  push skips that tick; other peers keep their configured cadence. There is at
+  most one outstanding push round per peer, including all pages and resync.
+  There is no write-triggered push or queued retry when a busy peer finishes:
+  it waits for a later tick. Do not overlap `Run` with manual rounds or another
+  `Run`. Maintenance follows pull rounds; cancellation joins all exchanges,
   so transports must honor their context.
+- Manual `SyncOnce` fans out to peers and joins every started push before
+  returning their errors. A local page/refusal-read failure cancels and joins
+  its concurrent pushes. Repeated manual calls retain this caller-level
+  barrier; use `Run` for independent periodic peer scheduling. Pull peer order
+  is unchanged. See [NET-HOL-1 diagnosis and regression](../../docs/state-peer-push-net-hol-1.md).
 - Push owns the outbound cursor; digest rounds always start fresh. Backoff is
   shared: a completed success clears it, while a later failure sets it again.
   Error history survives successes. A pull that started before a concurrent
@@ -50,7 +59,7 @@ Push paging and write limits (NET-7):
 - `GossipConfig.MaxPushBytes` defaults to 768 KiB of encoded JSON request,
   including its envelope. Push walks local positions in order, acknowledging
   and saving progress after each page. `MaxPushPagesPerRound` defaults to 16
-  per peer; remaining pages wait for the next round so other peers get a turn.
+  per peer; remaining pages wait for that peer's next round.
   A transport or progress-save failure resumes from the last saved position.
   A transient rejection stops at the confirmed prefix; `clock_offset` refusals
   are skipped and tracked separately for GC/vouching (ADR-0006 D3/D4). A 410 or a

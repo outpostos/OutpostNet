@@ -1,0 +1,35 @@
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-agent	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-agent/app	3.412s
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-controller/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-server/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-service/app	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar	[no test files]
+?   	github.com/outpostos/OutpostNet/cmd/outpostnet-sidecar/app	[no test files]
+ok  	github.com/outpostos/OutpostNet/cmd/outpostnet-state-reset	1.592s
+ok  	github.com/outpostos/OutpostNet/deploy/docker	1.787s
+ok  	github.com/outpostos/OutpostNet/internal/agent	4.740s
+ok  	github.com/outpostos/OutpostNet/internal/chrony	37.071s
+ok  	github.com/outpostos/OutpostNet/internal/controller/reconciler	2.946s
+ok  	github.com/outpostos/OutpostNet/internal/controller/webhook	1.992s
+ok  	github.com/outpostos/OutpostNet/internal/meshdirectory	2.757s
+ok  	github.com/outpostos/OutpostNet/internal/observation	1.699s
+?   	github.com/outpostos/OutpostNet/internal/observation/observationtest	[no test files]
+?   	github.com/outpostos/OutpostNet/internal/peerredact	[no test files]
+ok  	github.com/outpostos/OutpostNet/internal/server	3.060s
+ok  	github.com/outpostos/OutpostNet/internal/servicehost	51.893s
+ok  	github.com/outpostos/OutpostNet/internal/sidecar	2.126s
+ok  	github.com/outpostos/OutpostNet/pkg/agentconfig	1.803s
+ok  	github.com/outpostos/OutpostNet/pkg/annotations	1.718s
+ok  	github.com/outpostos/OutpostNet/pkg/config	1.849s
+ok  	github.com/outpostos/OutpostNet/pkg/delivery	217.328s
+ok  	github.com/outpostos/OutpostNet/pkg/protocol	1.892s
+ok  	github.com/outpostos/OutpostNet/pkg/service	6.724s
+ok  	github.com/outpostos/OutpostNet/pkg/state	168.912s
+?   	github.com/outpostos/OutpostNet/pkg/state/httpauth	[no test files]
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel	15.327s
+ok  	github.com/outpostos/OutpostNet/pkg/tunnel/tlsutil	1.556s
+?   	github.com/outpostos/OutpostNet/pkg/version	[no test files]
+ok  	github.com/outpostos/OutpostNet/test/e2e	4.283s

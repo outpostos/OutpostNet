@@ -1,0 +1,10 @@
+{
+  "mac_linux_match": true,
+  "sha256": {
+    "pkg/state/gossip.go": "f71499f0fa810743a5d1b7898fb0e2aa6edd8260e6e30cd430792d8b01e160ed",
+    "pkg/state/gossip_peer_push_test.go": "2919afeb07fa283a0a2d941f8fab30a1b36c1a431ba24365215582f305ce2df6",
+    "pkg/state/gc_test.go": "a92ad93c5c6fa9ddc45b4000d9b8f1a7f9fb4a74108c8479c3b5bd5cce62bcdf",
+    "pkg/state/gc_resync_churn_test.go": "1370dfa3a314dcaabec2e9d35342c7acfd1b4bb15ed2e147b0a0dd38f47c90a0",
+    "pkg/state/push_progress_test.go": "391888318928121a3a3b1a7f9f5c07ad3be87b4f153f9ebb474c1f7864d485e7"
+  }
+}

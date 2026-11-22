@@ -1,0 +1,13 @@
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers/durable=false
+    gossip_peer_push_test.go:97: reachable peer did not receive during-blackholes-0 within one push interval (200ms) plus processing (100ms) while other connections hang
+2026/11/22 11:16:48 WARN state gossip: peer sync failed peer=http://127.0.0.1:59164 operation=push err="POST http://127.0.0.1:59164/state/v1/push: Post \"http://127.0.0.1:59164/state/v1/push\": context canceled" retryAt=2026-11-22T12:16:48.059-08:00
+=== RUN   TestGossipRunPushIsolatesBlackholedPeers/durable=true
+    gossip_peer_push_test.go:97: reachable peer did not receive during-blackholes-0 within one push interval (200ms) plus processing (100ms) while other connections hang
+2026/11/22 11:16:49 WARN state gossip: peer sync failed peer=http://127.0.0.1:59196 operation=push err="POST http://127.0.0.1:59196/state/v1/push: Post \"http://127.0.0.1:59196/state/v1/push\": context canceled" retryAt=2026-11-22T12:16:48.717-08:00
+--- FAIL: TestGossipRunPushIsolatesBlackholedPeers (1.19s)
+    --- FAIL: TestGossipRunPushIsolatesBlackholedPeers/durable=false (0.52s)
+    --- FAIL: TestGossipRunPushIsolatesBlackholedPeers/durable=true (0.67s)
+FAIL
+FAIL	github.com/outpostos/OutpostNet/pkg/state	2.235s
+FAIL

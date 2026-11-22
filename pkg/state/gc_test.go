@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -118,7 +119,7 @@ func TestLocalStoreCollectsTombstonesOnlyAfterRetention(t *testing.T) {
 // loopNet routes in-process gossip between engines with a directional blocklist.
 type loopNet struct {
 	clockAheadPath  string
-	clockInjections int
+	clockInjections atomic.Int64
 	digestBytes     int64
 	mu              sync.Mutex
 	engines         map[string]*GossipEngine
@@ -161,7 +162,7 @@ func newClockLoopNet(t *testing.T, budget int64, path []string) *loopNet {
 	}
 	if net.clockAheadPath != "" {
 		t.Cleanup(func() {
-			if net.clockInjections == 0 {
+			if net.clockInjections.Load() == 0 {
 				t.Fatal("clock-ahead path was not exercised")
 			}
 		})
@@ -170,7 +171,7 @@ func newClockLoopNet(t *testing.T, budget int64, path []string) *loopNet {
 }
 
 func (n *loopNet) clockEntry(receiver *GossipEngine, key string) Entry {
-	n.clockInjections++
+	n.clockInjections.Add(1)
 	now := receiver.store.(interface{ TimeReferenceMS() int64 }).TimeReferenceMS()
 	return newEntryForTest(key, []byte("refused"), "clock-ahead-writer", 1, Timestamp{WallMS: now + 600_000})
 }

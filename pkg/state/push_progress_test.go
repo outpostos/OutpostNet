@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -114,16 +115,19 @@ func TestPushPageFailureResumesAfterConfirmedPage(t *testing.T) {
 func TestPushPageBudgetGivesOtherPeersATurn(t *testing.T) {
 	store := limitedPagingStore(t, false, "source")
 	seedPages(t, store, 12)
-	var order []string
+	var mu sync.Mutex
+	visits := make(map[string]int)
 	g := pageEngine(t, store, pageSyncer{push: func(addr string, req PushRequest) (*PushResponse, error) {
-		order = append(order, addr)
+		mu.Lock()
+		visits[addr]++
+		mu.Unlock()
 		return nil, nil
 	}}, 2, "behind", "other")
 	if err := g.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(order) != "[behind behind other other]" {
-		t.Fatalf("peer order = %v", order)
+	if visits["behind"] != 2 || visits["other"] != 2 {
+		t.Fatalf("per-peer page budget = %v", visits)
 	}
 	for _, peer := range []string{"behind", "other"} {
 		s := peerStatusFor(t, g, peer)

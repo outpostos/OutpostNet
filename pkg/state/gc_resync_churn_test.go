@@ -19,8 +19,9 @@ type countingSyncer struct {
 	// pushRefused counts pushes refused with ResyncRequiredError. HandlePush
 	// returns that error only from the request-level horizon check, so this is
 	// the number of lower-horizon 410s the pusher received.
-	pushRefused *atomic.Int64
-	strip       func() bool
+	pushRefused        *atomic.Int64
+	zeroHorizonRefused *atomic.Int64
+	strip              func() bool
 }
 
 func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) (*PushResponse, error) {
@@ -28,6 +29,9 @@ func (s countingSyncer) Push(ctx context.Context, addr string, req PushRequest) 
 	var resync *ResyncRequiredError
 	if errors.As(err, &resync) {
 		s.pushRefused.Add(1)
+		if timestampValue(req.GCHorizon).isZero() {
+			s.zeroHorizonRefused.Add(1)
+		}
 	}
 	if resp != nil && s.strip() {
 		resp.NodeID = ""
@@ -40,7 +44,12 @@ func (s countingSyncer) PullSnapshot(ctx context.Context, addr string, req PullR
 		// Every resync starts with the page at position 0.
 		s.snapshots.Add(1)
 	}
-	return s.loopSyncer.PullSnapshot(ctx, addr, req)
+	resp, err := s.loopSyncer.PullSnapshot(ctx, addr, req)
+	var resync *ResyncRequiredError
+	if errors.As(err, &resync) && req.StartKey != nil && timestampValue(req.GCHorizon).isZero() {
+		s.zeroHorizonRefused.Add(1)
+	}
+	return resp, err
 }
 
 type churnNode struct {
@@ -62,7 +71,8 @@ type churnCluster struct {
 	net     *loopNet
 	resyncs atomic.Int64
 	// pushRefused counts request-level lower-horizon 410s on pushes.
-	pushRefused atomic.Int64
+	pushRefused        atomic.Int64
+	zeroHorizonRefused atomic.Int64
 	// stripNodeID, when set for a pusher, removes node_id from the push
 	// responses it receives, modelling 03b peers that never send it.
 	stripNodeID map[string]bool
@@ -120,7 +130,7 @@ func (c *churnCluster) attachNode(t *testing.T, id string, peers []string, store
 	engine, err := NewGossipEngine(GossipConfig{
 		NodeID:       id,
 		Store:        store,
-		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, pushRefused: &c.pushRefused, strip: func() bool { return c.stripNodeID[id] }},
+		Syncer:       countingSyncer{loopSyncer: loopSyncer{net: c.net, from: id}, snapshots: &c.resyncs, pushRefused: &c.pushRefused, zeroHorizonRefused: &c.zeroHorizonRefused, strip: func() bool { return c.stripNodeID[id] }},
 		PeerProvider: PeerProviderFunc(func() []string { return peerList.Load() }),
 	})
 	if err != nil {
@@ -221,8 +231,11 @@ const warmUpRounds = 24
 // assertFirstCollectionAdoption checks the only resyncs a healthy cluster may
 // perform: while a node still has horizon zero it is not vouched by a node that
 // collected (03d review C), so the first collector in a fresh cluster resyncs
-// each other node once and they adopt its horizon. A horizon never returns to
-// zero, so that is at most one resync per other node in the cluster lifetime.
+// each other node and they adopt its horizon. Concurrent pushes can receive
+// multiple zero-horizon refusals before any adoption finishes. This harness
+// exchanges one node at a time, so each later node can be refused by at most
+// the preceding nodes. Every startup resync must match a zero-horizon refusal;
+// after warm-up the unchanged requirement is zero additional resyncs.
 func assertFirstCollectionAdoption(t *testing.T, cluster *churnCluster) int64 {
 	t.Helper()
 	for _, node := range cluster.nodes {
@@ -231,10 +244,14 @@ func assertFirstCollectionAdoption(t *testing.T, cluster *churnCluster) int64 {
 		}
 	}
 	got := cluster.resyncs.Load()
-	if limit := int64(len(cluster.nodes) - 1); got > limit {
-		t.Fatalf("warm-up performed %d snapshot resyncs, want at most %d (one first-horizon adoption per other node)", got, limit)
+	if refusals := cluster.zeroHorizonRefused.Load(); got != refusals {
+		t.Fatalf("warm-up performed %d snapshot resyncs for %d zero-horizon refusals", got, refusals)
+	}
+	if limit := int64(len(cluster.nodes) * (len(cluster.nodes) - 1) / 2); got > limit {
+		t.Fatalf("warm-up performed %d snapshot resyncs, want at most %d concurrent first-horizon adoptions", got, limit)
 	}
 	cluster.resyncs.Store(0)
+	cluster.zeroHorizonRefused.Store(0)
 	return got
 }
 
