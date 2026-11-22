@@ -72,6 +72,7 @@ type GossipEngine struct {
 }
 
 type peerState struct {
+	pushInFlight               bool
 	unreachableSince           time.Time
 	unreachableFor             time.Duration
 	resyncLossLimitApproaching bool
@@ -215,8 +216,10 @@ func NewGossipEngine(cfg GossipConfig) (*GossipEngine, error) {
 }
 
 // Run runs independent periodic push and pull loops until ctx is canceled.
-// A slow digest round does not block pushes. Maintenance follows pull rounds.
-// Run waits for both loops to finish before returning; Syncer calls must honor ctx.
+// Each push tick starts a round for every idle peer outside backoff. A peer's
+// unfinished push skips its ticks without delaying other peers. A slow digest
+// round does not block pushes. Maintenance follows pull rounds.
+// Run joins all exchanges before returning; Syncer calls must honor ctx.
 func (g *GossipEngine) Run(ctx context.Context) error {
 	pushTicker := time.NewTicker(g.interval)
 	defer pushTicker.Stop()
@@ -228,12 +231,25 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 	pushDone := make(chan struct{})
 	go func() {
 		defer close(pushDone)
+		var pushes sync.WaitGroup
+		defer pushes.Wait()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-pushTicker.C:
-				_ = g.SyncOnce(ctx)
+				g.checkResyncLossWarnings()
+				now := time.Now()
+				for _, addr := range g.peerProvider.Peers() {
+					if ctx.Err() != nil || !g.beginPush(addr, now) {
+						continue
+					}
+					pushes.Add(1)
+					go func() {
+						defer pushes.Done()
+						_ = g.pushPeerOnce(ctx, addr, now)
+					}()
+				}
 			}
 		}
 	}()
@@ -250,44 +266,78 @@ func (g *GossipEngine) Run(ctx context.Context) error {
 	}
 }
 
-// SyncOnce performs one incremental push round.
-// It may overlap AntiEntropyOnce and handlers, but must not overlap another
-// SyncOnce call (including Run's push loop).
+// SyncOnce pushes to idle peers outside backoff concurrently and waits for them.
+// It may overlap AntiEntropyOnce and handlers. Serialize manual calls and do
+// not call it while Run owns push scheduling.
 func (g *GossipEngine) SyncOnce(ctx context.Context) error {
 	g.checkResyncLossWarnings()
-	var errs []error
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	peers := g.peerProvider.Peers()
+	errs := make([]error, len(peers))
+	var pushes sync.WaitGroup
 	now := time.Now()
-	for _, addr := range g.peerProvider.Peers() {
-		if ok, until := g.allowAttempt(addr, now); !ok {
-			slog.Debug("state gossip: peer in backoff", "peer", redactedPeerURL(addr), "until", until)
+	for i, addr := range peers {
+		if !g.beginPush(addr, now) {
 			continue
 		}
-		// The round can only claim the local position read before it collects
-		// its changes; anything written later belongs to the next round.
-		started := g.timestamp()
-		startPosition := g.store.CurrentPosition()
-		caughtUp, err := g.pushTo(ctx, addr, startPosition, now)
-		if err == nil {
-			refused, readErr := g.peerRefusals(ctx, addr)
-			if readErr != nil {
-				err = &localStoreError{err: readErr}
-			}
-			caughtUp = caughtUp && len(refused) == 0
-		}
-		g.recordPushRound(addr, started, caughtUp)
-		if err != nil {
+		pushes.Add(1)
+		go func() {
+			defer pushes.Done()
+			errs[i] = g.pushPeerOnce(ctx, addr, now)
 			var local *localStoreError
-			if errors.As(err, &local) {
-				return local.err
+			if errors.As(errs[i], &local) {
+				cancel()
 			}
-			errs = append(errs, err)
+		}()
+	}
+	pushes.Wait()
+	for _, err := range errs {
+		var local *localStoreError
+		if errors.As(err, &local) {
+			return local.err
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// localStoreError marks a failure of the local store, which aborts the whole
-// push round instead of being charged to one peer.
+// Claim the peer before launching work, bounding outstanding pushes to one per
+// peer even when a request lasts many ticks or the provider repeats an address.
+func (g *GossipEngine) beginPush(addr string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.peerStateLocked(addr)
+	if state.pushInFlight || state.nextAttempt.After(now) {
+		return false
+	}
+	state.pushInFlight = true
+	return true
+}
+
+func (g *GossipEngine) pushPeerOnce(ctx context.Context, addr string, now time.Time) error {
+	defer func() {
+		g.mu.Lock()
+		g.peerStateLocked(addr).pushInFlight = false
+		g.mu.Unlock()
+	}()
+	// Only the local position read before collecting changes is this peer's
+	// round target; subsequent writes belong to its next timer-driven round.
+	started := g.timestamp()
+	startPosition := g.store.CurrentPosition()
+	caughtUp, err := g.pushTo(ctx, addr, startPosition, now)
+	if err == nil {
+		refused, readErr := g.peerRefusals(ctx, addr)
+		if readErr != nil {
+			err = &localStoreError{err: readErr}
+		}
+		caughtUp = caughtUp && len(refused) == 0
+	}
+	g.recordPushRound(addr, started, caughtUp)
+	return err
+}
+
+// localStoreError marks a local failure instead of charging it to a peer.
+// SyncOnce cancels and joins its fanout before returning this error.
 type localStoreError struct{ err error }
 
 func (e *localStoreError) Error() string { return e.err.Error() }
